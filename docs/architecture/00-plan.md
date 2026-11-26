@@ -400,3 +400,8 @@ fixes. 4. Verification: tests, evals, stack smoke and load run, slide layout, pr
   pre-generation retrieval gate and post-generation faithfulness and answer-relevancy checks; online sampled RAGAS
   metrics with an in-region judge; scheduled nightly, weekly and monthly evals; release gate), RAGAS release
   thresholds, and runtime operations metrics (per-stage p95, tokens per request, cost) with alerts. ADR-027.
+- v2.7a (26 Nov): prototype feedback. Each agent performs its own token exchange from the RM token (web-bff cannot
+  know the agent in advance); the supervisor routes by rules in the pilot (every entry point carries its intent),
+  so it makes no model call; memory persistence and per-customer memory keys sit behind tool-gateway's internal API
+  (the orchestrator keeps no Cosmos or key access); agents hold read-only memory roles and only an approval-verified
+  commit creates an episode; episodes are approved call reports only.
