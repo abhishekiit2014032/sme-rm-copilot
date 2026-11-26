@@ -1,6 +1,6 @@
 # SME RM Copilot on Azure: delivery plan and architecture baseline
 
-Status: **v2.1 baseline (after ARB pre-review and ADR feedback)** · Owner: solution architecture · Date: 26 Nov 2026 · Presentation: Fri 27 Nov 2026
+Status: **v2.2 baseline (after ARB pre-review, ADR and SLA feedback)** · Owner: solution architecture · Date: 26 Nov 2026 · Presentation: Fri 27 Nov 2026
 
 This file is the single source of truth for every workstream. Docs, deck, prototype and code must use the
 names, numbers and decisions below. If a workstream needs to change one, it changes it here first and logs it in
@@ -68,7 +68,7 @@ Out of scope now: deploying to a real subscription, real bank data, vendor contr
 | Identity | Microsoft Entra ID | SSO, MFA, Conditional Access, app roles, OBO, workload identity | Approval needs authentication context / fresh sign-in; PIM for all admin roles |
 | Edge | Application Gateway WAF v2 (internal) | Only ingress for the sidebar and the Teams tab, reached from managed devices on the corporate network or Entra Private Access | OWASP rules, TLS 1.2+, CSP headers set by web-bff |
 | Compute | Azure Kubernetes Service (private cluster) | Runs all services | 3 zones, Azure CNI Overlay + Cilium network policy, workload identity, KEDA, local accounts off, Standard tier (uptime SLA) |
-| Gateway | Azure API Management (Premium, internal VNet) | **AI gateway** in front of Azure OpenAI and **system API facade** in front of the systems of record | `validate-jwt`, `llm-token-limit`, `llm-emit-token-metric`, backend pool with priority + circuit breaker + `retry`; request/response body logging **off**; semantic cache **off**. Per-RM limits keyed on an `x-rm-oid` header that APIM accepts only from the orchestrator's workload identity, plus a per-caller ceiling. Pilot 1 unit (single-zone dependency, an accepted pilot risk counted in the availability maths), production ≥ 2 units across zones **[confirm]** |
+| Gateway | Azure API Management (Premium, internal VNet) | **AI gateway** in front of Azure OpenAI and **system API facade** in front of the systems of record | `validate-jwt`, `llm-token-limit`, `llm-emit-token-metric`, backend pool with priority + circuit breaker + `retry`; request/response body logging **off**; semantic cache **off**. Per-RM limits keyed on an `x-rm-oid` header that APIM accepts only from the orchestrator's workload identity, plus a per-caller ceiling. **2 units across zones from the pilot** (APIM is on every path; one unit would be a single-zone dependency), scale 3 units **[confirm]** |
 | Models | Azure AI Foundry (Foundry resource + project) with Azure OpenAI deployments | `gen-large` (frontier GPT-class), `gen-small` (small GPT-class: routing, extraction), `embed` (text-embedding-3-large) | Regional Standard in pilot; PTU is a post-pilot gate on measured tokens; versions pinned, auto-upgrade off; `store=false`; content filters with Prompt Shields (jailbreak + indirect attack) on |
 | Safety | Azure AI Content Safety | Prompt Shields for user prompts and fetched documents, harm categories; groundedness detection only if offered in-region | Primary injection defence is the Azure OpenAI content filter + our own rules; standalone features used where available in UAE North **[confirm]** |
 | PII | Azure AI Language (PII detection) | Masks PII before any model call | Plus regex for Emirates ID, IBAN, trade licence, phone; Arabic coverage **[confirm]**, regex fallback always on |
@@ -77,7 +77,7 @@ Out of scope now: deploying to a real subscription, real bank data, vendor contr
 | Voice | Azure AI Speech (speech to text) | UC3 voice memos (Phase 2) | Audio deleted after transcription |
 | State | Azure Cosmos DB for NoSQL | Sessions, drafts, jti replay store (atomic create), outbox, entitlement cache, saga state | Zone-redundant; TTLs in §7; CMK; `disableLocalAuth`; periodic backup with geo-redundant backup storage (continuous backup does not survive region loss) **[confirm]**; containers per ADR-019 incl. `approvals` (jti, verdict, saga, outbox) and `audit-spool` (buffer if Event Hubs is unavailable) |
 | Config | Azure App Configuration | Feature flags and **kill switches** per use case and for all writes; prompt and model version pins | Changes audited; Sentinel playbook can flip a kill switch; turning off is one person, turning on is four-eyes; **writes are treated as disabled if App Configuration has been unreachable for 15 min** |
-| Audit stream | Azure Event Hubs (Standard, zone-redundant) | Audit event stream; producers wait for the ack | Private endpoint |
+| Audit stream | Azure Event Hubs (Standard in pilot, **Premium at scale** for the SLA, CMK and geo-replication), zone-redundant | Audit event stream; producers wait for the ack; Cosmos `audit-spool` takes over if Event Hubs is unavailable | Private endpoint |
 | Audit store | Azure Blob Storage, immutable (time-based retention), GZRS | Tamper-evident hash chain (one per Event Hubs partition) of metadata + content pointers; 5-minute seals copied to a seal store in a separately administered subscription | Retention per records policy (e.g. 7 years) **[confirm]** |
 | Audit content store | Separate Azure Blob Storage account, GZRS, not immutable | Masked prompts and outputs, each encrypted with a data key wrapped by a per-customer Key Vault key | Erasure = delete the customer key (crypto-shredding); completes after the Key Vault soft-delete/purge-protection window (≥ 7 days) |
 | Keys | Azure Key Vault Premium (HSM-backed keys); Managed HSM if the Bank's crypto standard requires single-tenant HSMs | Approval-signing key (EC P-256, ES256, `kid` versioned), CMKs, per-customer content keys, secrets for non-Entra APIs | `web-bff`: sign only; `tool-gateway`: public key only; orchestrator: none; rotation every 90 days with overlap |
@@ -119,7 +119,7 @@ CRM, core banking (via an ODS read replica), lending and trade finance (LOS), KY
 2. Application Gateway (WAF) → `web-bff` validates the token, gets the OBO token for `tool-gateway`, creates the request id and W3C `traceparent`, sets the request deadline (8 s).
 3. `web-bff` → `orchestrator`: intent `customer_brief` (fixed workflow; no router call when launched from a CRM record).
 4. `orchestrator` → `tool-gateway`: read tools with the RM's token. **Entitlement check first** (cache ≤ 60 s, invalidated by a CRM portfolio-change webhook through APIM). Denied → 403 `NOT_ENTITLED`, no data moves.
-5. `tool-gateway` → APIM system API facade → CRM, core banking ODS, LOS, KYC, news, in parallel, each with a deadline-derived timeout and a circuit breaker. A failed non-critical source (news, KYC) yields a **partial brief** with that section flagged.
+5. `tool-gateway` → APIM system API facade → CRM, core banking ODS, LOS, KYC, news, in parallel, each with a deadline-derived timeout and a circuit breaker. **Only the CRM profile is critical**; if LOS facilities, ODS transactions, KYC or news fail, the brief is returned with that section flagged as unavailable (partial brief).
 6. `tool-gateway` minimises and masks fields (no national ID; transactions aggregated), returns **facts** with source references, and writes one audit event per call to Event Hubs.
 7. `orchestrator` masks PII and runs Prompt Shields on fetched free text (documents), in parallel with the slowest tool calls.
 8. `orchestrator` → APIM AI gateway → Azure OpenAI `gen-large`: masked facts in, wording with `{placeholders}` out.
@@ -160,7 +160,7 @@ feed through the firewall allow-list.
 | Item | Target (illustrative) |
 |---|---|
 | Users | Pilot 30 RMs; scale 300 RMs; peak 0.5 requests/s; ~5,400 requests/day at scale |
-| Availability SLO | **Pilot 99.0% in business hours** (Mon–Fri 07:00–20:00 GST); scale 99.5%. "Available" = a correct answer **or** a clearly flagged degraded answer. Composite maths in `05-nfr-scenarios-and-dr.md` |
+| Availability SLO | **Pilot 99.0% in business hours** (Mon–Fri 07:00–20:00 GST); scale 99.5%, **committed only after 3 months of pilot measurements** and conditional on CRM ≥ 99.9% and Event Hubs Premium (maths in `05`). "Available" = a correct answer **or** a clearly flagged degraded answer. Composite maths in `05-nfr-scenarios-and-dr.md` |
 | Latency p95 (verified output, end to end) | UC1 brief ≤ 8 s; UC2 answer ≤ 7 s; UC3 draft ≤ 10 s; commit ≤ 2 s |
 | Deadlines | Set at `web-bff`, propagated as a header; every hop's timeout = min(own cap, remaining deadline − reserve). Tool cap 2 s; model cap = remaining deadline; failover to a second backend only if ≥ 4 s remain, else degraded mode |
 | RPO / RTO | Zone failure: audit RPO 0, RTO minutes (automatic). Region loss: audit RPO target ≤ 15 min (GZRS has no RPO guarantee unless geo priority replication is used **[confirm]**), app RTO best effort 24 h (BCP, only if UAE Central's catalogue allows the rebuild) |
@@ -219,6 +219,7 @@ Latency budget per use case (p95, ms):
 | Audit metadata hash chain | Immutable Blob (GZRS) | 7 years |
 | Audit content (masked prompts, outputs) | Encrypted store, per-customer key | 1 year, crypto-shred on erasure |
 | Telemetry (no content) | App Insights / Log Analytics | 90 days |
+| Outbox items, Event Hubs retention, restricted audit table, policy chunks and embeddings, golden-set evidence | Various | Proposals in `05-nfr-scenarios-and-dr.md` §retention, to confirm with records management |
 | Metrics | Managed Prometheus | 18 months (platform default) |
 
 ## 8. Workstreams and acceptance criteria
@@ -266,3 +267,8 @@ fixes. 4. Verification: tests, evals, stack smoke and load run, slide layout, pr
   first" release for UC1; Wilson-bound gates and a ≥ 1,000-attack red-team suite; Cosmos periodic geo backup;
   audit content store, seal store and audit spool named; crypto-shred timing; write kill switch fail-closed after
   15 min; DNS Private Resolver, in-network CI runners, Managed HSM option; CRM idempotency as a UC3 go-live gate.
+- v2.2 (26 Nov): SLA and availability review. APIM 2 units across zones from the pilot; only the CRM profile is
+  critical for UC1 (LOS, ODS, KYC, news degrade with a flag); Event Hubs Premium at scale with the Cosmos audit
+  spool as fallback; 99.5% scale SLO conditional on pilot measurements, CRM ≥ 99.9% and Event Hubs Premium;
+  retention gaps referenced to `05`. Deck contradictions (roadmap, data, security, metrics, evals, stack,
+  governance) sent to the deck workstream.
