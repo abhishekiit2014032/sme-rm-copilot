@@ -213,7 +213,7 @@ meets the pilot target with at least 0.25 points of headroom on every use case. 
    business hours; CRM OLA ≥ 99.9% signed; Event Hubs Premium in place (with CMK and geo-replication if offered in
    UAE North); the APIM zone-redundant SLA confirmed or the floor accepted.
 4. **Before the stack smoke run:** workstream C aligns the prototype with LLD §14.3 or labels each difference as a
-   mock simplification in the code. **Met 26 Nov:** differences labelled in `code/README.md`; smoke run and 69 tests passed.
+   mock simplification in the code. **Met 26 Nov:** differences labelled in `code/README.md`; smoke run and tests passed (97 after the red-team round).
 5. **Release gates as specified:** golden set of ≥ 300 scored UC2 items plus ≥ 50 UC1 and ≥ 50 UC3, Wilson lower
    bound with z = 1.96, and a red-team suite of ≥ 1,000 attacks in every release gate from the first pilot release.
 6. **Governance:** every [confirm] fact in §4.2 is closed or risk-accepted by its owner before go-live; ADR statuses
@@ -246,5 +246,11 @@ single-character draft edits rejected; news injection screened; quoted instructi
 data in spans, logs or `/metrics`; generic error envelopes; text-only rendering under a strict CSP; signer and
 verifier separated in Key Vault; mid-chain audit tampering detected.
 
-Result: 89 tests green on three consecutive runs; evals gate PASS; careless-model gate FAIL as intended; smoke
+Follow-up gaps closed in the same round: approval key allow-list (`rmc:tool-gateway:approval:allowed_kids`, reason
+`kid_not_allowed`, rotation with overlap tested) for emergency key revocation; `approval_rejected` audit events for
+every rejected commit, with no draft content; CRM portfolio-change events through APIM (`rmc-crm-events`) to the
+Event Hub `crm-portfolio-events`, evicting cached entitlements at once; Arabic-Indic and Eastern Arabic-Indic digits
+normalised before PII matching (ADR-012), including UC1 facts before JSON escaping.
+
+Result: 97 tests green on three consecutive runs; evals gate PASS; careless-model gate FAIL as intended; smoke
 and load test within budget. Remaining mock limitations are listed in `code/README.md`.
