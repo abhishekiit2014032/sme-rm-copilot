@@ -1,6 +1,6 @@
 # SME RM Copilot on Azure: high-level design
 
-Status: **Draft for ARB** · Workstream A1 · Owner: solution architecture · Date: 26 Nov 2026 · Baseline: `00-plan.md` v2.6 (aligned to v2.4 after the ARB review, `07-review-log.md`; v2.6 adds the supervisor-led agents, the MCP gateway, agent identities and memory: §5, §5.1, §7, §7.1, §8.2)
+Status: **Draft for ARB** · Workstream A1 · Owner: solution architecture · Date: 26 Nov 2026 · Baseline: `00-plan.md` v2.6 (aligned to v2.4 after the ARB review, `07-review-log.md`; v2.6 adds the supervisor-led agents, the MCP gateway, agent identities and memory: §5, §5.1, §7, §7.1, §8.2; v2.7 adds the evaluation architecture and runtime operations metrics: §5.2, §12)
 
 This document is the high-level design (HLD) for the SME RM Copilot on Microsoft Azure. It is derived from
 `00-plan.md` (the contract) and uses its service names, flows, step numbers, targets and phases unchanged. Where
@@ -10,7 +10,7 @@ fictional and unbranded ("the Bank"); figures are illustrative in an AED / UAE-s
 disagrees with the plan, it does not diverge: the objection is recorded in §15 "Open points for the lead".
 
 Contents: 1 Purpose and scope · 2 Architecture principles · 3 Business context and use cases · 4 System context
-view · 5 Container view (5.1 Memory architecture) · 6 Network topology view · 7 Identity view (7.1 Agents, MCP gateway
+view · 5 Container view (5.1 Memory architecture, 5.2 Evaluation architecture) · 6 Network topology view · 7 Identity view (7.1 Agents, MCP gateway
 and identities) · 8 Data flows · 9 Trust boundaries and data classification · 10 Deployment view by phase · 11 Azure
 service mapping · 12 Quality attributes · 13 Cross-references · 14 Glossary · 15 Open points for the lead
 
@@ -358,6 +358,56 @@ Memory rules (plan §3.8, C26, C27, C29):
 - Procedural memory is never changed at runtime by a model; a pin may only point to a version with a passing eval run.
 - Erasure crypto-shreds checkpoints and episodes with the customer key (C21); the short TTLs bound the rest.
 - Detail (containers, partition keys, checkpointer semantics, recall algorithm, registry) is in `02-lld.md` §16.
+
+### 5.2 Evaluation architecture
+
+Plan §3.9 evaluates the copilot in four tiers (ADR-027, extending ADR-018). Metric names follow the RAGAS definitions
+(faithfulness, answer relevancy, context precision, context recall, context utilisation, answer correctness), so a
+release report, a nightly report and the production dashboard mean the same thing. No LLM judge runs on the request
+path.
+
+| Tier | Where it runs | When | What it decides |
+|---|---|---|---|
+| 1 Runtime gates | `orchestrator`, inline | Every request | UC2: decline before calling the model when the best passage or the context relevance is below threshold; after generation, faithfulness (every claim cited and supported) and answer relevancy; retry once if ≥ 4 s remain, else decline. UC1: no brief without the CRM profile; lines with invented numbers or promises dropped. Budget guards on tokens, steps, hops and deadline |
+| 2 Online sampled | `eval-runner` online worker in prod, in-region judge (`gen-large`) | Minutes after the answer | 5% of UC1 and UC2 answers (cap 200 per day) scored from masked audit content; alert if faithfulness < 0.90 or answer relevancy < 0.80 over 1 h |
+| 3 Scheduled | `eval-runner` CronJobs, pre-prod Azure OpenAI with the production configuration | Nightly, weekly, monthly | Golden-set regression with reference-based metrics; drift report; red team of ≥ 1,000 attacks; a regression opens an incident |
+| 4 Release gate | CI stage on pre-prod | Every prompt, model, tool, index or threshold change | Ships only if every RAGAS, security, latency and token threshold holds |
+
+```mermaid
+flowchart LR
+  subgraph PROD["Production, UAE North"]
+    REQ["RM request"]
+    T1["Tier 1 runtime gates in orchestrator<br/>retrieval gate before the model<br/>faithfulness and relevancy after it<br/>budget guards"]
+    ANS["Verified answer, decline or degraded answer"]
+    AUD["Audit content store<br/>masked and encrypted"]
+    T2["Tier 2 online sampler in eval-runner<br/>5 percent of answers, in-region judge"]
+    MON["Managed Prometheus and Grafana<br/>scores, stage p95, tokens, cost, alerts"]
+    PINS["App Configuration<br/>prompt, model and threshold pins"]
+  end
+  subgraph PRE["Pre-prod, UAE North"]
+    T3["Tier 3 scheduled evals<br/>nightly, weekly drift, monthly red team"]
+    T4["Tier 4 release gate in CI<br/>golden set, red team, replayed load"]
+  end
+  CHG["Change: prompt, model, tool, index or threshold"]
+
+  REQ --> T1
+  T1 --> ANS
+  T1 -->|"gate outcomes, tokens, cost"| MON
+  ANS -->|"sampled audit events"| AUD
+  AUD -->|"masked content"| T2
+  T2 -->|"rolling 1 h scores"| MON
+  CHG --> T4
+  T4 -->|"pin only on pass"| PINS
+  PINS --> T1
+  PINS -->|"production configuration"| T3
+  T3 -->|"reports, incidents"| MON
+```
+
+Runtime operations metrics (plan §3.9) are collected on every request as metadata only: p50, p95 and p99 latency per
+use case and per stage, tokens per request (input and output, per use case, agent and deployment), estimated cost per
+request and per day in AED from a price table in App Configuration, gate outcomes and budget exceedances. Detail:
+`02-lld.md` §11.8 (metrics and alerts) and §17 (formulas, gate algorithm, online sampler, scheduled jobs, release
+gate); operations in `06-deployment-and-operations.md` §5.4, §5.5 and RB-20.
 
 ## 6. Network topology view
 
@@ -955,7 +1005,7 @@ illustrative and is sized in `06-deployment-and-operations.md`. No prices are gi
 | Network | Hub-spoke, Azure Firewall Premium, ExpressRoute gateway, Private DNS zones, Bastion | Bank landing zone shared hub | Same | Private by default, egress allow-list (ADR-017) |
 | Supply chain | ACR Premium, Notation signing, Azure Policy admission | Premium | Premium | Private endpoint registry, signed images only (ADR-021) |
 | Teams bot | Azure Bot Service, Microsoft 365 Agents SDK | Not deployed | After residency sign-off | Plan C1 (ADR-016) |
-| Evaluations | Azure AI Foundry project | Golden set runs from CI | Plus nightly regression | Evaluators only in-region **[confirm regions]** (ADR-018) |
+| Evaluations | Azure AI Foundry project; `eval-runner` (CI, CronJobs, online worker); in-region judge deployment | Golden set runs from CI; runtime gates; online sampling behind a flag | Plus nightly, weekly and monthly runs | RAGAS metric definitions; judge only in-region; Foundry evaluators where they run against our judge **[confirm regions and features]** (ADR-018, ADR-027) |
 | CI/CD and IaC | GitHub Actions or Azure DevOps with OIDC; Bicep with Azure Verified Modules | Self-hosted runners in the spoke | Same | No stored cloud secrets; reproducible environments (ADR-021) |
 
 ## 12. Quality attributes
@@ -963,11 +1013,12 @@ illustrative and is sized in `06-deployment-and-operations.md`. No prices are gi
 | Attribute | Target (plan §5) | How the architecture achieves it | Residual risk / where detailed |
 |---|---|---|---|
 | Availability | Pilot 99.0% business hours; scale 99.5%; degraded counted as available | Every stateful and gateway service zone-redundant across 3 zones; AKS Standard tier; ≥ 3 replicas per service; per-source circuit breakers; partial brief when non-critical sources fail; degraded mode per use case when models fail; region loss handled as BCP (RTO 24 h best effort) | No in-country model DR (C3); scale 99.5% depends on CRM ≥ 99.9%, the application tier ≥ 99.85% and Event Hubs Premium. Composite maths in `04` §9: pilot UC1 99.31%, UC2 99.41%, UC3 draft 99.31%, commit 99.25% |
-| Latency | UC1 ≤ 8 s, UC2 ≤ 7 s, UC3 draft ≤ 10 s, commit ≤ 2 s (p95) | Deadline set at `web-bff` and propagated; hop timeout = min(own cap, remaining deadline − reserve); tool cap 2 s; parallel fan-out; PII and shields overlapped with tool calls; no router call when launched from a CRM record; `gen-small` for extraction and routing; failover only if ≥ 4 s remain | Buffer-then-release adds perceived wait (C18); Regional Standard has no latency guarantee, PTU is the post-pilot lever (ADR-004). Budget table in plan §5 |
+| Latency | UC1 ≤ 8 s, UC2 ≤ 7 s, UC3 draft ≤ 10 s, commit ≤ 2 s (p95) | Deadline set at `web-bff` and propagated; hop timeout = min(own cap, remaining deadline − reserve); tool cap 2 s; parallel fan-out; PII and shields overlapped with tool calls; no router call when launched from a CRM record; `gen-small` for extraction and routing; failover only if ≥ 4 s remain; runtime eval gates use no LLM judge and fit the existing checks lines (≤ 250 ms p95 on UC2); a weak retrieval declines without a model call; p95 measured per stage and alerted against the plan §5 budget for 15 min | Buffer-then-release adds perceived wait (C18); Regional Standard has no latency guarantee, PTU is the post-pilot lever (ADR-004). Budget table in plan §5; stage metrics in `02` §11.8 |
 | Security | Entitlement leaks = 0; injection success = 0 | Entitlements in `tool-gateway` with dual token validation; signed draft-bound approvals with sign/verify key split; Prompt Shields plus local rules; plain-text rendering with strict CSP; private endpoints and egress allow-list; signed images and admission policy; PIM | STRIDE and threat model in `05`; ADR-008, ADR-009, ADR-011, ADR-017 |
 | Privacy | No PII to models beyond need; data stays in the UAE | Live reads, no customer index (ADR-007); field minimisation; PII masking before every model call; `store=false`; Regional deployments; modified abuse monitoring as a go-live gate; Document Intelligence and Speech results deleted | Masking is imperfect (C21): content store is per-customer-key encrypted and crypto-shreddable. Arabic PII coverage **[confirm]** |
 | Auditability | Every call, approval and write traceable to an RM and a model version | One audit event per tool call; `brief_built`, `approval_issued`, `write_*` with lineage (model version, prompt hash, tool contract versions, guardrail version); hash chain in immutable GZRS Blob with 5-minute seals; `tool-gateway` (the only producer) waits for the Event Hubs ack, with the Cosmos `audit-spool` as fallback; CRM records marked "AI-assisted, RM-approved" | Audit query in Log Analytics in Phase 1; ADX in Phase 2 if needed. ADR-013 |
-| Cost | Per request ≤ 6 tool steps, ≤ 12k input and 1.5k output tokens; 400k tokens per RM per day | APIM `llm-token-limit` per RM and per use case; `gen-small` for high-volume steps; deterministic UC1 workflow without a router call; Phase 1 cuts (no PTU, Redis, Service Bus, ADX, warm DR, bot); Azure budgets per environment with 80% alerts | Fixed platform cost (APIM Premium, Firewall, AKS) dominates at pilot scale; model and capacity in `05`/`06` |
+| Cost | Per request ≤ 6 tool steps, ≤ 12k input and 1.5k output tokens; 400k tokens per RM per day | APIM `llm-token-limit` per RM and per use case; budget guards before every call; `gen-small` for high-volume steps; deterministic UC1 workflow without a router call; Phase 1 cuts (no PTU, Redis, Service Bus, ADX, warm DR, bot); tokens per request and estimated cost per request measured on every request (price table in App Configuration), alerts at p95 tokens > 1.2 × the 7-day baseline and daily cost > 80% of budget; online judge capped at 200 items per day; Azure budgets per environment with 80% alerts | Fixed platform cost (APIM Premium, Firewall, AKS) dominates at pilot scale; model and capacity in `05`/`06` |
+| AI output quality | Release: faithfulness and citation accuracy ≥ 0.95, context recall ≥ 0.90, context precision, answer relevancy and answer correctness ≥ 0.85, correct-decline ≥ 0.90 (lower bounds); online faithfulness ≥ 0.90 and answer relevancy ≥ 0.80 over 1 h | Four evaluation tiers (§5.2): runtime gates on every request, online sampled RAGAS scoring with an in-region judge, nightly, weekly and monthly scheduled evals, and the release gate; thresholds pinned in App Configuration and changed only through the gate; judge prompts versioned as procedural memory | Runtime approximations are weaker than the judge, so some unfaithful answers are caught only on the 5% sample; pilot volume makes 1 h windows noisy (sample-size guard). ADR-018, ADR-027; `05` §8.5 |
 | Evolvability | Model upgrades about yearly; Phase 2 and 3 additions without rewrite | Model access only via APIM with version pins and auto-upgrade off; eval gate before upgrade (C12); typed tool contracts with versions; feature flags per use case; mock-Azure prototype with identical REST shapes; Bicep AVM modules | Framework lock-in avoided by thin orchestrator (ADR-005) at the price of owning more code |
 
 ## 13. Cross-references
@@ -991,6 +1042,7 @@ Full index: [`adr/README.md`](adr/README.md).
 | ADR-024 (v2.6) | Agent identity: one identity per agent, workload managed identity as its federated credential, intersection of user, agent and workload | 2, 7, 7.1 |
 | ADR-025 (v2.6) | Supervisor-led multi-agent orchestration, amends ADR-005 | 5, 7.1, 8.2 |
 | ADR-026 (v2.6) | Memory architecture: working, checkpointer, session, episodic, semantic, procedural, profile | 5.1, 8.2, 9.4 |
+| [ADR-027](adr/ADR-027-evaluation-architecture.md) (v2.7) | Evaluation architecture in four tiers: runtime gates, online sampling, scheduled evals, release gate (extends ADR-018) | 5.2, 12 |
 
 ### 13.2 Companion documents
 

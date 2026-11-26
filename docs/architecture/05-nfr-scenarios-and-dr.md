@@ -1,6 +1,6 @@
 # 05 NFRs, capacity, cost, failure scenarios, DR, threat model, privacy and model risk
 
-Status: v1.2 for ARB (aligned to plan v2.4 after the ARB review, `07-review-log.md`; v2.6 adds agent, MCP gateway and memory failure modes FM-70 to FM-77, STRIDE TB11 and TB12, memory retention rows) · Workstream B2 · Owner: solution architecture (resilience, security, operations) · Date: 26 Nov 2026
+Status: v1.2 for ARB (aligned to plan v2.4 after the ARB review, `07-review-log.md`; v2.6 adds agent, MCP gateway and memory failure modes FM-70 to FM-77, STRIDE TB11 and TB12, memory retention rows; v2.7 adds evaluation and runtime operations NFRs PERF-07, QUAL-01 to QUAL-03, COST-03 and failure modes FM-78 to FM-83) · Workstream B2 · Owner: solution architecture (resilience, security, operations) · Date: 26 Nov 2026
 
 Contract: `00-plan.md` (cited as "plan §n"). Interfaces, SLAs and the composite availability maths are in
 `04-interfaces-and-slas.md` (cited as "04 §n"); deployment, runbooks (RB-nn) and operations are in
@@ -33,6 +33,10 @@ Contents
 | PERF-04 | Performance | UC3 commit | p95 ≤ 2 s | As PERF-01, including Key Vault `sign` and Cosmos jti create |
 | PERF-05 | Performance | Deadline discipline | 0 hops exceed the propagated deadline by > 100 ms | Trace analysis in CI load test: span end vs the propagated `x-deadline-ms` budget (02 §1.6) |
 | PERF-06 | Performance | Progress feedback while buffering (C18) | First progress step shown ≤ 500 ms | UI test |
+| PERF-07 | Performance | Runtime evaluation overhead (tier 1 gates, ADR-027) | Pre-generation retrieval gate ≤ 5 ms p95; post-generation gates ≤ 250 ms p95 on UC2 (inside the 400 ms checks line of plan §5) and ≤ 100 ms on UC1 and UC3; no LLM judge on the request path; a retrieval decline returns without a model call (UC2 decline p95 ≤ 2 s) | `rmc_stage_duration_seconds{stage=~"retrieval_gate\|post_gates"}` in the CI load test and in production (02 §11.8); release gate replay (02 §17.5) |
+| QUAL-01 | Quality | Online evaluation coverage (tier 2) | ≥ 95% of sampled UC1 and UC2 answers (5% sample, capped at 200 per day) judged within 30 min in business hours; sample spread across every business hour; < 2% of sampled items skipped other than for the cap or erasure | `rmc_online_eval_items_total` by outcome; `RmcOnlineEvalStalled` (02 §11.8.5) |
+| QUAL-02 | Quality | Online quality thresholds | Rolling 1 h faithfulness ≥ 0.90 and answer relevancy ≥ 0.80 (≥ 10 items); 3-business-day faithfulness ≥ 0.93 | `rmc_online_eval_alert` (02 §17.3); RB-20 on breach |
+| QUAL-03 | Quality | Release and nightly gates in RAGAS terms (plan §3.9) | Faithfulness and citation accuracy ≥ 0.95, context recall ≥ 0.90, context precision, answer relevancy and answer correctness ≥ 0.85, correct-decline ≥ 0.90 (lower bounds, 02 §17.1); nightly report by 07:00 GST every day | CI stage 4 (06 §5.1); `eval-nightly` (06 §5.5); `RmcNightlyEvalMissing` |
 | SCAL-01 | Scalability | Users | 300 RMs, 5,400 req/day, peak 0.5 req/s with 3× headroom | Load test at 1.5 req/s for 30 min; soak at 0.5 req/s for 8 h |
 | SCAL-02 | Scalability | Growth to Phase 3 (other segments) | Linear scale by adding replicas, TPM quota and APIM limits; no redesign up to 10× | Capacity review each phase gate; load test at 5 req/s before Phase 3 |
 | SCAL-03 | Scalability | Systems of record protected (C14) | Copilot never exceeds contracted peak per SoR | APIM `rate-limit-by-key` tests; load test asserts 429s from APIM, not SoR errors |
@@ -63,6 +67,7 @@ Contents
 | L10N-03 | Arabic / RTL | Dates and week (C16) | All date logic GST, Mon to Fri week; 100% of date-resolution tests pass | Unit tests incl. month ends, public holidays [confirm calendar source] |
 | COST-01 | Cost | Token and cost runaway (C10) | Per request ≤ 6 tool steps, ≤ 12k input and 1.5k output tokens; per RM ≤ 400k tokens/day | APIM `llm-token-limit` tests; budget alerts at 80% (06 §11) |
 | COST-02 | Cost | Unit cost visibility | Token cost per RM per use case reported monthly | FinOps report (06 §11) |
+| COST-03 | Cost | Tokens and cost per request (runtime operations, plan §3.9) | p95 tokens per request within plan §5 (12k input, 1.5k output) and ≤ 1.2 × the 7-day baseline; estimated cost per request and per day visible within 5 min; daily cost alert at 80% of budget; judge spend ≤ 1.6 M tokens per day at scale | `rmc_tokens_per_request`, `rmc_cost_aed_total`; alerts `RmcTokensPerRequestCreep`, `RmcDailyCost80` (02 §11.8.5) |
 | MAINT-01 | Maintainability | Model upgrade | Any model version change completed within 90 days of retirement notice, through the eval gate (C12) | RB-05 drill on each notice |
 | MAINT-02 | Maintainability | Rebuildability | Full environment rebuilt from IaC in ≤ 8 h (excluding data restore and quota) | Annual rebuild test |
 | MAINT-03 | Maintainability | Test coverage of security-critical code | ≥ 90% branch coverage for `tool-gateway` entitlement, approval verification and masking | CI coverage gate |
@@ -335,7 +340,7 @@ excluded on residency grounds (plan §3.1) and blocked by Azure Policy (06 §6).
 ---
 ## 4. Failure-mode catalogue
 
-Runbooks RB-01 to RB-16 are in 06 §9. "Available" follows the 04 §8.1 definition (flagged degraded counts as
+Runbooks RB-01 to RB-20 are in 06 §9. "Available" follows the 04 §8.1 definition (flagged degraded counts as
 available). RTO is the time to restore normal (non-degraded) service where we control it; "n/a" means the service stays
 available in degraded form while the cause is outside our control. Test methods: **FI** = fault injection in the
 mock-Azure prototype and pre-prod (Chaos Studio or APIM mock responses [confirm Chaos Studio fault coverage]);
@@ -351,8 +356,8 @@ mock-Azure prototype and pre-prod (Chaos Studio or APIM mock responses [confirm 
 | FM-04 | Content filter false positive | Normal banking terms ("default", "kill the deal", "exposure") blocked | `DEGRADED/CONTENT_FILTER` and `GUARDRAIL_BLOCKED` rate > 2% daily; golden-set false-positive gate (C13) | Section missing or UC2 decline with routing | Flagged; counted; no retry with weakened prompt | RB-02 (tuning path) | Tuning ≤ 5 business days | GS false-positive slice |
 | FM-05 | Quota exhaustion per RM or use case | `llm-token-limit` reached (runaway loop, heavy user) | APIM 429 with `llm-token-limit` source; per-RM usage > 80% of 400k | That RM gets `BUDGET_EXCEEDED` until 00:00 GST | Hard stop by APIM | RB-12 | Next day or manual raise | IT: APIM policy test |
 | FM-06 | Model version retirement | Microsoft retirement notice | Model inventory job checks retirement dates weekly; alert at 120 days | None if planned | None (auto-upgrade off) | RB-05 | Planned (90 days) | DR: upgrade rehearsal |
-| FM-07 | Golden-set regression | Prompt, model, index or guardrail change lowers groundedness or citation accuracy | Eval gate fails in CI (06 §4) | None (blocked before release) | Pipeline stops | RB-06 | n/a | CI |
-| FM-08 | Online quality drift | Policy corpus change or input drift lowers sampled groundedness | Sampled groundedness < 0.93 over 3 days (P2); decline rate ± 50% from baseline | Wrong or over-cautious answers | Alert; rollout paused | RB-06, RB-05 | ≤ 5 business days | Seeded drift in pre-prod |
+| FM-07 | Golden-set regression | Prompt, model, index or guardrail change lowers groundedness or citation accuracy | Eval gate fails in CI (06 §4) | None (blocked before release) | Pipeline stops | RB-06, RB-20 | n/a | CI |
+| FM-08 | Online quality drift (slow) | Policy corpus change or input drift lowers sampled faithfulness | Sampled faithfulness < 0.93 over 3 business days (P2); weekly drift report PSI > 0.2; decline rate ± 50% from baseline. The 1 h online alert is FM-79 | Wrong or over-cautious answers | Alert; rollout paused | RB-20, RB-06, RB-05 | ≤ 5 business days | Seeded drift in pre-prod |
 | FM-09 | Embedding model version mismatch | Query embeddings from a new `embed` version against an old index | Retrieval smoke fails; recall@5 drop | Poor UC2 answers or declines | Version pin includes `embed`; mismatch check at start-up refuses | RB-07 | ≤ 2 h (rebuild) | IT: version check |
 | FM-10 | Content Safety unavailable | Service outage | Breaker open; `rmc_guardrail_fallback_total{service="content-safety"}` | None visible (integrated filter still on); UC3 shows a notice | Continue on local injection and quarantine rules; `result: fallback_local` in the audit event's `guardrails[]` (02 §6.4) | RB-02 | n/a | FI |
 | FM-11 | AI Language PII unavailable | Service outage | Breaker open (P2) | None visible; masking on regex fallback | Regex masking (always on) continues; UC1 names already placeholders; `result: fallback_local` in the audit event's `guardrails[]` (02 §6.4) | RB-02 | n/a | FI |
@@ -447,6 +452,22 @@ tokens) are in 04 §5; the decision algorithm and memory semantics are in 02 §1
 | FM-77 | Agent over-privilege found in access review | Quarterly access review finds a role, credential or owner on an agent identity that is not in its manifest (C24) | Access review diff; gateway `UNEXPECTED_ROLES` (P1) if a token with the extra role was ever presented | None (tokens with extra roles are rejected at the gateway) | Gateway rejects tokens whose roles exceed the manifest; review removes the drift through IaC | RB-09 (security incident if the role was used) | ≤ 1 business day | Access review rehearsal; IT `test_agent_token_with_extra_roles_rejected` |
 
 Count: 77 scenarios.
+
+### 4.6 Evaluation and runtime operations (v2.7)
+
+Plan v2.7 §3.9 (ADR-027): runtime gates, online sampling, scheduled evals, runtime operations metrics. Metrics and
+alerts are in 02 §11.8 and §17; runbook RB-20 is in 06 §9.
+
+| ID | Scenario | Trigger | Detection / alert | User impact | Automatic response | Runbook | RTO | Test |
+|---|---|---|---|---|---|---|---|---|
+| FM-78 | Retrieval-gate decline spike | Policy re-index with a broken chunking or embedding pin, index version mismatch, semantic ranker degraded or switched to keyword mode, a new topic RMs ask about that has no policy, or a threshold pin changed | `RmcRetrievalGateDeclineRise` (decline rate up 5 points on the 7-day baseline, P3; P2 above 15 points); `rmc_runtime_gate_score{gate="top_reranker"}` distribution shifts; `rmc.retrieval_mode=keyword` | More UC2 declines with routing to the credit or product desk; no wrong answers (a decline is safe) | None beyond declining; ranker outage already switches mode with its own threshold (02 §6.2) | RB-20 (diagnose), RB-07 (re-index or roll back the index pin) | ≤ 2 h for a pin rollback; tuning through the release gate | FI: retire a policy document in pre-prod and assert the decline rate alert; GS unanswerable slice |
+| FM-79 | Online faithfulness alert | Prompt or model behaviour change, judge drift, an unusual question mix, or a policy change that the golden set does not cover yet | `RmcOnlineFaithfulnessLow` (rolling 1 h < 0.90, ≥ 10 items; ticket to MRM and product owner); `RmcOnlineFaithfulnessTrend` (3 business days < 0.93, P2) | Possibly unsupported statements in released answers that tier 1 did not catch | None automatic; the canary cohort is rolled back automatically if the alert fires during a canary (06 §5.1 stage 9) | RB-20; RB-03 if confirmed harmful content reached RMs | Contain ≤ 30 min (kill switch or rollback); fix through the gate | Seeded unfaithful answers in pre-prod online mode; judge calibration set |
+| FM-80 | Judge model unavailable | Judge deployment throttled or down, APIM product `rmc-eval-online` limit reached, content store or Key Vault unreachable, worker crash | `RmcOnlineEvalStalled` (no judged items for 2 h while items are sampled, ticket); `rmc_online_eval_items_total{outcome="judge_error"}` | None: the request path never waits for the judge; online quality is blind until it recovers | Worker backs off and keeps the watermark; items older than 24 h are skipped and counted; runtime gates and nightly runs continue | RB-20 (judge section), RB-01 if the shared `gen-large` quota is the cause | ≤ 4 h; coverage gap reported in the weekly drift report | FI: block the judge APIM product in pre-prod; assert stall alert and recovery from the watermark |
+| FM-81 | Nightly regression failure | A change merged without a full gate (emergency path), a policy corpus update, a model-side change behind the same version, or golden-set drift | `RmcNightlyEvalGate` (hard gates, page MRM); report below threshold or a metric down > 2 points vs the release baseline (P2); `RmcNightlyEvalMissing` if the run did not complete | None until the cause reaches production behaviour; may already affect RMs | Incident opened; hard-gate failure: incident commander decides the kill switch within 30 min | RB-20, RB-03, RB-06 | Contain ≤ 30 min (hard gate); root cause ≤ 2 business days | Inject a regressed prompt pin in pre-prod; assert report, alert and incident |
+| FM-82 | Token-per-request creep | Prompt growth, more passages kept, longer session summaries, extra retries, an agent loop below the step cap, or a tokenizer change | `RmcTokensPerRequestCreep` (p95 > 1.2 × the 7-day baseline for 1 h, ticket); `RmcTokensPerRequestBudget` (p95 > 12k); `rmc_budget_exceeded_total` rising | Slower answers (more input) and higher cost; requests refused with `BUDGET_EXCEEDED` if the hard budget is hit | Budget guard refuses calls above the per-request budget; APIM per-RM limit as backstop | RB-20 (tokens section), RB-12 | Fix through the release gate (≤ 5 business days) | Replay in the release gate compares p95 tokens with production; UT budget guard |
+| FM-83 | Cost burn | Token creep (FM-82), retry storm, misrouted eval or ingestion traffic, a price table error, or a usage surge | `RmcDailyCost80` (estimated daily cost > 80% of budget, FinOps ticket); `RmcEvalCost80`; Azure budget alerts (06 §11.1) | None until limits bite; then `BUDGET_EXCEEDED` for heavy users | APIM `llm-token-limit` per RM and per use case; judge capped at 200 items per day | RB-12, RB-20 | Same business day (contain); fix by normal change | Monthly reconciliation of the estimate with Cost Management; IT on the price table keys |
+
+Count: 83 scenarios.
 
 ---
 
@@ -732,10 +753,15 @@ is RM-approved.
 
 | Metric | Source | Threshold (alert) | Action |
 |---|---|---|---|
-| Groundedness (golden set, lower 95% bound) | Release gate | < 0.95 | Block release |
+| Faithfulness (golden set, faithful-answer rate, lower 95% bound; was groundedness) | Release gate | < 0.95 | Block release |
 | Citation accuracy (golden set, lower 95% bound) | Release gate | < 0.95 | Block release |
-| Sampled online groundedness (UC2) | In-region judge, 5% sample capped at 200/day | < 0.93 over 3 business days | P2, pause rollout |
-| Correct decline rate | Golden set | < 90% | Block release |
+| Sampled online faithfulness (UC1, UC2; RAGAS definition, 02 §17.1) | In-region judge, 5% sample capped at 200/day | < 0.90 over a rolling 1 h (≥ 10 items) | Ticket to MRM and product owner (RB-20) |
+| Sampled online faithfulness, slow window | Same | < 0.93 over 3 business days | P2, pause rollout |
+| Sampled online answer relevancy (UC2) | Same | < 0.80 over a rolling 1 h | Ticket (RB-20) |
+| Online context precision and context utilisation (UC2) | Same | PSI > 0.2 week on week | Weekly drift review |
+| Context recall, answer correctness, context precision, answer relevancy (golden set, lower bound) | Release gate and nightly | < 0.90 (recall), < 0.85 (others) | Block release; nightly: P2 |
+| Runtime gate outcomes (retrieval declines, faithfulness failures) | Telemetry (`rmc_runtime_gate_total`) | Retrieval declines + 5 points on the 7-day baseline; faithfulness gate failures > 5% for 1 h | Ticket (RB-20) |
+| Correct decline rate (lower 95% bound, ≥ 100 unanswerable UC2 items) | Golden set | < 0.90 | Block release |
 | Decline rate in production | Telemetry | ± 50% from 4-week baseline | Investigate drift |
 | False-positive block rate | Golden set and telemetry | > 2% | Tune (C13) |
 | Entitlement leaks, injection success, numeric mismatches | Tests, red team, incidents | > 0 | P1, kill switch |
@@ -756,6 +782,7 @@ is RM-approved.
 | Policy corpus update (routine) | Automated retrieval smoke + affected golden items | Automated gate; policy office owns content |
 | Content filter configuration | Adversarial + false-positive slice | InfoSec + MRM |
 | Evaluator (judge model or prompt) | Re-validation against human labels (8.3) | MRM |
+| Runtime gate or online alert threshold (v2.7, App Configuration `rmc:orchestrator:gate:*`, `rmc:eval:online:thresholds:*`) | Full golden set with the new threshold; decline-rate impact on the false-positive and unanswerable slices | MRM + product owner |
 | New use case or write action | Full MRM validation | AI governance board |
 
 ### 8.7 AI-assisted marking and human oversight
@@ -783,3 +810,5 @@ is RM-approved.
 | 7 | (v2.6) Agent token lifetime and Entra Agent ID SLA coverage decide how long tool use survives an Entra incident (FM-70) [confirm] | Bank identity team |
 | 8 | (v2.6) Residual risk accepted for TB12 tampering: an RM-approved note with a false but number-free statement can be recalled as memory; mitigated by quoting it as memory, not fact, and by the 90-day TTL | Model risk, business owner |
 | 9 | (v2.6) Add agent and memory slices (memory poisoning, cross-RM recall, mixed intent) to the red-team suite of ≥ 1,000 attacks and to the golden set | MRM, security |
+| 10 | (v2.7) Bank open-source approval of the RAGAS library for offline use (else our implementation, ADR-027 decision 6); DPO approval for the online sampler to read sampled audit content | Architecture, DPO, MRM |
+| 11 | (v2.7) Grow the UC2 golden set to ≥ 100 unanswerable items so the correct-decline lower bound of 0.90 is reachable (96 of 100 needed) | Credit and product SMEs |

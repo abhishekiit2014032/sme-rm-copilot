@@ -1,6 +1,6 @@
 # AI system design walkthrough: the SME RM Copilot, step by step
 
-Status: v1.1, 26 Nov 2026 (plan v2.6: block 07 moves to a supervisor and specialist agents; blocks 12 and 13 added) · Companion to `00-plan.md` (baseline), `01-hld.md`, `02-lld.md` and the ADRs.
+Status: v1.2, 26 Nov 2026 (plan v2.6: block 07 moves to a supervisor and specialist agents; blocks 12 and 13 added; plan v2.7: block 11 rewritten around four evaluation tiers, block 10 adds tokens per request, per-stage p95 and cost) · Companion to `00-plan.md` (baseline), `01-hld.md`, `02-lld.md` and the ADRs.
 
 This document walks the SME RM Copilot through the method of the Codebasics *AI System Design* guide and video:
 **Step 1** requirements and estimation, **Step 2** thirteen building blocks: the guide's eleven plus two we add for
@@ -257,33 +257,81 @@ Reads and drafts are synchronous; CRM writes can queue (`202 queued`, per-item s
 
 **Component.** OpenTelemetry traces across every hop (one request id from `web-bff` to the systems of record) into
 Application Insights; Prometheus metrics into Azure Monitor managed Prometheus and Managed Grafana: requests and p95
-per use case, decline and degraded rates, groundedness failures, entitlement denials, guardrail hits, tokens and cost
-per use case and per RM, dependency health and breaker state. Alerts on SLO burn rate and at 80% of budget; Sentinel
-on the audit stream for misuse.
+per use case, decline and degraded rates, runtime gate outcomes, entitlement denials, guardrail hits, dependency health
+and breaker state. Since plan v2.7 every request also records, as metadata only:
+- **Per-stage latency** (`rmc_stage_duration_seconds`): edge, entitlement, tool fan-out or retrieval, PII and Prompt
+  Shields, the retrieval gate, each model call by prompt template, the post-generation gates. The dashboard shows p95
+  per stage against the plan §5 budget, so "UC2 got slower" becomes "the answer call got slower" in one look.
+- **Tokens per request** (`rmc_tokens_per_request`, input and output, per use case; split by agent and deployment from
+  `rmc_llm_tokens_total`) against the 12k / 1.5k budget; tokens per RM per day only as a distribution (no RM labels).
+- **Cost per request and per day** in AED (`rmc_cost_aed_total`), estimated from token usage and a price table in App
+  Configuration, reconciled monthly with Cost Management.
+
+Alerts on SLO burn rate; p95 above budget for 15 min (end to end and per stage); p95 tokens per request above 1.2× the
+7-day baseline; daily cost above 80% of budget; retrieval-gate declines up 5 points on their 7-day baseline;
+faithfulness gate failures above 5% for 1 h. Sentinel watches the audit stream for misuse. An ops summary API returns
+the same figures for a window (`02-lld.md` §11.8).
 
 **Where we differ.** The guide logs the final prompt and retrieved chunks in the trace. Prompts here contain customer
 data, so **telemetry is metadata only**; full content goes to the encrypted audit content store (1 year, per-customer
 keys, PIM-gated access) for debugging and replay (ADR-013, ADR-014; test: no customer data in spans, logs or metrics).
 
-**Key questions.** *Which metrics define success?* The SLOs and quality gates in plan §5, plus RM usage and thumbs-down
-rate. *What triggers an alert, what triggers a rollback?* Burn rate of 2% of the monthly error budget in an hour pages
-on-call; a groundedness or decline-rate shift beyond the gate, or any entitlement denial anomaly, triggers the kill
-switch for that use case.
+**Key questions.** *Which metrics define success?* The SLOs and quality gates in plan §5, the online RAGAS scores
+(block 11), plus RM usage and thumbs-down rate. *Where does the time go?* Per-stage p95 against the budget table; a
+trace exemplar for the slow bucket. *What does a request cost?* Tokens per request and AED per request per use case,
+watched for creep. *What triggers an alert, what triggers a rollback?* Burn rate of 2% of the monthly error budget in an
+hour pages on-call; a faithfulness or decline-rate shift beyond its threshold opens RB-20 and, if harmful output
+reached RMs, or any entitlement denial anomaly, the kill switch for that use case; a canary that breaches rolls back on
+its own.
 
-### 11 · Evals and safe releases (golden set, LLM-as-judge)
-**Situation.** A "small" prompt tweak on Friday quietly breaks policy answers about unsecured lending.
+### 11 · Evals and safe releases (runtime gates, online RAGAS, scheduled evals, release gate)
+**Situation.** A "small" prompt tweak on Friday quietly breaks policy answers about unsecured lending. On Monday Omar
+asks about invoice factoring, which the Bank does not offer; search returns five loosely related passages, the best
+scoring 1.7 out of 4, and a model asked to "answer from these" would write something plausible and wrong.
 
-**Component.** A golden set owned by credit and product SMEs (≥ 300 policy questions plus ≥ 50 briefs and ≥ 50
-follow-ups), scored on groundedness, citation accuracy, correct declines and security cases; the release gate uses the
-95% Wilson lower bound (≥ 0.95, about 293/300); a red-team suite of ≥ 1,000 attacks with zero successes; an LLM judge
-that runs **in-region**, spot-checked by humans. No prompt, model or tool-contract change ships without passing; canary
-rollout, a per-use-case kill switch in App Configuration, one-click rollback; bad production traces become new eval
-cases. The prototype already shows it: `python3 -m evals.run_evals` passes, and `--careless` (a hallucinating model)
-fails the gate (ADR-018).
+**Component.** Four tiers, one vocabulary: the RAGAS metric definitions (faithfulness, answer relevancy, context
+precision, context recall, context utilisation, answer correctness) plus our own citation accuracy and correct-decline
+rate (plan §3.9, ADR-027, `02-lld.md` §17).
+1. **Runtime gates, every request, no LLM judge.** *Before* generation, the **retrieval gate**: if the best reranked
+   passage is below 2.0, or fewer than half of the candidate passages clear the keep threshold, the copilot **declines
+   with no model call** and offers the credit or product desk. Omar's factoring question stops here: about 1.5 s, no
+   `gen-large` call, about 5k tokens saved, nothing invented. *After* generation: faithfulness (every claim cites a
+   returned passage, ≥ 0.9 of claims supported by word overlap and embedding similarity, no number missing from the
+   source), answer relevancy (≥ 0.7, question-to-answer similarity calibrated to the RAGAS score), and the numeric and
+   policy checks. A failure retries once with a stricter prompt if ≥ 4 s remain, else declines. Budget guards check
+   tokens, steps, hops and the deadline before every call. Every outcome is counted.
+2. **Online sampled, minutes later.** 5% of UC1 and UC2 answers (cap 200 a day) are scored by an **in-region judge**
+   on faithfulness, answer relevancy, context precision and context utilisation, reading masked content from the
+   audit store; RM thumbs-up or down joins them. Rolling 1 h scores go to Grafana; an alert fires if faithfulness drops
+   below 0.90 or answer relevancy below 0.80 for an hour.
+3. **Scheduled.** Nightly: the golden set against the production configuration, including the metrics that need a
+   reference answer (context recall, answer correctness). Weekly: drift in score distributions, decline rates, tokens
+   and latency. Monthly: a red team of ≥ 1,000 attacks. A regression opens an incident and can trip the kill switch.
+4. **Release gate.** No prompt, model, tool, index or threshold change ships unless, on the full golden set (≥ 300
+   policy questions, ≥ 50 briefs, ≥ 50 follow-ups, owned by credit and product SMEs) and the red-team suite,
+   faithfulness and citation accuracy ≥ 0.95, context recall ≥ 0.90, context precision, answer relevancy and answer
+   correctness ≥ 0.85, correct declines ≥ 0.90 (95% lower bounds, so 293 of 300 for 0.95), zero leaks, zero injections,
+   zero numeric mismatches, and the replayed p95 latency and tokens per request stay inside plan §5. Then canary, a
+   per-use-case kill switch and one-click rollback. The prototype shows the gate: `python3 -m evals.run_evals` passes,
+   and `--careless` (a hallucinating model) fails it (ADR-018).
 
-**Key questions.** *What is in the golden set and who updates it?* Real, anonymised RM questions; SMEs own it and add
-cases after every incident. *What score must a change hit?* The Wilson lower bounds above, zero leaks and zero numeric
-mismatches.
+**Decision and trade-off.** **No judge on the hot path**: an inline judge would add 1.5 to 3 s at p95 (UC2 would miss
+its 7 s target) and about 70% more tokens. The runtime checks are cheaper and weaker, so a few unfaithful answers are
+caught only by the 5% online sample, minutes later; we accept that because the runtime gates are tuned to decline when
+in doubt and every release is gated on the judge-based metrics. The judge is itself a model under MRM: its prompts are
+versioned procedural memory and it is calibrated against SME labels every quarter. RAGAS is used as **metric
+definitions**; the RAGAS library runs only offline, and only if the Bank approves it, otherwise our own implementation.
+Foundry evaluators and continuous evaluation are used where they run in-region against our judge **[confirm]**.
+
+**Where we differ.** The guide judges with an LLM and spot-checks with humans. We add a deterministic gate *before*
+the model (a weak retrieval never reaches it) and keep the judge off the request path, sampling instead.
+
+**Key questions.** *What is in the golden set and who updates it?* Real, anonymised RM questions, at least 100 of them
+unanswerable so the correct-decline bound is reachable; SMEs own it and add cases after every incident. *What score
+must a change hit?* The thresholds above, with zero leaks and zero numeric mismatches. *How fast do we notice a bad
+change that slipped through?* Within an hour from the online scores, by the next morning from the nightly run.
+*What does evaluation cost?* Runtime gates about 250 ms at most on UC2 and a few hundred embedding tokens; the online
+judge about 1.6 M tokens a day at scale (≈ 5% of user traffic); nightly and release runs on the pre-prod quota.
 
 ### 12 · Agent identity and the MCP gateway (agent identities, APIM, MCP servers)
 **Situation.** A crafted policy question tricks the `policy-agent` into asking for Harbourline's facilities. In another
@@ -409,8 +457,9 @@ before the pilot or go-live (owner in `07-review-log.md`).
 | Router sending each request type to the cheapest approach that meets quality | Designed · partly prototyped | Block 07 |
 | Timeouts, retries and a tested fallback | Prototyped (secondary deployment, degraded modes) | Block 08 |
 | Load test at peak; queue for long-running work; streaming | Prototyped (load test, outbox); streaming deliberately off | Block 09 |
-| End-to-end tracing, dashboards and alerts on latency, errors and cost | Prototyped (traces, metrics) · dashboards **Gate** | Block 10 |
-| Golden eval set gating every prompt or model change; rollback plan | Prototyped (gate, careless-model fail) · full golden set **Gate** | Block 11 |
+| End-to-end tracing, dashboards and alerts on latency, errors and cost; per-stage p95, tokens per request and cost per request (v2.7) | Prototyped (traces, metrics) · stage, token and cost metrics Designed · dashboards **Gate** | Block 10 |
+| Golden eval set gating every prompt or model change with RAGAS thresholds; rollback plan | Prototyped (gate, careless-model fail) · full golden set **Gate** | Block 11 |
+| Added (v2.7): runtime gates (retrieval gate before the model, faithfulness and relevancy after it), online sampled scoring with an in-region judge, nightly, weekly and monthly scheduled evals | Designed · **Gate** (judge calibrated against SME labels; DPO approval for sampled content) | Block 11 |
 | Bank-specific: abuse-monitoring exemption, residency approval, CRM external references | **Gate** | Plan §10 |
 | Added (v2.6): one least-privileged identity per agent; user, agent and workload identity on every tool call; registered MCP servers with pinned tool definitions | Designed · **Gate** (Entra Agent ID and APIM MCP features confirmed in UAE North, plan §10 item 12) | Block 12 |
 | Added (v2.6): memory with scope, retention and provenance per type; no customer facts memorised; no cross-RM recall; checkpoint resume and PIM-gated replay | Designed · **Gate** (agent and memory slices in the red-team suite) | Block 13 |
@@ -423,7 +472,8 @@ before the pilot or go-live (owner in `07-review-log.md`).
 four lanes above, explaining why each block is there, then the bank-specific choices: identity enforced in tools,
 writes approved and signed by the RM, verified output only, UAE-only inference.
 
-**Q2 · The model bill tripled while traffic grew 20%.** Break cost down by use case, step and model from the token
+**Q2 · The model bill tripled while traffic grew 20%.** Tokens per request and cost per request would have alerted
+first (p95 above 1.2× the 7-day baseline). Break cost down by use case, agent, prompt template and model from the token
 metrics; look for prompt bloat, too many retrieved chunks, retries, an RM or script near the cap. Fixes: move steps
 to `gen-small` or rules, trim chunks (rerank to 6 to 8), prompt caching, tighter per-use-case limits.
 
@@ -462,8 +512,8 @@ schemas, and every check is code. Open planning (model-chosen tool calls) stays 
 gateway and eval gate (ADR-025).
 
 **Q11 · A Friday prompt change broke answers over the weekend.** Prompts are versioned and hashed; no change ships
-without the golden-set gate; canary, kill switch and one-click rollback; quality metrics alert on a decline or
-groundedness shift.
+without the golden-set gate; canary, kill switch and one-click rollback; the online faithfulness and answer-relevancy
+scores alert within an hour and the nightly run confirms by morning (block 11).
 
 **Q12 · RM A sees RM B's customer.** Identity comes from the token, not the model; every tool call carries the RM,
 the agent and the workload, and the tool-gateway allows only their intersection, checking entitlements before data
@@ -491,4 +541,5 @@ citations and access filtering; fine-tuning cannot cite or forget a superseded c
 | Data freshness | CDC events refresh the index | Customer data read live; only policies are indexed, versioned and effective-dated | No second copy of customer data to secure or keep fresh |
 | Channel | Public chat for 10,000 shoppers | Internal copilot for 300 staff on managed devices | Private network only; no public endpoint |
 | Agents and tools (v2.6) | An agent that plans and calls tools (Q10) | Supervisor plus three specialists on fixed graphs; tools as internal MCP servers behind APIM; three identities per call, permission = their intersection; commit is not a tool | Least privilege per agent and per RM; an injected prompt cannot reach a tool its agent was not given |
+| Evals (v2.7) | LLM-as-judge on a golden set, human spot checks | Deterministic runtime gates (a weak retrieval declines before the model), judge only on a 5% online sample and offline, RAGAS definitions in every tier | An inline judge breaks the latency budget and adds about 70% to token cost |
 | Memory (v2.6) | Conversation history kept for context | Seven typed memories; customer facts never memorised; only RM-approved or RM-authored episodes; keyed by RM; procedural memory changed only through the eval gate | Memory is a new place for injected text to hide and for data to cross RMs |

@@ -1,6 +1,6 @@
 # SME RM Copilot on Azure: low-level design (LLD)
 
-Status: **v1.2 (workstream B1, aligned to plan v2.4 after the ARB review, `07-review-log.md`; v2.6 additions for agents, the MCP gateway, agent identities and memory in §15 and §16)** · Contract: [`00-plan.md`](00-plan.md) v2.6 · Date: 26 Nov 2026 · Audience: engineering, security, platform, MRM
+Status: **v1.2 (workstream B1, aligned to plan v2.4 after the ARB review, `07-review-log.md`; v2.6 additions for agents, the MCP gateway, agent identities and memory in §15 and §16; v2.7 evaluation in §17 and runtime operations metrics in §11.4 and §11.8)** · Contract: [`00-plan.md`](00-plan.md) v2.7 · Date: 26 Nov 2026 · Audience: engineering, security, platform, MRM
 
 This document is the build specification for the services in `00-plan.md` §3.2. It uses the plan's names,
 numbers and decisions. Where the plan is silent the LLD makes a decision and labels it **[LLD decision]**; where
@@ -31,6 +31,7 @@ Contents
 14. Open items, [confirm] list and plan inconsistencies
 15. Agents, MCP gateway and identities (plan §3.7, v2.6)
 16. Memory (plan §3.8, v2.6)
+17. Evaluation (plan §3.9, v2.7)
 
 ---
 
@@ -373,7 +374,7 @@ get the single JSON body. The SLO latency is measured on the final `brief` event
     {"n": 1, "doc_title": "SME Credit Policy v4.2", "clause_ref": "§5.3.1", "chunk_id": "credit-5.3.1", "effective_from": "2026-01-01"},
     {"n": 2, "doc_title": "SME Credit Policy v4.2", "clause_ref": "§5.3.4", "chunk_id": "credit-5.3.4", "effective_from": "2026-01-01"}
   ],
-  "verification": {"groundedness": 1.0, "attempts": 1},
+  "verification": {"groundedness": 1.0, "faithfulness": 1.0, "answer_relevancy": 0.86, "context_relevance": 1.0, "attempts": 1},
   "warnings": []
 }
 // 200 declined
@@ -386,7 +387,9 @@ get the single JSON body. The SLO latency is measured on the final `brief` event
 }
 ```
 
-Decline reasons: `WEAK_RETRIEVAL`, `MODEL_INSUFFICIENT_EVIDENCE`, `FAILED_GROUNDEDNESS`, `NO_TIME_FOR_RETRY`.
+Decline reasons: `WEAK_RETRIEVAL`, `MODEL_INSUFFICIENT_EVIDENCE`, `FAILED_GROUNDEDNESS`, `LOW_ANSWER_RELEVANCY` (v2.7),
+`NO_TIME_FOR_RETRY`. `verification` carries the runtime gate scores of §17.2 (`groundedness` is kept as an alias of
+`faithfulness` for existing clients).
 
 `POST /v1/followups/drafts` (UC3 draft)
 
@@ -559,9 +562,11 @@ Illustrative resources: requests `500m` / `1Gi`, limits `2` / `2Gi`. Node pool `
 §8.1), `rmc:orchestrator:budget:max_tool_steps` (6), `rmc:orchestrator:budget:max_input_tokens` (12000),
 `rmc:orchestrator:budget:max_output_tokens` (1500), `rmc:orchestrator:min_gen_ms:{uc1|uc2|uc3}`
 (2500/2000/3000), `rmc:orchestrator:post_reserve_ms:{uc1|uc2|uc3}` (300/500/300),
-`rmc:orchestrator:uc2:retry_min_remaining_ms` (4000), `rmc:orchestrator:uc2:min_reranker_score` (2.0),
-`rmc:orchestrator:uc2:relative_keep` (0.45), `rmc:orchestrator:guardrail:version` (e.g. `guardrails/2026.11.2`),
-`rmc:orchestrator:guardrail:pii_min_confidence` (0.8), `rmc:orchestrator:groundedness:min_support` (0.6).
+`rmc:orchestrator:uc2:retry_min_remaining_ms` (4000), `rmc:orchestrator:guardrail:version` (e.g. `guardrails/2026.11.2`),
+`rmc:orchestrator:guardrail:pii_min_confidence` (0.8). v2.7: the retrieval and groundedness thresholds
+(`rmc:orchestrator:uc2:min_reranker_score`, `rmc:orchestrator:uc2:relative_keep`, `rmc:orchestrator:groundedness:min_support`)
+are replaced by the runtime gate keys `rmc:orchestrator:gate:*` (§17.2); stage budgets
+`rmc:orchestrator:stage_budget_ms:*` and the price table `rmc:finops:*` (§11.8).
 
 **Failure behaviour.** See §9 and §10. Summary: model problems → degraded mode (UC1 facts-only, UC2 ranked passages
 without a generated answer, UC3 manual call report form); entitlement denied → `403 NOT_ENTITLED` with no model
@@ -692,6 +697,7 @@ requests > 30 per pod. Illustrative resources: requests `500m` / `768Mi`, limits
 `rmc:tool-gateway:approval:allowed_kids` (list, §4.7), `rmc:tool-gateway:approval:clock_skew_s` (30),
 `rmc:tool-gateway:approval:max_ttl_s` (300), `rmc:tool-gateway:search:index_name` (e.g. `policies-v3`),
 `rmc:tool-gateway:search:top_k` (5), `rmc:tool-gateway:search:candidates` (50),
+`rmc:tool-gateway:search:candidate_floor` (1.0, v2.7, §17.2),
 `rmc:tool-gateway:contracts:{tool}` (active version), `rmc:tool-gateway:crm_write_timeout_ms` (1000).
 
 **Failure behaviour.** Fails closed on identity, entitlement, approval and audit (audit = neither Event Hubs nor the
@@ -824,12 +830,15 @@ access, restricted, superseded, injection, Arabic, false-positive banking langua
 a candidate model deployment; computes gates (`00-plan.md` §5); writes a signed report; publishes `rmc_eval_metric`.
 Online sampling (flag `online_eval`) judges a sample of production outputs with an in-region judge
 (`gen-large` in the same environment, use case `eval`) using only already-masked content from the audit content
-store, in prod only **[confirm with MRM; see §14]**.
+store, in prod only **[confirm with MRM; see §14]**. v2.7 (ADR-027): five modes, specified in §17: `release`
+(tier 4, §17.5), `nightly`, `weekly-drift`, `redteam` and `judge-calibration` (tier 3, §17.4) as Jobs and CronJobs, and
+`online` (tier 2, §17.3) as a long-running Deployment in prod that also serves the ops summary API (§11.8.4). Metric
+names follow the RAGAS definitions of §17.1 (the report's `groundedness` becomes `faithfulness`).
 
 **Interface (CLI, no HTTP API).**
 
 ```text
-eval-runner run --suite release|nightly|online-sample --target https://orchestrator.rm-copilot.svc \
+eval-runner run --suite release|nightly|weekly-drift|redteam|judge-calibration --target https://orchestrator.rm-copilot.svc \
   --deployment-override gen-large=gen-large-2026-12 --golden golden/v3.jsonl --out report.json
 exit code 0 = all gates pass, 1 = a gate failed, 2 = run error
 ```
@@ -841,8 +850,15 @@ Report schema (excerpt):
   "run_id": "eval-2026-11-26-0142", "suite": "release", "golden_set": {"version": "v3", "items": 312, "sha256": "..."},
   "lineage": {"gen-large": {"deployment": "gen-large-2026-08", "model_version": "[pinned]"}, "prompt_hashes": {"uc2.answer": "sha256:..."}, "guardrail_version": "guardrails/2026.11.2", "index_version": "policies-v3"},
   "gates": [
-    {"metric": "groundedness", "observed": 0.981, "lower_bound_95": 0.958, "threshold": 0.95, "pass": true},
+    {"metric": "faithfulness", "observed": 0.981, "lower_bound_95": 0.959, "threshold": 0.95, "pass": true},
     {"metric": "citation_accuracy", "observed": 0.977, "lower_bound_95": 0.954, "threshold": 0.95, "pass": true},
+    {"metric": "context_precision", "observed": 0.91, "lower_bound_95": 0.89, "threshold": 0.85, "pass": true},
+    {"metric": "context_recall", "observed": 0.94, "lower_bound_95": 0.92, "threshold": 0.90, "pass": true},
+    {"metric": "answer_relevancy", "observed": 0.90, "lower_bound_95": 0.89, "threshold": 0.85, "pass": true},
+    {"metric": "answer_correctness", "observed": 0.89, "lower_bound_95": 0.87, "threshold": 0.85, "pass": true},
+    {"metric": "correct_decline_rate", "observed": 0.98, "lower_bound_95": 0.93, "threshold": 0.90, "pass": true},
+    {"metric": "replayed_p95_latency_uc2_s", "observed": 5.7, "threshold": 7.0, "pass": true},
+    {"metric": "replayed_p95_input_tokens_uc2", "observed": 10400, "threshold": 12000, "pass": true},
     {"metric": "entitlement_leaks", "observed": 0, "threshold": 0, "pass": true},
     {"metric": "injection_success", "observed": 0, "threshold": 0, "pass": true},
     {"metric": "numeric_mismatches", "observed": 0, "threshold": 0, "pass": true},
@@ -853,8 +869,9 @@ Report schema (excerpt):
 ```
 
 Confidence bound: the 95% Wilson lower bound as in plan §5 (lower limit of the two-sided 95% interval,
-z = 1.96). With 300 scored UC2 answers, groundedness needs ≥ 293 of 300 passing (observed ≥ 97.7%) to clear 0.95;
-the example above (306 and 305 of 312) gives 0.959 and 0.954 **[agree method with MRM]**.
+z = 1.96) for rates, a bootstrap lower bound for means (§17.1). With 300 scored UC2 answers, faithfulness needs ≥ 293 of 300 passing (observed ≥ 97.7%) to clear 0.95;
+the example above (306 and 305 of 312) gives 0.959 and 0.954; the correct-decline example is 98 of 100 unanswerable
+items **[agree method with MRM]**.
 
 **Auth.** Workload identity `id-rmc-eval-runner` (federated to the CI OIDC subject or the CronJob service
 account): `AiGateway.Generate`, `AiGateway.Embed`, `AiGateway.Judge`; `Orchestrator.Invoke` in the eval
@@ -863,7 +880,8 @@ data outside prod; online sampling reads only masked content.
 
 **Dependencies, scaling, configuration.** Concurrency 4 requests; per-item timeout = the use case deadline plus
 2 s; judge calls 20 s. Runs as a Job (`1` CPU / `2Gi`). Keys: `rmc:eval:golden_set_version`,
-`rmc:eval:gates:*` (thresholds above), `rmc:eval:online:sample_rate` (0.05, ADR-018), `rmc:eval:online:max_per_day` (200).
+`rmc:eval:gates:*` (thresholds above and §17.5), `rmc:eval:online:sample_rate` (0.05, ADR-018), `rmc:eval:online:max_per_day` (200);
+the other online keys are in §17.3.
 
 **Failure behaviour.** A gate failure blocks the release pipeline and the model pin change (§8.5). A run error
 (not a gate failure) also blocks; it never passes by default.
@@ -1627,9 +1645,10 @@ Query issued by `search_policies` (illustrative):
 }
 ```
 
-`tool-gateway` keeps results with `@search.rerankerScore ≥ 2.0` and `≥ top − 1.0`, at most 5 (returned in
-rank order with `n` = 1..k); the orchestrator declines when none remain (`WEAK_RETRIEVAL`). Thresholds are tuned
-on the golden set and stored in App Configuration. Arabic questions (`language=ar`) use `searchFields` with the
+`tool-gateway` returns at most 5 results with `@search.rerankerScore ≥` the candidate floor (1.0, v2.7) in rank
+order with `n` = 1..k; the orchestrator's pre-generation retrieval gate (§17.2 step 4) then requires the top score
+`≥ 2.0` and a context relevance `≥ 0.5`, keeps passages `≥ max(2.0, top − 1.0)` and otherwise declines
+(`WEAK_RETRIEVAL`) without calling the model. Thresholds are tuned on the golden set and stored in App Configuration. Arabic questions (`language=ar`) use `searchFields` with the
 `_ar` fields. If the semantic ranker is unavailable, keyword + vector with RRF is used and a separate threshold
 on `@search.score` applies (`retrieval_mode=keyword` only when embeddings are down).
 
@@ -2128,7 +2147,11 @@ policy), CRM platform team (publisher).
 | `uc2.answer` | `gen-large` | 0 | 350 | plain text with `[n]` citations or exactly `INSUFFICIENT_EVIDENCE` | 5,000 | `POLICY_QA_SYSTEM` |
 | `uc2.answer.strict` | `gen-large` | 0 | 350 | as above | 5,000 | adds `STRICT_SUFFIX` |
 | `uc3.extract` | `gen-small` | 0 | 900 | **structured outputs, strict JSON Schema** `followup_extract` | 4,000 | `EXTRACT_SYSTEM` |
-| `eval.judge.groundedness` | `gen-large` (eval use case) | 0 | 300 | structured output | 8,000 | eval-runner only |
+| `eval.judge.claims` (v2.7) | `judge` (`gen-large`, eval use case) | 0 | 400 | structured output `{claims[]}` | 4,000 | eval-runner only; splits an answer or reference into atomic claims (§17.1) |
+| `eval.judge.faithfulness` (v2.7, replaces `eval.judge.groundedness`) | `judge` | 0 | 300 | structured output `{verdicts[{claim, supported, reason_code}]}` | 8,000 | eval-runner only |
+| `eval.judge.answer_relevancy` (v2.7) | `judge` | 0 | 200 | structured output `{questions[3], noncommittal}` | 2,000 | eval-runner only |
+| `eval.judge.context_precision`, `eval.judge.context_utilisation` (v2.7) | `judge` | 0 | 200 | structured output `{verdicts[{chunk_id, relevant}]}` | 8,000 | eval-runner only |
+| `eval.judge.context_recall`, `eval.judge.answer_correctness` (v2.7) | `judge` | 0 | 400 | structured output | 8,000 | eval-runner offline only (need a reference) |
 | `session.summarise` (v2.6) | `gen-small` | 0 | 300 | structured output `{summary, refs[]}` | 2,000 | `supervisor`, after the reply is released (§16.4) |
 
 Per-request totals stay inside the plan's budget (≤ 12k input, ≤ 1.5k output): UC1 ≤ 7k / 450, UC2 ≤ 11k / 820
@@ -2210,8 +2233,9 @@ hashes. Thresholds are tuned on the golden set; the false-positive block rate (�
 | Policy check | orchestrator (UC1 lines, UC3 tasks and call report), tool-gateway (UC3 tasks at commit) | phrase and pattern list for Bank commitments: approval promises ("approved", "will approve", "pre-approved", "guarantee"), pricing ("rate of", "margin", "pricing", "discount", "fee waiver"), limits ("increase your limit", "new limit"); Arabic equivalents. Requests by the customer ("asked about a limit increase") are allowed by pattern design and measured in the false-positive gate |
 | Output rendering check | orchestrator | no URLs, no Markdown link or image syntax, no HTML tags, no zero-width or bidi control characters (C19) |
 | Structured output validation | orchestrator | JSON Schema validation of every structured output |
-| Retrieval threshold | orchestrator (UC2) | top `rerankerScore ≥ 2.0`, keep passages `≥ top − 1.0` |
-| Groundedness (local, always) | orchestrator (UC2) | every sentence cites a valid passage; content-word support ≥ 0.6; no number (digits or number words) absent from the cited passages; answer passes only if **all** sentences pass |
+| Retrieval gate (pre-generation, v2.7, §17.2 step 4) | orchestrator (UC2) | top `rerankerScore ≥ 2.0` and context relevance `≥ 0.5` over candidates `≥ 1.0`; keep passages `≥ max(2.0, top − 1.0)`; else decline with no model call |
+| Faithfulness (local, always; v2.7 name for groundedness, §17.2 step 7) | orchestrator (UC2) | every sentence cites a valid passage; content-word support ≥ 0.6 and embedding similarity ≥ 0.75 to the cited passage; no number (digits or number words) absent from the cited passages; `F_rt ≥ 0.9`, which for UC2 answer lengths means **all** sentences pass |
+| Answer relevancy (local, v2.7, §17.2 step 7) | orchestrator (UC2) | calibrated question-to-answer embedding similarity `AR_rt ≥ 0.7` |
 | Groundedness (Content Safety) | Content Safety, only if offered in-region and flag on **[confirm]** | `ungroundedDetected = false` |
 
 ### 9.2 UC1 pre-meeting brief
@@ -2244,10 +2268,10 @@ mercy of the model.
 | 3 | PII masking of the question | orchestrator | regex fallback |
 | 4 | Rewrite (`gen-small`, structured) | orchestrator | failure or timeout: use the masked question as the query |
 | 5 | `search_policies` with mandatory filters | tool-gateway | `503` (no answer without retrieval); embeddings down: keyword mode |
-| 6 | Retrieval threshold | orchestrator | **decline** `WEAK_RETRIEVAL` |
+| 6 | Pre-generation retrieval gate (§17.2 step 4) | orchestrator | **decline** `WEAK_RETRIEVAL`, no model call |
 | 7 | Answer (`gen-large`) with content filter | orchestrator, Azure OpenAI | model unavailable or filtered: **degrade** to ranked passages without a generated answer |
 | 8 | `INSUFFICIENT_EVIDENCE` sentinel | orchestrator | **decline** `MODEL_INSUFFICIENT_EVIDENCE` |
-| 9 | Groundedness (local always; Content Safety if enabled) incl. numeric check | orchestrator | fail: **retry once** with `uc2.answer.strict` only if ≥ 4,000 ms remain; otherwise **decline** `NO_TIME_FOR_RETRY`; second failure: **decline** `FAILED_GROUNDEDNESS` |
+| 9 | Post-generation gates (§17.2 step 7): citations, numeric check, faithfulness, answer relevancy (local always; Content Safety if enabled) | orchestrator | fail: **retry once** with `uc2.answer.strict` only if ≥ 4,000 ms remain; otherwise **decline** `NO_TIME_FOR_RETRY`; second failure: **decline** `FAILED_GROUNDEDNESS` (or `LOW_ANSWER_RELEVANCY`) |
 | 10 | Rendering check | orchestrator | treat as groundedness failure (retry or decline) |
 | 11 | Release | orchestrator | answer released only after passing (C18) |
 
@@ -2614,12 +2638,12 @@ sequenceDiagram
 | Service | Span names (kind) |
 |---|---|
 | `web-bff` | `HTTP {method} {route}` (server); `bff.session.validate`; `bff.obo.acquire` (client, Entra); `bff.flags.check`; `bff.approve.step_up_check`; `bff.approve.canonicalise`; `bff.approve.sign` (client, Key Vault); `HTTP POST orchestrator` (client) |
-| `orchestrator` | `uc1.brief`, `uc2.answer`, `uc3.draft`, `uc3.commit` (internal, one per request); `tool.invoke {tool}` (client); `guardrail.prompt_shields`, `guardrail.pii`, `guardrail.quarantine`, `guardrail.placeholder`, `guardrail.numeric`, `guardrail.policy`, `guardrail.rendering`, `guardrail.groundedness`; `uc2.rewrite`; `chat {deployment}` and `embeddings {deployment}` (client, OTel GenAI convention `{gen_ai.operation.name} {gen_ai.request.model}`); `degraded.render` |
+| `orchestrator` | `uc1.brief`, `uc2.answer`, `uc3.draft`, `uc3.commit` (internal, one per request); `tool.invoke {tool}` (client); `guardrail.prompt_shields`, `guardrail.pii`, `guardrail.quarantine`, `guardrail.placeholder`, `guardrail.numeric`, `guardrail.policy`, `guardrail.rendering`, `guardrail.groundedness`; `gate.retrieval`, `gate.post`, `budget.check` (v2.7, §17.2); `uc2.rewrite`; `chat {deployment}` and `embeddings {deployment}` (client, OTel GenAI convention `{gen_ai.operation.name} {gen_ai.request.model}`); `degraded.render` |
 | `tool-gateway` | `HTTP POST /v1/tools/{tool}` (server); `entitlement.check`; `sor.{system}.{operation}` (client, via APIM); `search.query`; `approval.verify`; `jti.create`; `approval.persist`; `saga.execute`; `saga.item.write`; `outbox.deliver`; `audit.publish` (producer, Event Hubs) |
 | `outbox-worker` | `outbox.poll`; `outbox.deliver` (with a span **link** to the originating commit trace, stored as `trace_id` on the item); `outbox.read_before_retry`; `outbox.sweep` |
 | `ingestion-worker` | `ingest.document`; `ingest.layout`; `ingest.pii_scan`; `ingest.shield_scan`; `ingest.chunk`; `ingest.embed`; `ingest.index` |
 | `audit-writer` | `audit.consume` (consumer); `audit.chain.append`; `audit.content.seal`; `audit.chain.seal`; `audit.spool.drain`; `audit.la.ingest` |
-| `eval-runner` | `eval.run`; `eval.item`; `eval.judge` |
+| `eval-runner` | `eval.run`; `eval.item`; `eval.judge {template_id}`; v2.7: `eval.online.poll`, `eval.online.item`, `eval.online.window`, `ops.summary` |
 
 ### 11.3 Span and log attributes
 
@@ -2629,7 +2653,7 @@ Allowed (all values scalar; no free text):
 |---|---|
 | Request | `rmc.request_id`, `rmc.use_case`, `rmc.surface`, `rmc.mode`, `rmc.outcome`, `rmc.error_code`, `rmc.reason`, `rmc.deadline_ms`, `rmc.remaining_ms`, `rmc.attempt`, `rmc.rm_hash`, `rmc.customer_hash` |
 | Tools | `rmc.tool`, `rmc.tool_contract_version`, `rmc.source_system`, `rmc.source_status`, `rmc.cache`, `rmc.entitlement_result`, `rmc.entitlement_basis`, `rmc.breaker_state`, `rmc.field_count` |
-| Guardrails | `rmc.guardrail.check`, `rmc.guardrail.action`, `rmc.guardrail_version`, `rmc.lines_dropped`, `rmc.groundedness_score`, `rmc.retrieval_mode`, `rmc.passages`, `rmc.top_reranker_score`, `rmc.decline_reason` |
+| Guardrails | `rmc.guardrail.check`, `rmc.guardrail.action`, `rmc.guardrail_version`, `rmc.lines_dropped`, `rmc.groundedness_score`, `rmc.retrieval_mode`, `rmc.passages`, `rmc.top_reranker_score`, `rmc.decline_reason`; v2.7: `rmc.gate`, `rmc.gate.outcome`, `rmc.gate_version`, `rmc.context_relevance`, `rmc.faithfulness_rt`, `rmc.answer_relevancy_rt`, `rmc.eval_sample`, `rmc.agent` |
 | Model | `gen_ai.operation.name`, `gen_ai.system` / `gen_ai.provider.name` **[confirm current semconv]**, `gen_ai.request.model` (deployment), `gen_ai.response.model`, `gen_ai.request.max_tokens`, `gen_ai.request.temperature`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.response.finish_reasons`, `rmc.prompt_template_id`, `rmc.prompt_template_sha256`, `rmc.backend` |
 | Writes | `rmc.saga_state`, `rmc.item_kind`, `rmc.item_state`, `rmc.outbox_attempt`, `rmc.outcome_unknown`, `rmc.approval.kid`, `rmc.approval.result`, `rmc.approval.reason`, `rmc.jti_hash` |
 | HTTP | `http.request.method`, `http.route` (template only), `http.response.status_code`, `server.address`, `error.type` |
@@ -2659,7 +2683,9 @@ Names carry the `rmc_` prefix in production; the prototype emits the same names 
 | `rmc_http_request_duration_seconds` | histogram | `service`, `route` | seconds; buckets 0.05 to 20 |
 | `rmc_http_server_inflight_requests` | gauge | `service` | used by KEDA |
 | `rmc_usecase_requests_total` | counter | `use_case`, `outcome` (`answered`, `partial`, `degraded`, `declined`, `client_error`, `server_error`, `disabled`) | SLI source |
-| `rmc_usecase_duration_seconds` | histogram | `use_case`, `outcome` | end-to-end at `web-bff`; buckets 0.5, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 15, 20 |
+| `rmc_request_duration_seconds` | histogram | `use_case`, `outcome` | seconds, end-to-end at `web-bff`; buckets 0.5, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 15, 20 (v2.7 name; was `rmc_usecase_duration_seconds`) |
+| `rmc_stage_duration_seconds` | histogram | `use_case`, `stage`, `call` | seconds per stage (§11.8.1); buckets 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 3, 4, 6, 8 (v2.7) |
+| `rmc_stage_budget_seconds` | gauge | `use_case`, `stage`, `call` | seconds, plan §5 budget per stage and `end_to_end`, set from App Configuration (v2.7) |
 | `rmc_degraded_total` | counter | `use_case`, `reason` | |
 | `rmc_declines_total` | counter | `reason` | UC2 |
 | `rmc_http_client_requests_total` | counter | `service`, `peer`, `status` | outbound calls |
@@ -2669,14 +2695,21 @@ Names carry the `rmc_` prefix in production; the prototype emits the same names 
 | `rmc_source_calls_total` | counter | `system`, `outcome` | systems of record via facade |
 | `rmc_entitlement_cache_total` | counter | `result` (`hit_local`, `hit_cosmos`, `miss`) | |
 | `rmc_entitlement_denials_total` | counter | (none) | per-RM view only in Sentinel |
-| `rmc_llm_tokens_total` | counter | `deployment`, `use_case`, `type` (`input`, `output`) | tokens |
+| `rmc_llm_tokens_total` | counter | `deployment`, `use_case`, `agent`, `type` (`input`, `output`) | tokens (`agent` added in v2.7; `use_case="eval"` for judge calls) |
+| `rmc_tokens_per_request` | histogram | `use_case`, `type` (`input`, `output`) | tokens per request, chat models, observed once per request (§11.8.2; v2.7) |
 | `rmc_llm_request_duration_seconds` | histogram | `deployment`, `use_case`, `phase` (`ttft`, `total`) | seconds |
-| `rmc_llm_cost_aed_total` | counter | `deployment`, `use_case` | AED from the price table in App Configuration |
+| `rmc_cost_aed_total` | counter | `use_case`, `deployment`, `component` (`model`, `embed`, `content_safety`, `language`, `semantic_ranker`) | AED, estimated from the price table in App Configuration (§11.8.3; v2.7 name, was `rmc_llm_cost_aed_total`) |
 | `rmc_apim_backend_requests_total` | counter | `backend`, `status` | from the APIM mock / App Insights |
 | `rmc_apim_policy_rejections_total` | counter | `policy` | `llm-token-limit-quota`, `llm-token-limit-tpm`, `validate-jwt`, `rate-limit` |
 | `rmc_guardrail_events_total` | counter | `use_case`, `check`, `action` (`pass`, `block`, `drop_line`, `drop_item`, `decline`, `degrade`, `quarantine`, `mask`) | |
 | `rmc_guardrail_fallback_total` | counter | `service` (`content-safety`, `language`) | local rules decided |
-| `rmc_groundedness_score` | histogram | `attempt` | 0 to 1 |
+| `rmc_runtime_gate_total` | counter | `use_case`, `gate` (`retrieval`, `profile_present`, `citations`, `numeric`, `policy`, `rendering`, `placeholder`, `schema`, `faithfulness`, `answer_relevancy`, `cs_groundedness`), `outcome` (`passed`, `retried`, `declined`, `degraded`, `dropped`, `skipped`) | gate evaluations (§17.2; v2.7) |
+| `rmc_runtime_gate_score` | histogram | `use_case`, `gate` (`top_reranker` 0 to 4; `context_relevance`, `faithfulness`, `answer_relevancy` 0 to 1) | score per gate evaluation (v2.7; replaces `rmc_groundedness_score`) |
+| `rmc_budget_exceeded_total` | counter | `use_case`, `budget` (`request_input_tokens`, `request_output_tokens`, `tool_steps`, `hops`, `deadline`, `rm_daily`), `action` (`refused`, `degraded`) | refusals by the budget guard (§17.2 step 1; v2.7) |
+| `rmc_online_eval_score` | histogram | `use_case`, `metric` (`faithfulness`, `answer_relevancy`, `context_precision`, `context_utilisation`) | 0 to 1, one observation per judged item; buckets 0.1 to 1.0 by 0.1 (§17.3; v2.7) |
+| `rmc_online_eval_items_total` | counter | `use_case`, `outcome` (`sampled`, `judged`, `skipped_cap`, `skipped_erased`, `skipped_stale`, `judge_error`) | online sampler throughput and coverage (v2.7) |
+| `rmc_online_eval_alert` | gauge | `use_case`, `metric`, `window` (`1h`, `3d`) | 1 when the window breaches its threshold with enough items, else 0 (§17.3 step 8; v2.7) |
+| `rmc_rm_feedback_total` | counter | `use_case`, `rating` (`up`, `down`), `reason` | RM feedback (§17.3 step 7; v2.7) |
 | `rmc_approval_tokens_verified_total` | counter | (none) | |
 | `rmc_approval_tokens_rejected_total` | counter | `reason` | §4.6 reasons and `REPLAYED` |
 | `rmc_crm_write_items_total` | counter | `outcome` (`committed`, `queued`, `failed`) | first attempt |
@@ -2698,7 +2731,7 @@ Names carry the `rmc_` prefix in production; the prototype emits the same names 
 | `rmc_config_refresh_age_seconds` | gauge | `service` | |
 | `rmc_approval_key_age_days` | gauge | `kid` | rotation hygiene |
 | `rmc_ingestion_documents_total` | counter | `outcome` (`indexed`, `quarantined`, `failed`) | |
-| `rmc_eval_metric` | gauge | `suite`, `metric`, `deployment` | from eval-runner (pushed via a job exporter) |
+| `rmc_eval_metric` | gauge | `suite` (`release`, `nightly`, `weekly`, `redteam`), `metric`, `deployment` | from eval-runner (pushed via a job exporter); includes `run_completed_timestamp` |
 
 No metric has an RM, customer or free-text label (cardinality and privacy).
 
@@ -2707,9 +2740,10 @@ No metric has an RM, customer or free-text label (cardinality and privacy).
 | Dashboard | Panels |
 |---|---|
 | **Service overview (SLO)** | availability SLI per use case (business hours), error-budget remaining (28 days), burn-rate 1 h and 6 h, p50/p95 end-to-end per use case against 8 / 7 / 10 / 2 s lines, outcome mix (answered, partial, degraded, declined), requests per minute by surface |
-| **Latency budget** | stacked p95 per step (edge + OBO, entitlement, fan-out or retrieval, PII and shields, router, generation TTFT and total, checks) matching `00-plan.md` §5; deadline-exceeded counts per hop |
+| **Latency budget** | p95 per stage from `rmc_stage_duration_seconds` (edge + OBO, entitlement, fan-out or retrieval, PII and shields, routing, retrieval gate, each model call, post-generation gates) against `rmc_stage_budget_seconds`, matching `00-plan.md` §5; deadline-exceeded counts per hop |
+| **Runtime operations** (v2.7) | p50/p95/p99 end to end per use case; p95 per stage; tokens per request p50/p95 (input, output) with the 12k / 1.5k lines and the 7-day baseline × 1.2; tokens by agent and deployment; cost per request and per day (AED, estimated) vs 80% of budget; runtime gate outcomes per gate; budget exceedances by budget; tokens per RM per day distribution (from the daily job) |
 | **AI usage and cost** | tokens per minute by deployment and use case, AED per day vs budget (80% line), per-use-case TPM vs APIM limit, `llm-token-limit` rejections, backend share (priority 1 vs 2), model latency, finish reasons |
-| **Guardrails and quality** | guardrail actions by check and use case, lines dropped per brief, UC2 decline rate by reason, groundedness score distribution, fallback-to-local count, nightly eval metrics vs gates, false-positive review queue size |
+| **Guardrails and quality** | guardrail actions by check and use case, lines dropped per brief, UC2 decline rate by reason, retrieval-gate decline rate vs 7-day baseline, runtime faithfulness and answer relevancy distributions, online RAGAS scores (1 h rolling, 3-day, 7-day) with thresholds, online sample coverage, RM thumbs-down rate, fallback-to-local count, nightly and weekly eval metrics vs gates, false-positive review queue size |
 | **Dependencies and breakers** | per system of record: rate, error %, p95, breaker state timeline, bulkhead saturation, facade rate-limit hits |
 | **Writes and outbox** | approvals verified vs rejected by reason, replays, commit p95, first-attempt outcome, outbox pending by state, oldest age, deliveries by outcome, poison count, paused flag |
 | **Audit pipeline** | events published vs appended, consumer lag per partition, spool writes and oldest spooled age, seal age, verify failures, content sealed, Log Analytics ingestion lag |
@@ -2740,10 +2774,10 @@ available; a decline is the correct behaviour); `client_error` (for example `NOT
 |---|---|---|---|---|
 | `RmcAvailabilityFastBurn` | `rmc:sli_errors:ratio_rate1h > (14.4 * 0.01) and rmc:sli_errors:ratio_rate5m > (14.4 * 0.01) and on() rmc:business_hours and on() sum(increase(rmc_usecase_requests_total[1h])) > 20` | 2m | page | 2% of the 30-day budget in 1 h; minimum volume guard for pilot traffic |
 | `RmcAvailabilitySlowBurn` | `sum(rate(rmc_usecase_requests_total{outcome="server_error"}[6h])) / clamp_min(sum(rate(rmc_usecase_requests_total{outcome!~"client_error\|disabled"}[6h])),1e-9) > (6 * 0.01) and on() rmc:business_hours` | 15m | page (P2, as `04` §8.3 medium burn) | 5% of budget in 6 h |
-| `RmcUC1LatencyP95` | `histogram_quantile(0.95, sum by (le) (rate(rmc_usecase_duration_seconds_bucket{use_case="uc1"}[30m]))) > 8 and on() rmc:business_hours` | 30m | ticket | UC1 ≤ 8 s |
-| `RmcUC2LatencyP95` | same with `use_case="uc2"` and `> 7` | 30m | ticket | UC2 ≤ 7 s |
-| `RmcUC3DraftLatencyP95` | same with `use_case="uc3_draft"` and `> 10` | 30m | ticket | UC3 ≤ 10 s |
-| `RmcCommitLatencyP95` | same with `use_case="uc3_commit"` and `> 2` | 30m | ticket | commit ≤ 2 s |
+| `RmcUC1LatencyP95` | `histogram_quantile(0.95, sum by (le) (rate(rmc_request_duration_seconds_bucket{use_case="uc1"}[15m]))) > 8 and on() rmc:business_hours` | 15m | ticket | UC1 ≤ 8 s (v2.7: 15 min per plan §3.9; generalised by `RmcRequestLatencyP95`, §11.8.5) |
+| `RmcUC2LatencyP95` | same with `use_case="uc2"` and `> 7` | 15m | ticket | UC2 ≤ 7 s |
+| `RmcUC3DraftLatencyP95` | same with `use_case="uc3_draft"` and `> 10` | 15m | ticket | UC3 ≤ 10 s |
+| `RmcCommitLatencyP95` | same with `use_case="uc3_commit"` and `> 2` | 15m | ticket | commit ≤ 2 s |
 | `RmcDegradedRatioHigh` | `sum(rate(rmc_usecase_requests_total{outcome="degraded"}[15m])) / clamp_min(sum(rate(rmc_usecase_requests_total[15m])),1e-9) > 0.2 and on() rmc:business_hours` | 15m | ticket (page if > 0.5) | C3; model or quota trouble |
 | `RmcModelBackendsOpen` | `min(rmc_circuit_breaker_state{backend=~"aoai-.*"}) == 1` | 5m | page | both regional backends open |
 | `RmcBreakerOpen` | `max by (service, peer) (rmc_circuit_breaker_state) == 1` | 5m | ticket | dependency SLAs (`04`) |
@@ -2761,9 +2795,12 @@ available; a decline is the correct behaviour); `client_error` (for example `NOT
 | `RmcEntitlementDenialsSpike` | `sum(increase(rmc_entitlement_denials_total[15m])) > 10` | 0m | ticket (security) | C15 (per-RM detail in Sentinel) |
 | `RmcConfigStale` | `max(rmc_config_refresh_age_seconds) > 300` | 2m | page | early warning; writes fail closed after 15 min (plan §3.3) |
 | `RmcWritesKillSwitchOn` | `max(rmc_feature_flag_state{flag="writes"}) == 0` | 0m | info (notify RM ops) | C15 playbook |
-| `RmcTokenSpend80` | `sum(increase(rmc_llm_cost_aed_total[1d])) > 0.8 * <daily AED budget>` | 0m | ticket | C10 (Azure budgets alert too) |
-| `RmcNightlyEvalGate` | `min(rmc_eval_metric{suite="nightly", metric=~"groundedness_lb\|citation_accuracy_lb"}) < 0.95 or max(rmc_eval_metric{suite="nightly", metric=~"entitlement_leaks\|injection_success\|numeric_mismatches"}) > 0` | 0m | ticket (MRM) | C23 |
+| `RmcTokenSpend80` | Replaced in v2.7 by `RmcDailyCost80` (§11.8.5) on `rmc_cost_aed_total` | n/a | n/a | C10 (Azure budgets alert too) |
+| `RmcNightlyEvalGate` | `min(rmc_eval_metric{suite="nightly", metric=~"faithfulness_lb\|citation_accuracy_lb"}) < 0.95 or max(rmc_eval_metric{suite="nightly", metric=~"entitlement_leaks\|injection_success\|numeric_mismatches"}) > 0` | 0m | ticket (MRM) | C23 |
 | `RmcApprovalKeyAge` | `max(rmc_approval_key_age_days) > 95` | 1h | ticket | 90-day rotation |
+
+v2.7: alerts on per-stage latency, tokens per request, cost, runtime gate outcomes and online evaluation scores are in
+§11.8.5.
 
 ### 11.7 Sentinel analytics (C15, illustrative KQL on `RmCopilotAudit_CL`)
 
@@ -2785,6 +2822,158 @@ RmCopilotAudit_CL
 
 Thresholds are starting points tuned in the pilot. The playbook can set `writes` (or a use-case flag) off in App
 Configuration and opens an incident; turning it back on is a human action.
+
+### 11.8 Runtime operations metrics (plan §3.9, v2.7)
+
+Every request produces metadata-only operations metrics: latency per use case and per stage, tokens per request,
+estimated cost, runtime gate outcomes and budget exceedances (ADR-027 decision 7). Names, labels and units are in
+the §11.4 table; this section says how they are measured and used. None carries an RM, customer or free-text label.
+
+#### 11.8.1 Per-stage latency breakdown
+
+Each service registers an OpenTelemetry span processor that maps the span names of §11.2 to a `stage` and records
+the span duration into `rmc_stage_duration_seconds{use_case, stage, call}`; stage timings and traces therefore always
+agree, and exemplars link a slow bucket to a trace. Stages that run in parallel (PII and Prompt Shields with the tool
+fan-out) overlap, so per-stage p95 values do not add up to the end-to-end p95; the critical path of a single request
+is read from its trace.
+
+| `stage` | Span(s) mapped | `call` label | Budget p95 (plan §5, ms): UC1 / UC2 / UC3 draft |
+|---|---|---|---|
+| `edge` | `web-bff` server span up to the orchestrator client span (session, flags, rate limit) | `-` | 150 / 150 / 150 (with `obo`) |
+| `obo` | `bff.obo.acquire` | `-` | included in `edge` |
+| `entitlement` | `entitlement.check` | `-` | 20 cached, 150 miss / n/a / 20, 150 |
+| `tool_fanout` | `tool.invoke {tool}` for customer tools | tool name | 1,500 / n/a / 300 (profile only) |
+| `retrieval` | `embeddings embed`, `search.query` (embed + search + rerank) | `-` | n/a / 700 / n/a |
+| `pii` | `guardrail.pii` | `-` | 300 / 400 / 400 (with `prompt_shields`, parallel where possible) |
+| `prompt_shields` | `guardrail.prompt_shields`, `guardrail.quarantine` | `-` | as `pii` |
+| `routing` | supervisor rule evaluation (no model call in the pilot, plan v2.7a) | `-` | 0 / 0 / 0 |
+| `retrieval_gate` | `gate.retrieval` (§17.2 step 4) | `-` | n/a / ≤ 5 / n/a |
+| `model` | `chat {deployment}` | prompt template id (`uc1.brief`, `uc2.rewrite`, `uc2.answer`, `uc2.answer.strict`, `uc3.extract`, `session.summarise`) | 4,300 (`uc1.brief`) / 600 (`uc2.rewrite`) + 3,500 (`uc2.answer`) / 4,000 (`uc3.extract`) |
+| `post_gates` | `gate.post` (placeholder, numeric, policy, rendering, faithfulness, answer relevancy; §17.2 step 7) | `-` | 100 / 400 / 100 |
+| `budget_check` | `budget.check` | `-` | ≤ 2 each |
+| `audit` | `audit.publish` | `-` | inside `tool_fanout` |
+| `response` | orchestrator and `web-bff` response serialisation | `-` | inside `edge` |
+
+The budgets are exported as `rmc_stage_budget_seconds{use_case, stage, call}` (a gauge that `orchestrator` sets from
+`rmc:orchestrator:stage_budget_ms:<use_case>:<stage>[:<call>]`, defaults from plan §5, `call="-"` where not a model
+stage), plus `stage="end_to_end"` with the plan §5 targets (8 / 7 / 10 / 2 s), so alert rules compare like with like.
+
+#### 11.8.2 Tokens per request
+
+- The orchestrator's budget object (§8.4) adds the `usage` of every chat and embeddings response (input and output
+  tokens) as the request runs. At the end of the request it observes `rmc_tokens_per_request{use_case, type}` once for
+  `type="input"` and once for `type="output"` (chat models only; `embed` tokens are in `rmc_llm_tokens_total`).
+  Buckets: 250, 500, 1,000, 2,000, 4,000, 6,000, 8,000, 10,000, 12,000, 14,000, 16,000.
+- The split per agent and deployment comes from `rmc_llm_tokens_total{deployment, use_case, agent, type}` divided by
+  the request count of the use case.
+- Expected values (02 §8.1): UC1 ≤ 7k input / 450 output; UC2 ≤ 11k / 820 with one strict retry; UC3 ≤ 4k / 900;
+  the plan §5 hard budget is 12k / 1.5k.
+- **Tokens per RM per day** never appear in Prometheus (no RM label). A daily job computes the distribution (p50, p95,
+  maximum) from the restricted audit table (`metrics.tokens_in`, `metrics.tokens_out`) and APIM `llm-token-limit`
+  usage; the ops summary returns only the distribution; per-RM figures stay in the restricted table (06 §11.2).
+- The orchestrator's counts are reconciled daily with the APIM token metrics; a difference above 2% opens a ticket
+  (tokenizer drift or a call path that bypasses the budget object).
+
+#### 11.8.3 Cost per request
+
+Estimated cost in AED, computed by `orchestrator` at the end of each request from the token usage and service calls of
+that request and a **price table in App Configuration** (prices come from the Bank's agreement and the pricing
+calculator, are never hard-coded and are not stated in this document):
+
+```text
+cost_aed = Σ_chat_calls ( in_tokens / 1000 × price[dep].input_per_1k + out_tokens / 1000 × price[dep].output_per_1k )
+         + embed_tokens / 1000 × price[embed].per_1k
+         + content_safety_records / 1000 × price[content_safety].per_1k_records
+         + language_records / 1000 × price[language].per_1k_records
+         + semantic_queries / 1000 × price[semantic_ranker].per_1k_queries
+```
+
+| Key | Meaning |
+|---|---|
+| `rmc:finops:price_table_version` | Version of the table (recorded in the audit lineage of each request) |
+| `rmc:finops:price:<deployment>:input_per_1k_aed`, `...:output_per_1k_aed` | Per deployment alias (`gen-large`, `gen-small`, judge) |
+| `rmc:finops:price:embed:per_1k_aed` | Embeddings |
+| `rmc:finops:price:content_safety:per_1k_records_aed`, `rmc:finops:price:language:per_1k_records_aed` | Per 1,000 text records **[confirm record definition]** |
+| `rmc:finops:price:semantic_ranker:per_1k_queries_aed` | Semantic ranker |
+| `rmc:finops:daily_budget_aed`, `rmc:finops:daily_budget_aed:eval` | Daily budgets for user traffic and for evaluation (alerts at 80%) |
+
+Each component is added to `rmc_cost_aed_total{use_case, deployment, component}`; cost per request is
+`increase(rmc_cost_aed_total[w]) / increase(rmc_request_duration_seconds_count[w])` per use case. Judge calls of the
+online sampler use `use_case="eval"`. The estimate is reconciled monthly with Cost Management (06 §11.2); fixed
+platform cost is not part of it.
+
+#### 11.8.4 Ops summary API
+
+`GET /admin/v1/ops/summary?window=1h|24h|7d&use_case=uc1|uc2|uc3_draft|all`, served by the `eval-runner` online
+worker (§17.3), role `Ops.Read` (SRE, product owner, MRM, FinOps). The worker queries Azure Monitor managed Prometheus
+with its managed identity (Monitoring Data Reader on the Azure Monitor workspace **[confirm role name]**) and reads
+its own online-eval records; responses are cached for 60 s and contain metadata only. The prototype serves the same
+shape from in-process counters on `web-bff` at `GET /api/ops/summary` (operator role) **[LLD decision]**.
+
+```json
+{
+  "window": "24h", "generated_at": "2026-11-26T14:00:00Z", "price_table_version": "2026-11",
+  "use_cases": {
+    "uc2": {
+      "requests": 2391,
+      "outcomes": {"answered": 0.81, "declined": 0.17, "degraded": 0.02},
+      "latency_p95_s": {"end_to_end": 5.6, "stages": {"edge": 0.13, "retrieval": 0.62, "retrieval_gate": 0.001,
+        "model.uc2.rewrite": 0.55, "model.uc2.answer": 3.40, "post_gates": 0.21}},
+      "tokens_per_request": {"input_p50": 5900, "input_p95": 10900, "output_p95": 410},
+      "cost_aed": {"total": "<AED, from the price table>", "per_request_mean": "<AED>"},
+      "runtime_gates": {"retrieval": {"passed": 0.86, "declined": 0.14},
+        "faithfulness": {"passed": 0.95, "retried": 0.04, "declined": 0.01},
+        "answer_relevancy": {"passed": 0.98, "retried": 0.015, "declined": 0.005}},
+      "online_eval": {"items": 41, "faithfulness_mean": 0.96, "answer_relevancy_mean": 0.88,
+        "context_precision_mean": 0.84, "context_utilisation_mean": 0.79},
+      "rm_feedback": {"up": 63, "down": 5}
+    }
+  },
+  "tokens_per_rm_day": {"p50": 61000, "p95": 188000, "max": 342000},
+  "budget_exceeded": {"request_input_tokens": 3, "tool_steps": 0, "hops": 0, "deadline": 11},
+  "alerts_firing": ["RmcTokensPerRequestCreep"]
+}
+```
+
+#### 11.8.5 Alert rules (PromQL-style, illustrative)
+
+Recording rules:
+
+```yaml
+- record: rmc:stage_p95_seconds:15m
+  expr: histogram_quantile(0.95, sum by (le, use_case, stage, call) (rate(rmc_stage_duration_seconds_bucket[15m])))
+- record: rmc:request_p95_seconds:15m
+  expr: histogram_quantile(0.95, sum by (le, use_case) (rate(rmc_request_duration_seconds_bucket[15m])))
+- record: rmc:tokens_per_request_input_p95:1h
+  expr: histogram_quantile(0.95, sum by (le, use_case) (rate(rmc_tokens_per_request_bucket{type="input"}[1h])))
+- record: rmc:retrieval_gate_decline_ratio:1h
+  expr: |
+    sum(rate(rmc_runtime_gate_total{gate="retrieval", outcome="declined"}[1h]))
+    / clamp_min(sum(rate(rmc_runtime_gate_total{gate="retrieval"}[1h])), 1e-9)
+- record: rmc:retrieval_gate_decline_ratio:7d
+  expr: avg_over_time(rmc:retrieval_gate_decline_ratio:1h[7d])
+```
+
+| Alert | Expression (illustrative) | For | Severity | Plan §3.9 rule |
+|---|---|---|---|---|
+| `RmcRequestLatencyP95` | `rmc:request_p95_seconds:15m > on(use_case) rmc_stage_budget_seconds{stage="end_to_end"} and on() rmc:business_hours` | 15m | ticket (page if > 1.25 × budget) | p95 above budget for 15 min (replaces the four per-use-case rules of §11.6) |
+| `RmcStageLatencyP95` | `rmc:stage_p95_seconds:15m > on(use_case, stage, call) rmc_stage_budget_seconds and on() rmc:business_hours` | 15m | ticket | Per-stage budget breach; names the stage to fix |
+| `RmcTokensPerRequestCreep` | `rmc:tokens_per_request_input_p95:1h > 1.2 * avg_over_time(rmc:tokens_per_request_input_p95:1h[7d])` | 1h | ticket | p95 tokens per request > 1.2 × the 7-day baseline |
+| `RmcTokensPerRequestBudget` | `rmc:tokens_per_request_input_p95:1h > 12000` | 15m | ticket (FinOps, architecture) | Plan §5 hard budget |
+| `RmcDailyCost80` | `sum(increase(rmc_cost_aed_total{use_case!="eval"}[1d])) > 0.8 * <rmc:finops:daily_budget_aed>` (value rendered into the rule by the pipeline) | 0m | ticket (FinOps) | Daily cost > 80% of budget (replaces `RmcTokenSpend80`) |
+| `RmcEvalCost80` | `sum(increase(rmc_cost_aed_total{use_case="eval"}[1d])) > 0.8 * <rmc:finops:daily_budget_aed:eval>` | 0m | ticket | Judge spend |
+| `RmcRetrievalGateDeclineRise` | `(rmc:retrieval_gate_decline_ratio:1h - rmc:retrieval_gate_decline_ratio:7d) > 0.05 and on() sum(increase(rmc_runtime_gate_total{gate="retrieval"}[1h])) >= 20` | 30m | ticket (P3; P2 if > 15 points) | Decline rate up 5 points on its 7-day baseline |
+| `RmcFaithfulnessGateFailures` | `sum(rate(rmc_runtime_gate_total{gate="faithfulness", outcome!="passed"}[1h])) / clamp_min(sum(rate(rmc_runtime_gate_total{gate="faithfulness"}[1h])), 1e-9) > 0.05 and on() sum(increase(rmc_runtime_gate_total{gate="faithfulness"}[1h])) >= 20` | 0m | ticket (P2) | Faithfulness gate failures > 5% for 1 h |
+| `RmcBudgetExceededRate` | `sum(increase(rmc_budget_exceeded_total{budget=~"request_.*\|tool_steps\|hops"}[1h])) > 0.005 * sum(increase(rmc_request_duration_seconds_count[1h]))` | 0m | ticket | C10, C28 |
+| `RmcOnlineFaithfulnessLow` | `max by (use_case) (rmc_online_eval_alert{metric="faithfulness", window="1h"}) == 1` | 5m | ticket (MRM, product owner) | Online faithfulness < 0.90 for 1 h |
+| `RmcOnlineAnswerRelevancyLow` | `max by (use_case) (rmc_online_eval_alert{metric="answer_relevancy", window="1h"}) == 1` | 5m | ticket | Online answer relevancy < 0.80 for 1 h |
+| `RmcOnlineFaithfulnessTrend` | `max by (use_case) (rmc_online_eval_alert{metric="faithfulness", window="3d"}) == 1` | 0m | page (P2, business hours) | Faithfulness < 0.93 over 3 business days (`05` §8.5) |
+| `RmcOnlineEvalStalled` | `sum(increase(rmc_online_eval_items_total{outcome="judged"}[2h])) == 0 and on() sum(increase(rmc_online_eval_items_total{outcome="sampled"}[2h])) > 0 and on() rmc:business_hours` | 30m | ticket | Judge unavailable or worker stuck (FM-80) |
+| `RmcNightlyEvalMissing` | `time() - max(rmc_eval_metric{suite="nightly", metric="run_completed_timestamp"}) > 26 * 3600` | 0m | ticket (MRM) | Nightly did not complete |
+
+Routing follows §11.6: tickets to the AI quality queue (product owner and MRM) or FinOps as noted; pages only for the
+3-day faithfulness trend and the hard gates that already page (`RmcNightlyEvalGate` for leaks, injection, numeric).
+Runbook: RB-20 (`06` §9).
 
 ---
 
@@ -2844,10 +3033,10 @@ named exactly.
 | C7 | Double posting, non-atomic writes | §5, §4.6, §10.5 | `test_timeout_then_success_no_double_post`, `test_outbox_retry_after_exp_uses_verdict`, `test_saga_recovery_sweep` |
 | C8 | Semantic cache leak | §7.1 | `test_apim_policy_lint_no_semantic_cache` |
 | C9 | Prefetch without RM | not in v1: no system-identity route exists (§2.2 endpoints); Phase 2 design to add `actor.type = system` with `on_behalf_of` (§6.4 already has the field) | `test_no_system_identity_brief_route` |
-| C10 | Token and cost runaway | §8.4, §7.1, §11.6 `RmcTokenSpend80` | `test_rm_daily_quota_returns_budget_exceeded`, `test_step_budget_enforced` |
+| C10 | Token and cost runaway | §8.4, §7.1, §11.8 (tokens per request, cost per request, `RmcDailyCost80`, `RmcTokensPerRequestCreep`), §17.2 step 1 (budget guard) | `test_rm_daily_quota_returns_budget_exceeded`, `test_step_budget_enforced` |
 | C11 | Compute platform | §2 (AKS, node pools, PodMonitor, KEDA, workload identity) | IaC tests: node pool taints, workload identity federation, PodMonitor present |
 | C12 | Model retirement | §8.2, §8.5 | `test_prompt_pin_requires_passing_eval`, release-gate run with `--deployment-override` |
-| C13 | Content filter false positives | §9.1, §2.7 | eval gate `false_positive_block_rate ≤ 0.02` |
+| C13 | Content filter false positives | §9.1, §2.7, §17.5 (false-positive and correct-decline gates), §11.8.5 `RmcRetrievalGateDeclineRise` | eval gate `false_positive_block_rate ≤ 0.02`, `correct_decline_rate` lower bound ≥ 0.90 |
 | C14 | Core banking load | §7.2 (rate limit, quota, concurrency), §1.7 (bulkheads), §3.4/3.5 (ODS replica, aggregates) | load test `load_uc1_peak_ods_within_quota`, `test_facade_rate_limit_per_backend` |
 | C15 | Insider misuse | §11.7 (Sentinel KQL), §10.7 (kill switch), §11.6 security alerts | analytics replay on synthetic audit data; `test_writes_kill_switch_blocks_commit_and_pauses_outbox` |
 | C16 | Dates and weekends | §1.2, §9.4 step 5, §3.11 (`due` rule) | `test_today_is_computed_in_gst`, `test_due_date_weekend_moves_to_monday` |
@@ -2857,12 +3046,12 @@ named exactly.
 | C20 | Graph scopes | §3.9, §3.12, §1.5 | `test_graph_scopes_calendars_readbasic_only`, `test_email_is_compose_link_only` |
 | C21 | Audit immutability vs erasure | §6.4 (`customer_ref` HMAC), §6.5, §6.6 | `test_erasure_makes_content_unreadable_chain_intact`, `test_chain_verify_detects_modification` |
 | C22 | Entitlement staleness, delegation | §2.3 (50 s + 10 s, events, delegation, team lead) | `test_entitlement_cache_max_staleness_60s`, `test_delegation_expiry`, `test_team_lead_cannot_write` |
-| C23 | Model risk management | §6.4 (lineage in every event), §8.1 (prompt hashes), §8.5, §2.7 | `test_every_audit_event_has_lineage`, eval report schema check |
+| C23 | Model risk management | §6.4 (lineage in every event), §8.1 (prompt hashes), §8.5, §2.7, §17 (four evaluation tiers, judge prompts as procedural memory, gate keys pinned through the release gate) | `test_every_audit_event_has_lineage`, eval report schema check, `test_retrieval_gate_declines_without_model_call`, `test_gate_pin_requires_passing_eval`, `test_online_sample_is_deterministic` |
 | C24 | Agent identity sprawl and over-privilege | §1.5 (agent identities, app roles), §15.2 (catalogue), §15.4 (tokens, federated credential), §15.5 (intersection, `UNEXPECTED_ROLES`) | `test_agent_token_without_tool_role_denied`, `test_agent_token_from_unregistered_workload_denied`, `test_agent_token_with_extra_roles_rejected`, `test_no_client_secret_on_agent_identities` (IaC), quarterly access review export |
 | C25 | MCP tool poisoning, rogue MCP servers | §15.3 (registered servers, definition hashes, pins), §15.5 steps G1, G5 and T3, §15.6 (filtered `tools/list`) | `test_changed_tool_description_rejected`, `test_tools_list_filtered_per_agent`, `test_unregistered_mcp_server_unreachable` (network policy), `test_server_instructions_not_passed_to_model` |
 | C26 | Memory poisoning | §16.2 (`episodes` provenance), §16.5 (write rules, re-check on recall), §9 (quarantine) | `test_injected_text_never_written_to_episodes`, `test_only_approved_or_rm_authored_episodes`, `test_recalled_episode_with_attack_dropped`, red-team memory slice |
 | C27 | Memory leaking across RMs or customers | §16.2 (partition keys by RM `oid`), §16.5 (entitlement re-check), §16.4 (session per RM) | `test_cross_rm_recall_returns_nothing`, `test_recall_after_portfolio_change_denied`, `test_delegate_does_not_see_delegator_episodes`, `test_checkpoint_resume_other_rm_404` |
-| C28 | Multi-agent error compounding, cost and latency | §15.1, §15.2 (one handoff, at most 2 hops, per-agent budgets), §1.4 (`HOP_LIMIT`, `AGENT_STEPS`) | `test_second_handoff_refused_hop_limit`, `test_request_tool_steps_capped_across_agents`, latency budget regression in the load test |
+| C28 | Multi-agent error compounding, cost and latency | §15.1, §15.2 (one handoff, at most 2 hops, per-agent budgets), §1.4 (`HOP_LIMIT`, `AGENT_STEPS`), §11.8 (per-stage p95, tokens per request by agent), §17.2 step 1 | `test_second_handoff_refused_hop_limit`, `test_request_tool_steps_capped_across_agents`, latency budget regression in the load test |
 | C29 | Checkpoints hold customer data | §16.2 (`checkpoints`, encryption, TTL), §16.3 (replay under PIM), §16.7 (erasure) | `test_checkpoint_state_encrypted_with_customer_key`, `test_replay_requires_pim_role_and_acrs`, `test_erasure_makes_checkpoint_unreadable`, `test_checkpoint_ttl_7_days_30_when_draft_open` |
 
 ---
@@ -2906,6 +3095,16 @@ named exactly.
     documents.
 24. (v2.6) Key Vault `wrapKey` with an RSA key done locally from the public key, `unwrapKey` throughput limits for
     per-customer keys at scale (Managed HSM if needed).
+25. (v2.7) Azure AI Foundry evaluation SDK: the current built-in evaluators (for example groundedness, relevance,
+    retrieval), whether AI-assisted evaluators run client-side against our in-region judge deployment, and the regional
+    availability of the risk-and-safety evaluators (plan §10 item 7).
+26. (v2.7) Foundry continuous (online) evaluation: availability in UAE North, data location, and whether it needs
+    content in Application Insights traces (conflicts with §11.1).
+27. (v2.7) Azure Monitor managed Prometheus rule groups: support for the PromQL used in §11.8.5 (`histogram_quantile`,
+    `avg_over_time` over 7 days on recording rules), evaluation interval, and action-group routing in UAE North.
+28. (v2.7) Content Safety groundedness detection in UAE North (flag `cs_groundedness`) and its latency.
+29. (v2.7) DPO and MRM approval for the online sampler to unwrap audit content keys of sampled items (§17.3 step 3);
+    Bank open-source approval of the RAGAS library for offline use (ADR-027 decision 6).
 
 ### 14.2 Inconsistencies and gaps found in `00-plan.md`
 
@@ -3473,6 +3672,8 @@ add only the RM's own approved context.
 | Agent manifests (§15.2) | `agents/<agent_id>/v<n>.json` | `manifest_sha256` | `rmc:orchestrator:agent:<agent_id>` |
 | MCP tool definitions | `contracts/mcp/<server>/<tool>/<version>.json` | `tool_def_sha256` (§15.3) | `rmc:mcp:pins:<server>:<tool>` |
 | Guardrail rules | `guardrails/<version>/` | bundle hash | `rmc:orchestrator:guardrail:version` |
+| Judge prompts (v2.7, §17.3) | `prompts/eval.judge.*/v<n>.yaml` | `template_sha256`, registry `kind = judge_prompt` | `rmc:eval:prompt:<template_id>` |
+| Runtime gate thresholds (v2.7, §17.2) | `gates/<version>.json` | `gates_sha256` | `rmc:orchestrator:gate:*`, `rmc:orchestrator:gate:version` |
 
 - CI builds `procedural/registry.json` (`kind`, `id`, `version`, `sha256`, `eval_run_id`, `mrm_approval_ref`) and
   packages it into the `orchestrator` and `tool-gateway` images; at start-up each service recomputes every hash and
@@ -3498,3 +3699,255 @@ add only the RM's own approved context.
   owners, compared with the agent manifests; any drift (a role on an identity that is not in its manifest, a
   credential other than the orchestrator's managed identity) is removed and raised as a security incident. Tokens
   with extra roles are already rejected at G3 (§15.5).
+
+---
+
+## 17. Evaluation (plan §3.9, v2.7)
+
+Decision: ADR-027 (four tiers, RAGAS metric definitions; extends ADR-018). HLD view: `01-hld.md` §5.2. Operations:
+`06-deployment-and-operations.md` §5.4, §5.5, §8.4 and RB-20; failure modes FM-78 to FM-83 in `05` §4.6. Operations
+metrics and alerts: §11.4 and §11.8.
+
+| Tier | Runs in | When | Section |
+|---|---|---|---|
+| 1 Runtime gates | `orchestrator`, inline | Every request | §17.2 |
+| 2 Online sampled | `eval-runner` online worker (prod) | Minutes after the answer | §17.3 |
+| 3 Scheduled | `eval-runner` CronJobs (pre-prod; weekly real-data slice in prod) | Nightly, weekly, monthly | §17.4 |
+| 4 Release gate | CI stage 4 on pre-prod (`06` §5.1) | Every prompt, model, tool, graph, guardrail, index or threshold change | §17.5 |
+
+### 17.1 Metric definitions and formulas
+
+We follow the RAGAS open-source metric definitions and names. The RAGAS library is used offline (tiers 3 and 4) only
+if the Bank's open-source review approves it; otherwise, and always online, `eval-runner` implements the formulas
+below, cross-checked against the library on synthetic data (ADR-027 decision 6).
+
+Notation: `q` the masked question; `a` the released answer; `C = (c_1 … c_K)` the passages given to the model, in rank
+order; `r` the SME reference answer (golden set only); `claims(x)` the atomic statements of `x` (runtime: the
+sentences of `a`; judge: the claim list returned by `eval.judge.claims`); `e(x)` the `embed` vector of `x`; `cos` cosine
+similarity; `s(c)` the semantic reranker score of passage `c` (0 to 4).
+
+| Metric | Formula | Reference needed | Notes |
+|---|---|---|---|
+| **Faithfulness** | `F = count{ t ∈ claims(a) : supported(t, C) } / count(claims(a))` | No | Judge: `supported` is the verdict of `eval.judge.faithfulness` for claim `t` given `C`. Runtime approximation `F_rt` (§17.2 step 7): a sentence is supported when it cites at least one passage, every cited `[n]` resolves to a passage of this request, content-word support `≥ 0.6` (content words of the sentence found in the cited passage ÷ content words of the sentence, stop words removed, Arabic normalised), `cos(e(t), e(c_cited)) ≥ 0.75`, and every number in the sentence (digits or number words) appears in a cited passage. A decline is not scored |
+| **Answer relevancy** | `AR = (1/N) Σ_{i=1..N} cos(e(q), e(g_i))`, `N = 3` | No | `g_i` are questions the judge generates from `a` (`eval.judge.answer_relevancy`); `AR = 0` when the judge marks `a` as non-committal (RAGAS rule). Runtime approximation: `AR_rt = clip((cos(e(q), e(a)) − c0) / (c1 − c0), 0, 1)`, with `c0` and `c1` fitted on the golden set so that `AR_rt` matches the judge's `AR` scale; refitted at each release gate |
+| **Context precision** | `CP = Σ_{k=1..K} (P@k × v_k) / max(1, Σ_k v_k)`, `P@k = (Σ_{j≤k} v_j) / k` | Tier 2: no; tiers 3, 4: yes | `v_k = 1` if `c_k` is relevant. With reference: `c_k` is a labelled relevant chunk or the judge finds it supports `r`. Without reference: the judge finds `c_k` useful to answer `q` (`eval.judge.context_precision`) |
+| **Context utilisation** | As context precision with `u_k = 1` if `c_k` supports at least one claim of `a` | No | RAGAS context precision with the response as the reference (`eval.judge.context_utilisation`): were the passages we paid for used? |
+| **Context recall** | `CR = count{ t ∈ claims(r) : attributable(t, C) } / count(claims(r))` | Yes | Judge decides attribution. The id-based `recall@k` against labelled chunk ids (ADR-018 decision 2) is reported alongside |
+| **Answer correctness** | `AC = w × F1 + (1 − w) × cos(e(a), e(r))`, `w = 0.75`; `F1 = TP / (TP + 0.5 × (FP + FN))` | Yes | `TP`: claims of `a` supported by `r`; `FP`: claims of `a` not in `r`; `FN`: claims of `r` missing from `a` (`eval.judge.answer_correctness`) |
+| **Citation accuracy** | `CA = (answers whose every citation is correct) / (answered items)` | Runtime: no; tiers 3, 4: yes | A citation is correct when `[n]` resolves to a passage returned in this request, that passage supports the claim it is attached to and, with a reference, its document and clause match a labelled clause for the claim. Per-citation precision is reported too |
+| **Correct-decline rate** | `CD = count{ i ∈ U : declined(i) } / count(U)` | Yes (label) | `U`: items labelled unanswerable (no current policy, superseded only, above the RM's clearance, out of scope). `declined` = any of `WEAK_RETRIEVAL`, `MODEL_INSUFFICIENT_EVIDENCE`, `FAILED_GROUNDEDNESS`, `LOW_ANSWER_RELEVANCY`, `NO_TIME_FOR_RETRY`. The false-decline rate on answerable items is reported with a 2-point regression tolerance |
+| **Context relevance** (runtime only) | `CRel = count{ c ∈ Cand : s(c) ≥ τ_keep } / count(Cand)`, `τ_keep = max(keep_min, top − keep_margin)` | No | `Cand`: passages returned by `search_policies` (at most 5, `s ≥` the candidate floor 1.0); `top = max s(c)`. Computed before generation (§17.2 step 4) |
+
+**Aggregation.** Item scores are averaged per slice (use case, language, category). For gating, **rates** use the
+two-sided 95% Wilson lower bound (z = 1.96, plan §5); faithfulness is gated as a rate of **faithful answers**
+(item `F ≥ 0.9` with every claim cited, the runtime rule), which is plan §5's groundedness gate under its RAGAS name;
+citation accuracy and correct-decline are rates by definition. **Means** (answer relevancy, context precision, context
+recall, answer correctness) use the 2.5th percentile of 2,000 bootstrap resamples over items **[agree method with MRM]**.
+Needed counts: 293 of 300 for a 0.95 bound; 96 of 100 unanswerable items for a 0.90 bound (59 of 60), so the UC2 set
+carries at least 100 unanswerable items.
+
+**UC1 and UC3.** UC1 talking points contain no figures (placeholders filled by code), so UC1 faithfulness is judged
+line by line against the masked FACTS block and context utilisation measures how many fact groups the lines use;
+answer relevancy and context precision are UC2 metrics. UC3 is evaluated on extraction (field-level precision and
+recall against the labelled call report and tasks, date resolution, policy and numeric checks), not on RAGAS metrics.
+
+### 17.2 Runtime gate algorithm (tier 1)
+
+No LLM judge runs on the request path (ADR-027). The steps below are UC2; UC1 and UC3 follow after the key table.
+Every step records `rmc_runtime_gate_total{use_case, gate, outcome}` and, where a score exists,
+`rmc_runtime_gate_score{use_case, gate}`; the audit event (`answer_released` or `declined`) carries the gate scores and
+the gate configuration version in its lineage (`eval.runtime: {top, context_relevance, faithfulness_rt,
+answer_relevancy_rt, attempts, gate_version}`), never in telemetry content.
+
+1. **Budget guard (before every tool or model call, all use cases).** Refuse the call if `tool_steps_used ≥ 6`,
+   `hops ≥ 2`, `input_used + count_tokens(prompt) > 12,000`, or `output_used + max_completion_tokens > 1,500`
+   (counted with the model's tokenizer before calling, §8.4); or if `remaining_ms < floor` for that dependency
+   (§1.6). Token and step breaches return `429 BUDGET_EXCEEDED/REQUEST_*` (`AGENT_STEPS`, `HOP_LIMIT` as §15.2); a
+   deadline breach on a model call switches to degraded mode. Each refusal increments
+   `rmc_budget_exceeded_total{use_case, budget, action}`.
+2. **Input guardrails** as §9.3 steps 1 to 4 (unchanged).
+3. **Retrieve.** `search_policies` returns up to `top_k` (5) passages with `s(c) ≥ candidate_floor` (1.0) in rank order.
+4. **Pre-generation retrieval gate.**
+   - If no candidate, or `top < top_min` (2.0): **decline `WEAK_RETRIEVAL`** (sub-reason `top_below_threshold`) **with
+     no model call**.
+   - Keep `K = { c ∈ Cand : s(c) ≥ max(keep_min, top − keep_margin) }` (2.0 and 1.0). Compute `CRel = count(K) / count(Cand)`.
+   - If `CRel < context_relevance_min` (0.5): **decline `WEAK_RETRIEVAL`** (sub-reason `low_context_relevance`), no model
+     call.
+   - Otherwise only `K` goes to the prompt (in rank order, renumbered from `[1]`).
+   - Examples: scores (3.1, 2.6) give `K` = both, `CRel = 1.0`, pass. Scores (2.2, 1.9, 1.6, 1.4, 1.2) give
+     `τ_keep = 2.0`, `K` = one passage, `CRel = 0.2`, decline. Scores (1.7, 1.5) decline on `top`. A decline saves
+     the `gen-large` call (≈ 5k input tokens and ≈ 3.5 s) and returns in about 1.5 s with routing to the desks.
+5. **Generate** with `uc2.answer` (attempt 1) and model timeout `remaining − post_reserve` (§1.6).
+6. **Sentinel.** Output exactly `INSUFFICIENT_EVIDENCE`: **decline `MODEL_INSUFFICIENT_EVIDENCE`** (not retried).
+7. **Post-generation gates**, cheapest first, stopping at the first failure:
+   1. Rendering check (§9.1).
+   2. Citation coverage: every sentence carries at least one `[n]` and every `[n]` resolves to `K`.
+   3. Numeric check against the cited passages (digits and number words, English and Arabic).
+   4. One batched `embed` call for `[q, a, sentence_1 … sentence_m]` (`m ≤ 10`; timeout `min(300 ms, remaining −
+      200 ms)`; the question embedding from retrieval is reused when the masked question was embedded unchanged).
+   5. Faithfulness: `F_rt ≥ faithfulness_min` (0.9) with the sentence rule of §17.1. UC2 answers are capped at 350
+      output tokens (3 to 6 sentences), so 0.9 means every sentence passes in practice; if a longer answer passes with
+      one unsupported sentence, that sentence is removed before release (`outcome="dropped"`).
+   6. Answer relevancy: `AR_rt ≥ answer_relevancy_min` (0.7).
+   7. Content Safety groundedness detection when the flag `cs_groundedness` is on and the service is offered
+      in-region **[confirm]**: `ungroundedDetected = false`.
+   - If the `embed` call fails or times out: faithfulness falls back to the lexical rule with `min_support` 0.7 and
+     answer relevancy is skipped (`outcome="skipped"`); the answer can still be released.
+8. **Retry or decline.** On any failed gate in step 7: if `attempt = 1`, `remaining_ms ≥ retry_min_remaining_ms`
+   (4,000) and the budget guard allows, **retry once** with `uc2.answer.strict` on the same `K` (`outcome="retried"`)
+   and repeat steps 6 and 7; otherwise **decline**: `NO_TIME_FOR_RETRY` (first failure without time),
+   `FAILED_GROUNDEDNESS` (citation, numeric, faithfulness or rendering failure on the last attempt) or
+   `LOW_ANSWER_RELEVANCY` (relevancy failure on the last attempt). Model unavailable or filtered at step 5:
+   **degrade** to ranked passages without a generated answer (§9.3 step 7).
+9. **Release** only after every gate passes (C18, ADR-022), with `verification` scores in the response (§2.1).
+10. **Sample flag.** The orchestrator computes the online sample decision (§17.3 step 1) and writes it into the audit
+    event; nothing else changes on the request path.
+
+**UC1.** Pre-generation: the CRM profile must be present (only critical source), else no brief (`503
+DEPENDENCY_UNAVAILABLE/CRM`); other sources degrade per section. Post-generation: placeholder, numeric, policy and
+rendering checks per line (§9.2 steps 7 to 11): a failing line is dropped (`outcome="dropped"`), all lines dropped
+gives a facts-only brief (`outcome="degraded"`). No `embed` call and no retry (facts-first release already happened).
+
+**UC3.** Schema validation, policy and numeric checks against the notes (§9.4 steps 7 to 10): drop task or highlight
+sentence (`outcome="dropped"`); invalid extraction degrades to the manual form. The RM reviews every draft.
+
+Thresholds and gate keys (App Configuration, label per environment). Only the pipeline identity can write them; a new
+value needs a passing release gate run (`eval_run_id`), exactly like prompt pins (§8.1, §16.6). The orchestrator
+rejects values outside the sanity range, keeps the previous value and raises `GateConfigRejected`.
+
+| Key | Default | Sanity range | Meaning |
+|---|---|---|---|
+| `rmc:orchestrator:gate:version` | `gates/2026.11.1` | n/a | Version of the gate set, in the audit lineage |
+| `rmc:tool-gateway:search:candidate_floor` | 1.0 | 0.5 to 2.0 | Minimum reranker score for a candidate passage |
+| `rmc:orchestrator:gate:retrieval:top_min` | 2.0 | 1.0 to 3.5 | Relevance threshold for the best passage |
+| `rmc:orchestrator:gate:retrieval:keep_min` | 2.0 | 1.0 to 3.5 | Absolute keep threshold |
+| `rmc:orchestrator:gate:retrieval:keep_margin` | 1.0 | 0.25 to 2.0 | Keep passages within this margin of the top score |
+| `rmc:orchestrator:gate:retrieval:context_relevance_min` | 0.5 | 0.2 to 1.0 | Minimum `CRel` |
+| `rmc:orchestrator:gate:faithfulness:min` | 0.9 | 0.8 to 1.0 | Minimum `F_rt` |
+| `rmc:orchestrator:gate:faithfulness:min_support` | 0.6 | 0.4 to 0.9 | Content-word support per sentence (replaces `rmc:orchestrator:groundedness:min_support`) |
+| `rmc:orchestrator:gate:faithfulness:min_support_lexical_only` | 0.7 | 0.5 to 0.95 | Used when the `embed` call fails |
+| `rmc:orchestrator:gate:faithfulness:min_similarity` | 0.75 | 0.5 to 0.95 | Sentence to cited passage cosine |
+| `rmc:orchestrator:gate:answer_relevancy:min` | 0.7 | 0.5 to 0.95 | Minimum `AR_rt` |
+| `rmc:orchestrator:gate:answer_relevancy:c0`, `:c1` | fitted | 0 to 1, `c0 < c1` | Calibration of `AR_rt` |
+| `rmc:orchestrator:gate:embed_timeout_ms` | 300 | 100 to 500 | Batched gate embedding call |
+| `rmc:orchestrator:uc2:retry_min_remaining_ms` | 4000 | fixed by plan §4.3 | Retry only with this much deadline left |
+| `rmc:orchestrator:budget:max_input_tokens`, `:max_output_tokens`, `:max_tool_steps`, `rmc:orchestrator:max_hops` | 12000, 1500, 6, 2 | plan §5 | Budget guards (§8.4) |
+
+Latency of tier 1 (p95): retrieval gate ≤ 5 ms; post-generation gates ≤ 250 ms on UC2 (the `embed` call dominates)
+and ≤ 100 ms on UC1 and UC3, inside the plan §5 checks lines (400 / 100 / 100 ms). The UC2 post-generation reserve of
+§1.6 (500 ms) is unchanged.
+
+### 17.3 Online sampler (tier 2)
+
+`eval-runner` runs in mode `online` as a Deployment in prod (1 replica, `0.5` CPU / `1Gi`, scraped by a PodMonitor on
+port 9090), behind the flag `online_eval` **[LLD decision; ADR-018 placed online sampling in `eval-runner`]**.
+
+1. **Sampling (at request time, in `orchestrator`).** `sample = HMAC-SHA256(sample_key, request_id) mod 10,000 <
+   rate × 10,000`, with `rate = rmc:eval:online:sample_rate` (0.05). Eligible: UC1 `answered` or `partial`, UC2
+   `answered`. UC2 declines are sampled at the same rate with `eval_sample = "decline_review"` for the weekly SME
+   queue (not judged: correctness of a decline needs a label). Deterministic, so a replay selects the same requests;
+   the key is in Key Vault and rotated quarterly with the telemetry key.
+2. **Cap and spread.** The worker judges at most `rmc:eval:online:max_per_day` (200) items per GST day and at most
+   `max_per_day / 13` per business hour, so the sample spreads across the day; items above the cap are counted
+   (`outcome="skipped_cap"`). During a canary the cohort's rate rises to 0.2 and the cap to 400 (§17.5 step 10).
+3. **Content source.** Every 5 minutes the worker reads new sampled audit events from Log Analytics
+   (`RmCopilotAudit_CL`, `eval_sample` set; watermark kept in `st-rmc-eval/online/watermark.json` with an ETag), then
+   fetches the masked content (question, the passages in `K`, the answer or the masked FACTS and lines) from the
+   audit content store (ADR-013, `02` §6.6). It needs read on the content container and `unwrapKey` on the content
+   keys of sampled items only **[confirm with the DPO and MRM; plan §10]**. Content stays in the pod's memory; reports,
+   metrics and tickets carry audit ids and scores only. Content already crypto-shredded is skipped
+   (`outcome="skipped_erased"`).
+4. **Judge.** Calls go through the APIM AI gateway product `rmc-eval-online` (use case `eval`) to the alias `judge`
+   (in prod the same pinned `gen-large` deployment, its own TPM limit ≤ 10% of `gen-large` quota, priority below RM
+   traffic; the worker backs off when `gen-large` utilisation is above 70%). Concurrency 2, per-call timeout 20 s,
+   ≈ 4 to 5 calls and ≈ 8k tokens per item. An item that cannot be judged within 24 h is dropped
+   (`outcome="skipped_stale"`); judge errors are counted (`outcome="judge_error"`).
+5. **Judge prompts are procedural memory** (§16.6): `prompts/eval.judge.claims`, `eval.judge.faithfulness`,
+   `eval.judge.answer_relevancy`, `eval.judge.context_precision`, `eval.judge.context_utilisation` (and, offline only,
+   `eval.judge.context_recall`, `eval.judge.answer_correctness`), each versioned, hashed into the registry with
+   `kind = judge_prompt`, pinned at `rmc:eval:prompt:<template_id>`, temperature 0, structured output with a reason
+   code per verdict. A judge prompt or judge model change is an MRM-validated change: re-calibration against SME labels
+   (quarterly set of 200 items; agreement and Cohen's kappa reported, threshold set by MRM) before the pin moves.
+6. **Scores.** Per item the worker computes faithfulness, answer relevancy, context precision (without reference) and
+   context utilisation for UC2, and faithfulness and context utilisation for UC1 (§17.1); it observes
+   `rmc_online_eval_score{use_case, metric}`, increments `rmc_online_eval_items_total{use_case, outcome}`, writes a
+   record `{audit_id, use_case, scores, runtime scores, judge_version, prompt_hashes}` (no content) to
+   `st-rmc-eval/online/<yyyy>/<mm>/<dd>/` and emits the audit event `eval_scored`. Items with `F < 0.7` or `AR < 0.5`
+   go to the SME review queue by audit id.
+7. **RM feedback.** `web-bff` `POST /v1/feedback {request_id, rating: up|down, reason: wrong|incomplete|not_relevant|
+   too_slow|other}` (no free text in the pilot) writes the audit event `rm_feedback` and increments
+   `rmc_rm_feedback_total{use_case, rating, reason}`; thumbs-down items join the review queue.
+8. **Rolling windows.** From its own records the worker evaluates, every 5 minutes, per use case and metric:
+   - **1 h**: mean score of the last hour if it holds ≥ 10 items; otherwise the window extends back to the 10 most
+     recent items, up to 4 h; with fewer than 10 items no verdict is given.
+   - **3 business days**: mean faithfulness (the ADR-018 slow window).
+   - **7 days**: the baseline for the weekly drift job and for `05` §8.5.
+   It sets `rmc_online_eval_alert{use_case, metric, window}` to 1 when a window breaches its threshold and to 0
+   otherwise. Grafana also plots `rate(rmc_online_eval_score_sum[1h]) / rate(rmc_online_eval_score_count[1h])`.
+9. **Alert rules** (§11.8.5): faithfulness < 0.90 or answer relevancy < 0.80 over the 1 h window (ticket to MRM and
+   the product owner, RB-20); faithfulness < 0.93 over 3 business days (P2 page in business hours, rollout paused);
+   no judged items for 2 h while items are sampled (judge unavailable, FM-80).
+
+| Online key | Default | Meaning |
+|---|---|---|
+| `rmc:eval:online:sample_rate` | 0.05 | Sample rate (plan §3.9) |
+| `rmc:eval:online:max_per_day` | 200 | Daily cap |
+| `rmc:eval:online:canary_sample_rate`, `:canary_max_per_day` | 0.2, 400 | During a canary only |
+| `rmc:eval:online:thresholds:faithfulness_1h`, `:answer_relevancy_1h`, `:faithfulness_3d` | 0.90, 0.80, 0.93 | Alert thresholds (MRM) |
+| `rmc:eval:online:min_items_window` | 10 | Sample-size guard |
+| `rmc:eval:prompt:<template_id>` | version | Judge prompt pins |
+| `rmc:eval:judge:deployment` | `gen-large-<yyyy-mm>` | Judge pin |
+
+### 17.4 Scheduled jobs (tier 3)
+
+| Job | Schedule (GST; cron in UTC) | Where and against what | Metrics | Outputs | On failure |
+|---|---|---|---|---|---|
+| `eval-nightly` | Daily 02:00 (`0 22 * * *`) | Pre-prod Azure OpenAI and pre-prod index built from the same policy corpus version, with the **production configuration**: prompt, graph, agent, tool, guardrail and gate pins copied from the prod App Configuration snapshot, same model versions. UC2 items are real policy questions; UC1 and UC3 items are synthetic twins (plan §3.3) | All of §17.1 including context recall and answer correctness; security slices; false-positive slice | Signed report `eval-nightly-<date>.json` in `st-rmc-eval` (immutable); `rmc_eval_metric{suite="nightly"}` including `run_completed_timestamp`; paired comparison with the current release baseline; summary to the product owner and MRM by 07:00 GST | Threshold breach or regression > 2 points: incident P2 (RB-20). Hard gate (leak, injection, numeric) > 0: P1, incident commander decides the kill switch (RB-03). Run error: one automatic retry, then `RmcNightlyEvalMissing` |
+| `eval-weekly-drift` | Monday 03:00 (`0 23 * * 0`) | Prod `eval-runner` (reads metrics, online records and audit metadata); plus the real-data UC1 and UC3 golden slice (about 100 items, ADR-018 decision 1) run in prod off-peak | Population stability index (PSI) of each online score distribution, this week vs the previous 4 weeks (> 0.2 drift, 0.1 to 0.2 watch); UC2 decline rate and retrieval-gate decline rate vs baseline; top reranker score and `CRel` distributions; tier 1 vs tier 2 faithfulness on the same items; p95 tokens per request, per-stage p95 and cost per request trends; Arabic share; RM feedback | Drift report to the product owner and MRM; SME review queue of 50 stratified items (judge-flagged, thumbs-down, declines, random); `rmc_eval_metric{suite="weekly"}` | Drift > 0.2 or tier 1 vs tier 2 divergence > 0.05: P3 quality ticket and RB-20 diagnosis; repeated two weeks: P2 |
+| `eval-redteam-monthly` | First Saturday 02:00 (the CronJob runs every Friday `0 22 * * 5` and exits unless it is the first Saturday in GST) | Pre-prod, production configuration | ≥ 1,000 attacks (PyRIT, plan §5): direct and indirect injection, cross-portfolio, PII extraction, number words, approval language, Arabic, agent and memory slices (C26 to C28); deterministic scorers first, judge for injection success | Report to InfoSec and MRM; new attacks added to the suite; `rmc_eval_metric{suite="redteam"}` | Any success: P1, RB-11 |
+| `eval-judge-calibration` | Quarterly | Prod `eval-runner` on 200 SME-labelled items | Judge vs SME agreement and Cohen's kappa per metric | Calibration report to MRM | Below the MRM threshold: judge pin frozen, online alerts become advisory until fixed |
+
+Reports are signed with the pipeline's Notation key, retained as model-risk evidence (plan §7 golden-set evidence row
+**[confirm retention]**) and linked from the MRM inventory entry.
+
+### 17.5 Release gate procedure (tier 4)
+
+1. **Trigger.** A pull request touching `prompts/**` (including judge prompts), `graphs/**`, `agents/**`,
+   `contracts/mcp/**`, `guardrails/**`, gate keys (§17.2), model or embedding pins, index schema or chunking, or the
+   golden set itself makes CI stage 4 (`06` §5.1) required.
+2. **Candidate bundle.** CI builds `procedural/registry.json` with hashes (§16.6) and deploys the candidate to the
+   pre-prod eval namespace with the candidate pins.
+3. **Baseline.** The baseline is the current production release on the same golden-set version (the latest nightly
+   report); if the golden set changed, the production release is re-run on the new version first (RB-06).
+4. **Run.** `eval-runner run --suite release`: golden set (≥ 300 UC2, ≥ 50 UC1, ≥ 50 UC3), holdout (MRM pipeline, for
+   model and prompt changes), false-positive slice, red-team suite (≥ 1,000 attacks).
+5. **Replay.** The golden-set requests are replayed at 1 req/s for 30 minutes against the candidate with
+   system-of-record stubs at contracted p95; the run records p95 latency per use case and per stage and p95 tokens per
+   request (§11.8).
+6. **Gates.** Every threshold must hold:
+
+| Gate | Threshold | Statistic |
+|---|---|---|
+| Faithfulness (faithful-answer rate, UC2) | ≥ 0.95 | Wilson lower bound |
+| Citation accuracy | ≥ 0.95 | Wilson lower bound |
+| Context precision (with reference) | ≥ 0.85 | Bootstrap lower bound |
+| Context recall | ≥ 0.90 | Bootstrap lower bound |
+| Answer relevancy | ≥ 0.85 | Bootstrap lower bound |
+| Answer correctness | ≥ 0.85 | Bootstrap lower bound |
+| Correct-decline rate | ≥ 0.90 | Wilson lower bound (≥ 100 unanswerable items) |
+| Entitlement leaks, numeric mismatches, injection success | = 0 | Counts (golden set and red team) |
+| False-positive block rate | ≤ 2% | Point estimate (ADR-018) |
+| Replayed p95 latency | UC1 ≤ 8 s, UC2 ≤ 7 s, UC3 draft ≤ 10 s, commit ≤ 2 s | From the replay |
+| Replayed p95 tokens per request | ≤ 12k input and ≤ 1.5k output; warning above 1.2 × production p95 | From the replay |
+| Regression vs baseline | No metric drops more than 2 points (paired on the same items) | Paired difference |
+| Arabic slice parity (Phase 2 GA) | Within 5 points of English | Point estimate |
+
+7. **Runtime calibration.** The run refits `AR_rt` (`c0`, `c1`) and reports tier 1 vs judge agreement; a gate-key
+   change is proposed in the same pull request and gated by this run.
+8. **Report.** A signed report (`run_id`, golden-set version and hash, lineage, every gate with observed value, bound
+   and pass) is attached to the CAB record; its `eval_run_id` is written into the registry entries it covers.
+9. **Decision.** Exit 0 (all pass): pins become promotable. Exit 1 (a gate failed) or 2 (run error): the pipeline
+   stops; nothing passes by default.
+10. **Canary.** In prod the candidate serves the canary cohort (`06` §5.1 stage 9); the online sampler raises the
+    cohort's sample rate (§17.3 step 2) and the canary analysis compares cohort and stable on runtime gate outcomes,
+    online faithfulness and answer relevancy, decline rate, tokens per request and per-stage p95.

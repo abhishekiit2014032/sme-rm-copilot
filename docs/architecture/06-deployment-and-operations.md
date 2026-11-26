@@ -1,6 +1,6 @@
 # 06 Deployment and operations
 
-Status: v1.1 for ARB (aligned to plan v2.4 after the ARB review, `07-review-log.md`) · Workstream B2 · Owner: solution architecture (resilience, security, operations) · Date: 26 Nov 2026
+Status: v1.1 for ARB (aligned to plan v2.4 after the ARB review, `07-review-log.md`; v2.7 adds the release gate detail §5.4, scheduled evaluation jobs §5.5, runtime operations and quality dashboards §8.4 and RB-20) · Workstream B2 · Owner: solution architecture (resilience, security, operations) · Date: 26 Nov 2026
 
 Contract: `00-plan.md` ("plan §n"). Interfaces and SLOs: `04-interfaces-and-slas.md` ("04 §n"). Failure modes,
 capacity and MRM: `05-nfr-scenarios-and-dr.md` ("05 §n", "FM-nn"). Everything is fictional ("the Bank"). Azure facts we
@@ -203,12 +203,12 @@ pull** (Flux in the cluster), so the control plane is never exposed publicly.
 | 1 | Pull request | Lint, format, unit tests, type checks; **SAST** (CodeQL or equivalent); **secret scanning** with push protection; **dependency scan** (SCA, licence policy); IaC lint (`bicep build`, PSRule for Azure, Checkov); Helm/Kustomize lint and policy test (Gatekeeper constraints with `gator` or equivalent) | All green; coverage ≥ 80% overall and ≥ 90% for entitlement, approval verification and masking (MAINT-03); no new high/critical SAST findings; two reviewers incl. a CODEOWNER for `tool-gateway` and `web-bff` security paths |
 | 2 | Build | Reproducible container build (minimal base); **SBOM** (SPDX or CycloneDX); **container scan**; **image signing with Notation** (signing key in Key Vault, pipeline identity has `sign` on that key only); push to non-prod ACR by digest | No critical CVEs; high CVEs with fix available block unless exception approved (≤ 15 days) |
 | 3 | Component and contract tests | Contract tests against SoR stubs and SoR test APIs; approval-token negative tests; **telemetry canary test** (seeded canary strings must not appear in exported spans, logs, APIM logs: C5); prompt-injection regression suite; numeric check corpus | 100% pass |
-| 4 | **Eval gate** (`eval-runner` on the pre-prod Foundry resource) | Golden set (≥ 300 UC2 items, ≥ 50 UC1, ≥ 50 UC3) + holdout (run by MRM pipeline on model/prompt changes) + red-team suite (≥ 1,000 attacks, plan §5) | Groundedness ≥ 0.95 and citation accuracy ≥ 0.95 (95% Wilson lower bound, z = 1.96, plan §5); entitlement leaks 0; injection success 0; numeric mismatches 0; false-positive block rate ≤ 2%; correct decline ≥ 90%; Arabic slice parity within 5 points (Phase 2 GA); no metric regresses > 2 points vs the current production release |
+| 4 | **Eval gate** (`eval-runner` on the pre-prod Foundry resource) | Golden set (≥ 300 UC2 items, ≥ 50 UC1, ≥ 50 UC3) + holdout (run by MRM pipeline on model/prompt changes) + red-team suite (≥ 1,000 attacks, plan §5) | RAGAS thresholds of plan §3.9 (lower bounds, 02 §17.1): faithfulness ≥ 0.95, citation accuracy ≥ 0.95, context precision ≥ 0.85, context recall ≥ 0.90, answer relevancy ≥ 0.85, answer correctness ≥ 0.85, correct decline ≥ 0.90; entitlement leaks 0; injection success 0; numeric mismatches 0; false-positive block rate ≤ 2%; replayed p95 latency and p95 tokens per request within plan §5; Arabic slice parity within 5 points (Phase 2 GA); no metric regresses > 2 points vs the current production release. Detail §5.4 |
 | 5 | IaC what-if | `az deployment sub what-if` per environment; Azure Policy compliance pre-check | Any `Delete` or `Modify` on data resources (Cosmos, Storage, Key Vault, AI Search) requires a second approver; no policy violations |
 | 6 | Deploy test | IaC apply; app deploy; integration and end-to-end tests with synthetic data | Pass |
 | 7 | Deploy pre-prod | IaC apply; app deploy; **load test** (1.5 req/s, 30 min, PERF-01..04); DAST; smoke; scheduled drills (zone, kill switch, rotation) | Latency p95 within plan §5; error ratio < 0.5%; DAST no high findings |
 | 8 | Change management | CAB record created automatically with eval report, what-if, test evidence, rollback plan | Standard change (pre-approved category: code fixes with unchanged model, prompt and guardrails) auto-approved by policy; **normal change** for model, prompt, guardrail, index schema or infra data-resource changes (CAB + MRM where §5.3 requires); emergency change path for P1 fixes (retro-approval within 2 business days) |
-| 9 | Deploy prod (progressive) | Image promoted to prod ACR by digest (signature preserved; admission verifies); GitOps commit; **canary**: new version receives the canary cohort via App Configuration targeting (RM champions ≈ 10% of pilot RMs) and 1 pod per service, for at least 1 business day; then 50%; then 100% | Automated canary analysis vs the stable version: availability SLI, p95 latency, degraded rate (by `DEGRADED` reason), `GUARDRAIL_BLOCKED` rate, UC2 decline rate, RM thumbs-down rate; any breach → automatic rollback |
+| 9 | Deploy prod (progressive) | Image promoted to prod ACR by digest (signature preserved; admission verifies); GitOps commit; **canary**: new version receives the canary cohort via App Configuration targeting (RM champions ≈ 10% of pilot RMs) and 1 pod per service, for at least 1 business day; then 50%; then 100% | Automated canary analysis vs the stable version: availability SLI, p95 latency end to end and per stage, p95 tokens per request, degraded rate (by `DEGRADED` reason), `GUARDRAIL_BLOCKED` rate, runtime gate outcomes (retrieval declines, faithfulness failures), UC2 decline rate, online faithfulness and answer relevancy of the cohort (sample rate raised to 20%, 02 §17.3), RM thumbs-down rate; any breach → automatic rollback |
 | 10 | Post-deploy smoke | Synthetic probes per use case (04 §8.6); audit completeness check for probe requests | Pass within 15 min |
 | 11 | Rollback | GitOps revert to the previous image digests; App Configuration revert of prompt and model pins (they are versioned flags); APIM policy revert (APIOps); data changes are expand/contract so the previous version runs on the new schema | Rollback ≤ 15 min (RB-14) |
 
@@ -232,8 +232,51 @@ pull** (Flux in the cluster), so the control plane is never exposed publicly.
 | Guardrail or content-filter configuration | Full + adversarial + false-positive slice | Informed | Normal | Approve |
 | Model version (RB-05) | Full + holdout + adversarial + latency | Approve | Normal | Informed |
 | Embedding model or chunking | Retrieval + full | Approve | Normal | n/a |
+| Runtime gate or online alert threshold; judge prompt or judge model (v2.7) | Full + false-positive and unanswerable slices; judge changes also re-calibrated against SME labels | Approve | Normal | n/a |
 | Infrastructure (data resources, network) | n/a | n/a | Normal | Approve network and identity changes |
 | Emergency fix | Smoke + adversarial | Retro review | Emergency | As needed |
+
+### 5.4 Release gate detail (stage 4, v2.7)
+
+The release gate is tier 4 of the evaluation architecture (plan §3.9, ADR-027; procedure in 02 §17.5). It runs on the
+pre-prod Foundry resource with the candidate configuration and the production golden-set version.
+
+| Step | What runs | Output | Blocking rule |
+|---|---|---|---|
+| 4a Trigger | Pull request touching prompts (including judge prompts), graphs, agent manifests, MCP tool definitions, guardrails, runtime gate thresholds (`rmc:orchestrator:gate:*`), model or embedding pins, index schema or chunking, or the golden set | Required check on the pull request | Cannot be skipped except on the emergency path (§5.3) |
+| 4b Candidate | CI builds the procedural registry with hashes and deploys the candidate to the pre-prod eval namespace | Candidate bundle id | Hash mismatch fails |
+| 4c Baseline | Latest nightly report of the production release on the same golden-set version (re-run if the set changed, RB-06) | Baseline report | Missing baseline fails |
+| 4d Golden set | `eval-runner run --suite release`: ≥ 300 UC2 (≥ 100 unanswerable), ≥ 50 UC1, ≥ 50 UC3; holdout by the MRM pipeline for model and prompt changes; false-positive slice | RAGAS and custom metrics with lower bounds | Thresholds below |
+| 4e Red team | ≥ 1,000 attacks (PyRIT), including agent and memory slices | Successes by category | Any success fails |
+| 4f Replay | Golden-set requests replayed at 1 req/s for 30 min with SoR stubs at contracted p95 | p95 latency per use case and per stage; p95 tokens per request | Above plan §5 budgets fails; p95 tokens > 1.2 × production warns |
+| 4g Report | Signed report attached to the CAB record; `eval_run_id` written into the registry | Report | Exit 1 (gate failed) or 2 (run error) stops the pipeline |
+
+RAGAS release thresholds (95% Wilson lower bound for rates, bootstrap lower bound for means; owned by MRM):
+
+| Metric | Threshold | Metric | Threshold |
+|---|---|---|---|
+| Faithfulness (faithful-answer rate) | ≥ 0.95 | Context recall | ≥ 0.90 |
+| Citation accuracy | ≥ 0.95 | Answer relevancy | ≥ 0.85 |
+| Context precision | ≥ 0.85 | Answer correctness | ≥ 0.85 |
+| Correct-decline rate | ≥ 0.90 | Entitlement leaks, numeric mismatches, injection success | = 0 |
+| False-positive block rate | ≤ 2% | Regression vs production (paired) | ≤ 2 points on every metric |
+
+Runtime gate thresholds and online alert thresholds are configuration, but they change only through this gate: the
+pipeline identity writes them to App Configuration with the passing `eval_run_id`, and the orchestrator rejects a
+value without one (02 §17.2).
+
+### 5.5 Scheduled evaluation jobs (tier 3, v2.7)
+
+| Job | When (GST) | Runs in | Produces | Who receives it | On failure |
+|---|---|---|---|---|---|
+| `eval-nightly` | Daily 02:00 | Pre-prod, with the production configuration pins (02 §17.4) | Signed nightly report; `rmc_eval_metric{suite="nightly"}`; paired comparison with the release baseline | Product owner and MRM by 07:00 | Hard gate > 0: P1 and kill-switch decision (RB-03); threshold breach or > 2-point regression: P2 (RB-20); run error: retry once, then `RmcNightlyEvalMissing` |
+| `eval-weekly-drift` | Monday 03:00 | Prod `eval-runner` (metrics and online records; real-data UC1 and UC3 slice off-peak) | Drift report: online score PSI, decline and retrieval-gate decline rates, token, latency and cost trends, tier 1 vs tier 2 divergence; SME review queue of 50 items | Product owner, MRM, SMEs | Drift > 0.2 or divergence > 0.05: P3 (P2 if repeated), RB-20 |
+| `eval-redteam-monthly` | First Saturday 02:00 | Pre-prod, production configuration | Red-team report; new attacks added to the suite | InfoSec and MRM | Any success: P1, RB-11 |
+| `eval-judge-calibration` | Quarterly | Prod `eval-runner` on 200 SME-labelled items | Judge vs SME agreement per metric | MRM | Below threshold: judge pin frozen, online alerts advisory |
+| Online sampler (tier 2) | Continuous (every 5 min) | Prod `eval-runner` online worker | `rmc_online_eval_score`, `rmc_online_eval_alert`; ops summary API | Grafana; alerts to MRM and product owner | `RmcOnlineEvalStalled` (FM-80) |
+
+Cost: nightly runs use the pre-prod Azure OpenAI quota (≈ 10 M tokens per run [estimate], `05` §2.3); the online judge
+is capped at 200 items per day on its own APIM product, budgeted under `rmc:finops:daily_budget_aed:eval`.
 
 ---
 
@@ -328,13 +371,14 @@ security).
 | Dashboard | Audience | Panels |
 |---|---|---|
 | SLO overview | Product owner, SRE | Availability per use case (as experienced and copilot-attributable), error budget remaining, latency p95, degraded rate by cause |
-| Request flow | SRE | Per-step latency vs the plan §5 budget (edge, entitlement, fan-out, PII, Shields, model TTFT and output, checks), deadline exceedances |
+| Request flow | SRE | Per-stage p95 (`rmc_stage_duration_seconds`) vs the plan §5 budget (edge, entitlement, fan-out or retrieval, PII, Shields, retrieval gate, each model call by prompt template, post-generation gates), deadline exceedances |
+| Runtime operations (v2.7) | SRE, FinOps, product owner | p50/p95/p99 end to end per use case; p95 per stage; tokens per request p50/p95 (input, output) vs the 12k / 1.5k budget and the 7-day baseline × 1.2; tokens by agent and deployment; estimated cost per request and per day vs 80% of budget; runtime gate outcomes (passed, retried, declined, degraded, dropped) per gate; budget exceedances; tokens per RM per day distribution |
 | Dependencies | SRE, SoR owners | Per interface: latency, errors, breaker state, contracted vs actual rate |
 | AI gateway | SRE, FinOps | Tokens by deployment and use case, 429 ratio, TPM utilisation vs quota, failover count, content filter blocks |
-| Quality | Product owner, MRM | Sampled groundedness, decline rate, false-positive blocks, UC3 edit and rejection rates, RM feedback |
+| Quality | Product owner, MRM | Online RAGAS scores (faithfulness, answer relevancy, context precision, context utilisation; rolling 1 h, 3-day and 7-day) against thresholds, online sample coverage, retrieval-gate decline rate vs baseline, runtime faithfulness failures, decline rate by reason, nightly and weekly eval metrics vs gates, false-positive blocks, UC3 edit and rejection rates, RM feedback |
 | Security | SOC | Prompt Shields detections by source, `NOT_ENTITLED` by RM, approval rejects (invalid, replay), Key Vault `sign` callers, after-hours usage |
 | Audit integrity | Audit, SRE | Event Hubs lag, last chain append, nightly verification result, completeness |
-| Cost | FinOps, product owner | Daily cost by component, token cost per RM per use case, budget burn |
+| Cost | FinOps, product owner | Daily cost by component, estimated cost per request per use case (`rmc_cost_aed_total`), judge spend, token cost per RM per use case, budget burn |
 
 ---
 
@@ -469,7 +513,7 @@ Each runbook is stored in the operations wiki with exact commands and links; bel
 
 ### RB-12 Cost spike
 - **Trigger:** budget alert at 80% (actual) or 100% (forecast); cost anomaly alert; tokens per hour > 3× baseline
-  (FM-47, FM-05).
+  (FM-47, FM-05); v2.7: `RmcDailyCost80` or `RmcEvalCost80` (FM-83); token creep is diagnosed with RB-20 first.
 - **Steps:** 1) Break down by component (Cost Management) and, for tokens, by deployment and use case (APIM metrics)
   and by RM (restricted audit table, `metrics.tokens_in` / `tokens_out` per `actor.oid`). 2) Typical causes: runaway loop (step budget bypassed), misrouted eval or ingestion traffic, log flood
   (debug level left on), unexpected retries. 3) Contain: tighten APIM limits for the offender, disable the job, reset
@@ -545,6 +589,42 @@ Each runbook is stored in the operations wiki with exact commands and links; bel
   refuses it), compare the served definition with Git, and open a security incident if it was not a release.
 - **Verification:** `tools/list` shows the new hash for each agent; no `TOOL_SCHEMA_MISMATCH` after the overlap ends.
 
+### RB-20 Quality regression or eval alert (ADR-027, plan §3.9)
+- **Trigger:** `RmcOnlineFaithfulnessLow`, `RmcOnlineAnswerRelevancyLow`, `RmcOnlineFaithfulnessTrend` (FM-79);
+  `RmcRetrievalGateDeclineRise` (FM-78); `RmcFaithfulnessGateFailures`; `RmcNightlyEvalGate` or a nightly regression
+  (FM-81); `RmcOnlineEvalStalled` (FM-80); `RmcTokensPerRequestCreep` or `RmcStageLatencyP95` (FM-82); weekly drift
+  report finding.
+- **Steps:**
+  1. **Triage (15 min).** Open the Quality and Runtime operations dashboards. Decide the scope: one use case, one
+     cohort (canary?), one language, one policy area. A hard gate failure (leak, injection, numeric) is P1: go to
+     step 3 now. An online alert during a canary: the canary analysis has already rolled back; confirm it.
+  2. **Correlate with change.** Compare the alert start with App Configuration pin changes (prompt, model, gate,
+     guardrail, index), policy re-index jobs (RB-07), and model deployment events. Check the judge's health first
+     (`rmc_online_eval_items_total{outcome="judge_error"}`, judge pin) so a judge problem is not read as a quality
+     problem.
+  3. **Contain.** P1 or confirmed harmful output: kill switch for the affected use case (RB-03). Otherwise roll back
+     the suspect pin (prompt, model, gate or index: a pin flip, ≤ 30 s, RB-14) if a change lines up; for a policy
+     corpus cause, roll back the index pin (RB-07).
+  4. **Diagnose by metric.**
+     - Low faithfulness: pull the flagged items by audit id from the SME review queue (content only through the
+       audited break-glass role); check whether the cited passages changed (new policy version) or the answers
+       drift from them (prompt or model).
+     - Low answer relevancy: check the rewrite step (`uc2.rewrite`) and question mix (new topics).
+     - Retrieval-gate decline rise: check `top_reranker` and `context_relevance` distributions, `retrieval_mode`,
+       index version and the candidate floor; a new unanswered topic goes to the policy office, not to a threshold
+       change.
+     - Token creep: break down `rmc_llm_tokens_total` by agent and template; check passages kept, session summary
+       size, retry rate.
+     - Stage latency: find the stage over budget in `rmc_stage_duration_seconds`, then a slow trace exemplar.
+     - Judge unavailable: check the APIM product `rmc-eval-online`, judge deployment quota, Key Vault and the
+       content store; the worker resumes from its watermark.
+  5. **Fix through the gate.** Prompt, threshold, index or golden-set change via the release gate (§5.4); add the
+     failing items to the golden set (RB-06). Threshold changes need MRM approval (05 §8.6).
+  6. **Recover.** Lift the kill switch per RB-03 (canary first) with MRM approval; keep the online sample rate at the
+     canary level (20%) for 2 business days.
+- **Verification:** the alerting window back within threshold for 2 business days with ≥ 10 items per window; the
+  next nightly passes; incident record holds audit ids only (no content).
+
 ## 10. AI incident management
 
 An **AI incident** is any event where the copilot's AI behaviour causes, or could cause, harm: wrong or invented
@@ -566,7 +646,7 @@ requirements]), **communications** (RM-facing messages).
 | Step | Target time (P1) | Actions |
 |---|---|---|
 | 1 Detect | n/a | Sources: zero-tolerance alerts, RM "report a problem" button, online sampling, Sentinel, red team, audit review |
-| 2 Triage | 15 min | Classify severity; open the incident; assign roles; preserve evidence (audit ids, model and prompt versions from lineage) |
+| 2 Triage | 15 min | Classify severity (quality alerts follow RB-20); open the incident; assign roles; preserve evidence (audit ids, model and prompt versions from lineage) |
 | 3 Contain | 30 min | Kill switch (RB-03) or source switch; revoke sessions if misuse; quarantine documents or sources |
 | 4 Assess | 4 h | Scope: affected RMs, customers, outputs (audit replay); whether any output left the Bank; MRM impact assessment |
 | 5 Notify | Per policy | DPO and compliance decide on customer or regulator notification; internal escalation to the AI governance board for P1 |

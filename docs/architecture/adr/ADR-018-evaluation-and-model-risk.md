@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted |
+| Status | Accepted; **Extended by** [ADR-027](ADR-027-evaluation-architecture.md) (four-tier evaluation architecture, RAGAS metric definitions, runtime gates, plan v2.7) |
 | Date | 26 Nov 2026 |
 | Deciders | Solution architecture, model risk management (second line), credit and product SMEs, internal audit (observer) |
 | Critical issues | C12 (model retirement), C13 (false positives), C23 (no MRM) |
@@ -152,3 +152,11 @@ Risks and mitigations
 - Code: `code/rm_copilot/llm.py` (`MockLLM` for offline evals), `code/rm_copilot/guardrails.py` (deterministic
   evaluators reuse these checks).
 - Deck: `deck/project/slides/evals.html`, `governance.html`.
+
+## Note (plan v2.7): extended by ADR-027
+
+This decision stands. [ADR-027](ADR-027-evaluation-architecture.md) extends it into four tiers (runtime gates with a
+pre-generation retrieval gate, online sampled scoring with the in-region judge, scheduled nightly, weekly and monthly
+runs, and this release gate), names the metrics after the RAGAS definitions (groundedness here is faithfulness there),
+adds the RAGAS-based release thresholds of plan §3.9 to the gates of decision 3, and specifies decision 6 (online
+monitoring) with metrics, windows and alerts. The detail is in `02-lld.md` §17.
