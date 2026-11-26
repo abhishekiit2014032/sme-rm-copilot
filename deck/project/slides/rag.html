@@ -1,0 +1,40 @@
+<section id="rag">
+<div class="head">
+<p class="eyebrow">2 · AI PATTERN: RETRIEVAL-AUGMENTED GENERATION</p>
+<h2 class="title">RAG built for policy documents, not just chat</h2>
+</div>
+<div class="col" style="gap:14px">
+<p class="cap" style="font-weight:600; color:#0F2233">Ingestion: runs each time a document is published</p>
+<div class="row" style="gap:0; align-items:stretch">
+<p class="box rise" style="--i:0"><b>Approved sources</b><br>Policy DMS and intranet, owner-signed</p>
+<x-connector style="width:44px; align-self:center; color:#0B7A65"></x-connector>
+<p class="box rise" style="--i:1"><b>Parse and clean</b><br>Tables, Arabic and English, OCR for scans</p>
+<x-connector style="width:44px; align-self:center; color:#0B7A65"></x-connector>
+<p class="box rise" style="--i:2"><b>Chunk by clause</b><br>Keep headings and clause numbers</p>
+<x-connector style="width:44px; align-self:center; color:#0B7A65"></x-connector>
+<p class="box rise" style="--i:3"><b>Tag metadata</b><br>Version, effective date, product, classification</p>
+<x-connector style="width:44px; align-self:center; color:#0B7A65"></x-connector>
+<p class="box core rise" style="--i:4"><b>Hybrid index</b><br>Vector embeddings + keyword index</p>
+</div>
+</div>
+<div class="col" style="gap:14px">
+<p class="cap" style="font-weight:600; color:#0F2233">Query: runs for every question</p>
+<div class="row" style="gap:0; align-items:stretch">
+<p class="box rise" style="--i:5"><b>Rewrite query</b><br>Expand acronyms, detect language and intent</p>
+<x-connector style="width:44px; align-self:center; color:#0B7A65"></x-connector>
+<p class="box rise" style="--i:6"><b>Hybrid search</b><br>Filtered to current versions the RM may see</p>
+<x-connector style="width:44px; align-self:center; color:#0B7A65"></x-connector>
+<p class="box rise" style="--i:7"><b>Rerank</b><br>Top 50 down to the best 6–8 passages</p>
+<x-connector style="width:44px; align-self:center; color:#0B7A65"></x-connector>
+<p class="box rise" style="--i:8"><b>Generate</b><br>Answer only from passages, cite each claim</p>
+<x-connector style="width:44px; align-self:center; color:#0B7A65"></x-connector>
+<p class="box warn rise" style="--i:9"><b>Verify</b><br>Groundedness check, or decline and route</p>
+</div>
+</div>
+<div class="band">
+<p class="bk" style="width:220px">WHY HYBRID</p>
+<p class="bv" style="flex:1">Policy questions mix exact terms (product codes, clause numbers) with meaning. Keyword plus vector search beats either one alone.</p>
+</div>
+<p class="pg"></p>
+<aside>Most RAG failures in banks come from the ingestion side, not the model. Policies have tables, cross-references, numbered clauses and superseded versions, so we chunk by clause and keep the heading path, and we tag every chunk with its version, effective date and classification. On the query side, the filter step is the important one: retrieval only considers current versions the user is cleared to see, so the model cannot cite a withdrawn policy. Reranking gives a large precision gain for little cost. The final verify step checks each sentence of the answer against the cited passages; if support is weak, the assistant declines and offers to route the question to the credit or product desk.</aside>
+</section>

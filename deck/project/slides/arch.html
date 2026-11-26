@@ -1,0 +1,25 @@
+<section id="arch">
+<div class="head">
+<p class="eyebrow">2 · SOLUTION ARCHITECTURE</p>
+<h2 class="title">Five layers, with governance across all of them</h2>
+</div>
+<div class="row" style="gap:24px; flex:1">
+<div class="col" style="flex:1; gap:18px; justify-content:space-between">
+<div class="layer rise" style="--i:0"><p class="lname">CHANNELS</p><p class="box">CRM sidebar</p><p class="box">Microsoft Teams</p><p class="box">RM mobile app</p></div>
+<div class="layer rise" style="--i:1"><p class="lname">ACCESS</p><p class="box">Bank SSO + MFA · API gateway · WAF and rate limits · RM identity passed downstream</p></div>
+<div class="layer rise" style="--i:2"><p class="lname">ORCHESTRATION</p><p class="box core" style="flex:1.6"><b>Copilot orchestrator</b>: intent routing, planner, tool calling, session memory, approval workflow</p><p class="box warn"><b>Guardrails</b>: PII masking, injection and topic filters, output checks</p></div>
+<div class="layer rise" style="--i:3"><p class="lname">AI SERVICES</p><p class="box core"><b>Knowledge (RAG)</b>: ingestion, hybrid index, reranker, citations</p><p class="box core"><b>Tool / data APIs</b>: entitlement-checked, read vs. write</p><p class="box dark"><b>LLM gateway</b>: model routing, prompt registry, logging</p></div>
+<div class="layer rise" style="--i:4"><p class="lname">SYSTEMS OF RECORD</p><p class="box">CRM · Core banking · Lending and trade · KYC/CDD · Policy DMS · Calendar and email · News and registry</p></div>
+</div>
+<div class="card" style="flex:none; width:290px; background:#0F2233; border-color:#0F2233; gap:16px">
+<p class="k" style="color:#5FD3B6">CROSS-CUTTING</p>
+<p class="t" style="color:#EEF2F0">Tracing and observability</p>
+<p class="t" style="color:#EEF2F0">Evaluation pipeline</p>
+<p class="t" style="color:#EEF2F0">Immutable audit log</p>
+<p class="t" style="color:#EEF2F0">Model and prompt registry</p>
+<p class="t" style="color:#EEF2F0">Cost and quota control</p>
+</div>
+</div>
+<p class="pg"></p>
+<aside>Read it top to bottom as a request path. The RM works in tools they already use: the CRM sidebar first, then Teams and mobile. Every request passes through the bank’s SSO and API gateway, and the RM’s identity travels with it all the way down. The orchestrator is the brain: it classifies the intent, plans which tools to call, calls them, and manages approvals for writes. It uses three services: a knowledge service for RAG over documents, a tool layer that wraps bank APIs and enforces entitlements, and an LLM gateway that is the only path to any model, which gives us one place for routing, logging, PII masking and cost control. Guardrails sit around the orchestrator on both input and output. The dark rail on the right is what makes this bank-grade: every step is traced, evaluated and audited.</aside>
+</section>

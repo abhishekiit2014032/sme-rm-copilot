@@ -1,0 +1,16 @@
+<section id="security">
+<div class="head">
+<p class="eyebrow">2 · SECURITY AND ACCESS CONTROL</p>
+<h2 class="title">The model never decides who can see what</h2>
+</div>
+<div class="grid3" style="flex:1">
+<div class="card rise" style="--i:0"><h3 class="ch">Identity and entitlements</h3><p class="t">The RM’s identity flows end to end. Tools enforce portfolio and role rules in code, never in the prompt.</p></div>
+<div class="card rise" style="--i:1"><h3 class="ch">Data protection</h3><p class="t">In-region hosting, encryption everywhere, PII masked before the model, zero vendor retention or training.</p></div>
+<div class="card rise" style="--i:2"><h3 class="ch">Prompt-injection defence</h3><p class="t">Documents and emails are treated as data, not instructions. Tool allow-list and output checks.</p></div>
+<div class="card amber rise" style="--i:3"><h3 class="ch">Least-privilege writes</h3><p class="t">Write APIs accept only a draft plus a signed RM approval. Separate service identities for read and write.</p></div>
+<div class="card rise" style="--i:4"><h3 class="ch">Audit trail</h3><p class="t">Every prompt, retrieval, tool call and approval is logged immutably against the user.</p></div>
+<div class="card rise" style="--i:5"><h3 class="ch">Model and vendor risk</h3><p class="t">Third-party risk review, contractual data terms, model inventory, and a kill switch per use case.</p></div>
+</div>
+<p class="pg"></p>
+<aside>The headline principle: access control is enforced by deterministic code at the tool and data layer, using the RM’s own identity, never by instructions in a prompt. If an RM asks about a customer outside their portfolio, the API returns “not authorised” and the model has nothing to leak. That is also our main defence against prompt injection: even if malicious text in a document or email tricks the model, the model has no more privilege than the user, and it cannot approve its own writes. On data protection, models run on private, in-region endpoints with zero data retention, and PII that the task does not need (for example ID numbers) is masked before it reaches the model. Everything is logged for audit, and each use case can be switched off independently.</aside>
+</section>

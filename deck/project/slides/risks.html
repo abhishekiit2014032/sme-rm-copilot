@@ -1,0 +1,19 @@
+<section id="risks">
+<div class="head">
+<p class="eyebrow">3 · KEY RISKS AND MITIGATIONS</p>
+<h2 class="title">The risks we plan for from day one</h2>
+</div>
+<table class="tbl">
+<tr class="hd"><th style="width:31%">Risk</th><th style="width:11%">Impact</th><th style="width:58%">Mitigation</th></tr>
+<tr><td>Wrong or invented answers</td><td>High</td><td>Mandatory citations, groundedness check, decline path, eval gates</td></tr>
+<tr class="z"><td>Data exposed across portfolios</td><td>High</td><td>Entitlements in the tool layer, PII masking, red-team testing</td></tr>
+<tr><td>Core APIs not ready</td><td>High</td><td>API inventory in week 1, read-replica fallback, UC2 goes first</td></tr>
+<tr class="z"><td>RMs don’t adopt it</td><td>Medium</td><td>Built into CRM and Teams, RM champions co-design, weekly fixes</td></tr>
+<tr><td>Stale or conflicting policies</td><td>Medium</td><td>Named document owners, version metadata, re-index on publish</td></tr>
+<tr class="z"><td>Slow risk and compliance sign-off</td><td>Medium</td><td>Risk, compliance and InfoSec engaged in discovery; model cards</td></tr>
+<tr><td>Model or vendor change</td><td>Medium</td><td>LLM gateway abstraction, regression evals before any switch</td></tr>
+<tr class="z"><td>Running costs grow at scale</td><td>Low</td><td>Model tiering, caching, token budgets, cost per use case tracked</td></tr>
+</table>
+<p class="pg"></p>
+<aside>The top three risks are trust, data exposure and integration. Trust is managed by the hallucination controls in the deep dive: citations, a groundedness check and a decline path, plus an evaluation gate before any release. Data exposure is managed architecturally, by enforcing entitlements in code and testing it with a red team. Integration is the most common reason these programmes slip, which is why the API inventory happens in week one and the first pilot use case needs no core-system integration at all. Adoption is a real risk too: RMs will not open another app, so the assistant lives in the CRM and Teams, and RM champions help design it.</aside>
+</section>

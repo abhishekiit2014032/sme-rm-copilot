@@ -1,0 +1,30 @@
+<section id="uc2" style="gap:28px">
+<div class="head">
+<p class="eyebrow">USE CASE 2 · ANSWER</p>
+<h2 class="title">Policy answers with the clause attached</h2>
+</div>
+<div class="row" style="gap:48px; flex:1">
+<div class="steps" style="flex:1">
+<p class="cap" style="font-weight:600; color:#0F2233">How it works</p>
+<p class="step rise" style="--i:0"><b>1.</b> RM asks in plain language, in English or Arabic</p>
+<p class="step rise" style="--i:1"><b>2.</b> Hybrid search (keyword + vector) over approved policies, product guides and circulars, filtered to current versions the RM may see</p>
+<p class="step rise" style="--i:2"><b>3.</b> Top passages are reranked; the LLM answers only from them and cites every claim</p>
+<p class="step rise" style="--i:3"><b>4.</b> Groundedness check; weak evidence means “I can’t confirm this” and a hand-off to the credit desk</p>
+</div>
+<div class="mock" style="flex:1.1">
+<p class="mh">“Can a 2-year-old trading company get an unsecured working-capital line of AED 750k?”</p>
+<p class="ml">Not under the standard programme. Unsecured SME working capital needs at least 3 years of audited trading history <b>[1]</b>. Options: a receivables-backed line, available from 2 years of trading <b>[2]</b>, or a policy exception approved at Credit Risk level 2 <b>[3]</b>.</p>
+<p class="src">[1] SME Credit Policy v4.2 §5.3.1, effective 01 Jul 2026</p>
+<p class="src">[2] Receivables Finance product guide, p.2</p>
+<p class="src">[3] Delegation of Authority matrix, row 14</p>
+</div>
+</div>
+<div class="band">
+<p class="bk" style="width:220px">DATA USED</p>
+<p class="bv" style="flex:1">Credit policy, product guides, pricing grids, authority matrix, circulars</p>
+<p class="bk" style="width:150px">TARGET</p>
+<p class="bv" style="width:460px">30–40% fewer escalations</p>
+</div>
+<p class="pg"></p>
+<aside>This is classic retrieval-augmented generation, but with three bank-grade additions. First, only approved, versioned documents are indexed, and retrieval filters on effective date and document classification, so the RM never gets an answer from a superseded policy. Second, every sentence must carry a citation to a specific clause, and a groundedness check verifies that the cited text actually supports the claim. Third, when evidence is weak the assistant says so and routes the question to a human instead of guessing. The document names and clause numbers here are illustrative.</aside>
+</section>

@@ -1,0 +1,14 @@
+<section id="summary">
+<div class="head">
+<p class="eyebrow">EXECUTIVE SUMMARY</p>
+<h2 class="title">One assistant, three jobs, a pilot in under six months</h2>
+</div>
+<div class="grid2">
+<div class="card rise" style="--i:0"><p class="k">THE PROBLEM</p><p class="t">SME RMs lose a large share of their week to finding information, preparing for meetings and post-meeting admin, time that should go to customers. We estimate 40–50% (to validate in discovery).</p></div>
+<div class="card rise" style="--i:1"><p class="k">THE SOLUTION</p><p class="t">An AI copilot inside the CRM and Teams that <b>prepares</b> a customer brief, <b>answers</b> policy and product questions with sources, and <b>follows up</b> by drafting call reports, tasks and emails.</p></div>
+<div class="card rise" style="--i:2"><p class="k">HOW IT IS BUILT</p><p class="t">An orchestrator agent calls entitlement-checked APIs for live customer data and RAG for policy documents. A governed LLM gateway sits in front of the model, and the RM approves every write.</p></div>
+<div class="card teal rise" style="--i:3"><p class="k">THE PLAN AND THE PRIZE</p><p class="t">6-week discovery, then a 12-week pilot with about 25 RMs, then scale. Target: 4+ hours back per RM per week, same-day call reports and faster credit turnaround.</p></div>
+</div>
+<p class="pg"></p>
+<aside>If the audience remembers one slide, it is this one. The problem: RM time is being spent on information retrieval and admin rather than customers. The solution is one assistant with three clearly scoped use cases, each with a different AI pattern: agentic retrieval for the brief, RAG for policy Q&amp;A, and an agent with human approval for follow-ups. Architecturally, the key point is that customer data is never dumped into a vector store: it is fetched live through APIs that enforce the RM’s own entitlements. The delivery plan is deliberately small at first, with one pilot cohort, measurable targets and clear go/no-go gates.</aside>
+</section>

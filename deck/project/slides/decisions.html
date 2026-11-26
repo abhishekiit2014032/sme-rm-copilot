@@ -1,0 +1,16 @@
+<section id="decisions" class="dark">
+<div class="head">
+<p class="eyebrow">4 · TECHNICAL DEEP DIVE</p>
+<h2 class="title">Five design decisions and what we traded off</h2>
+</div>
+<table class="tbl" style="color:#EEF2F0; font-size:24px">
+<tr class="hd" style="background:#0B7A65"><th style="width:18%">Decision</th><th style="width:24%">Our choice</th><th style="width:22%">Alternative</th><th style="width:36%">Why</th></tr>
+<tr><td>Grounding</td><td>RAG + live tool calls</td><td>Fine-tune the LLM</td><td>Fresh data, citations, access control at source; fine-tune later only for tone or format</td></tr>
+<tr style="background:#1A3245"><td>Customer data</td><td>Live APIs as the RM</td><td>Embed it in a vector DB</td><td>No PII copy; entitlements and freshness come from the source system</td></tr>
+<tr><td>Agent design</td><td>One orchestrator, typed tools</td><td>Multi-agent framework</td><td>Easier to test, trace and explain to auditors and model-risk teams</td></tr>
+<tr style="background:#1A3245"><td>Model hosting</td><td>Hosted frontier model, private in-region endpoint</td><td>Self-hosted open-weights model</td><td>Best quality today; the gateway keeps open-weights as an option for volume tasks</td></tr>
+<tr><td>Write actions</td><td>Draft + RM approval</td><td>Autonomous writes</td><td>Keeps the RM accountable and makes regulators comfortable</td></tr>
+</table>
+<p class="pg"></p>
+<aside>These are the decisions an architecture review board will challenge. Grounding: we use retrieval and tools rather than fine-tuning, because policies and customer data change daily, fine-tuning cannot cite its sources, and it cannot enforce access control. Customer data: we query it live as the RM instead of embedding it, so there is no second copy of PII to secure, and access rules come from the source system. Agent design: a single orchestrator with typed tools is less fashionable than multi-agent systems, but far easier to test and explain. Model hosting: a hosted frontier model gives the best quality today; because everything goes through the gateway, we can move high-volume or sensitive tasks to a self-hosted open-weights model later. Writes: a human approves every change.</aside>
+</section>
