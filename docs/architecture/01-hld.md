@@ -16,6 +16,8 @@ classification · 10 Deployment view by phase · 11 Azure service mapping · 12 
 
 ---
 
+> Rendered images of every diagram in this document are in [`diagrams/`](diagrams/) (`hld-*.png` and `.svg`), rebuilt with `diagrams/render-hld.js`.
+
 ## 1. Purpose and scope
 
 **Purpose.** Give the Architecture Review Board (ARB) one coherent view of how the copilot is built on Azure: what
