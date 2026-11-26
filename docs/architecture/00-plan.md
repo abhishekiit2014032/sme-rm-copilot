@@ -1,6 +1,6 @@
 # SME RM Copilot on Azure: delivery plan and architecture baseline
 
-Status: **v2.4 baseline (after ARB pre-review, ADR, SLA and LLD feedback, and the final ARB review in `07-review-log.md`)** · Owner: solution architecture · Date: 26 Nov 2026 · Presentation: Fri 27 Nov 2026
+Status: **v2.6 baseline (v2.4 after the ARB review in `07-review-log.md`; v2.6 adds agents, the MCP gateway and memory)** · Owner: solution architecture · Date: 26 Nov 2026 · Presentation: Fri 27 Nov 2026
 
 This file is the single source of truth for every workstream. Docs, deck, prototype and code must use the
 names, numbers and decisions below. If a workstream needs to change one, it changes it here first and logs it in
@@ -112,6 +112,54 @@ Out of scope now: deploying to a real subscription, real bank data, vendor contr
 CRM, core banking (via an ODS read replica), lending and trade finance (LOS), KYC/CDD, policy DMS, Microsoft 365
 (Graph), news and company registry (licensed external feed through the Azure Firewall egress allow-list).
 
+### 3.7 Agents, identities and the MCP gateway (v2.6)
+**Multi-agent orchestration, supervisor-led.** The orchestrator becomes a small, fixed graph of agents, run in code
+on AKS (graph-based framework such as Microsoft Agent Framework workflows or LangGraph, with a checkpointer; ADR-025):
+
+| Agent | Job | Tools it may call (MCP) | Model |
+|---|---|---|---|
+| `supervisor` | Classifies intent, picks one specialist, enforces step, time and token budgets, assembles the reply | none (no data tools) | `gen-small` |
+| `brief-agent` (UC1) | Customer brief | `customer-data`: profile, facilities, transactions summary, KYC status, news; `memory`: episodic recall | `gen-large` |
+| `policy-agent` (UC2) | Cited policy answers | `policy-search` only (no customer data) | `gen-small` rewrite, `gen-large` answer |
+| `followup-agent` (UC3) | Notes to drafts | `customer-data`: profile; `crm-drafts`: create drafts (no commit) | `gen-small` |
+
+Rules: the supervisor hands off once (at most 2 agent hops per request); agents never talk to each other freely;
+verification (numeric, policy, groundedness checks) is deterministic code, not an agent; **commit is not an agent
+tool**: it runs only through the write API with the RM-signed approval token (§4.2).
+
+**Three identities on every tool call.** Effective permission is the **intersection** of:
+1. **User (OIDC):** the RM signs in with Entra ID (OpenID Connect); `web-bff` gets an OBO token for the tool audience
+   carrying the RM `oid`, delegated scopes (`Tools.Read`, `Tools.Write` only on approve) and the agent as actor.
+2. **Agent (service principal):** each agent has its own Entra identity (Entra Agent ID where available, else an app
+   registration with a service principal) **[confirm]**, holding app roles for exactly its tools (e.g.
+   `Tools.CustomerData.Read` for `brief-agent`, `Tools.PolicySearch` for `policy-agent`).
+3. **Workload (managed identity):** the agent runtime pod's workload identity. It is the federated credential the agent
+   identity uses to get its token, so there are **no client secrets**, and a stolen agent token cannot be minted
+   outside the pod.
+
+**MCP gateway.** Tools are exposed as MCP servers by `tool-gateway` (`customer-data`, `policy-search`, `crm-drafts`,
+`memory`) behind **APIM as the MCP gateway** (MCP server support in APIM **[confirm]** GA and UAE North). The gateway
+validates the user token and the agent token, applies per-agent and per-RM limits, and filters `tools/list` so an agent
+only sees the tools it may call. `tool-gateway` remains the policy decision point: user entitled to the customer
+(portfolio, delegation), agent holds the tool's role, data classification ≤ RM clearance, arguments match the pinned
+schema, and, for writes, a valid approval token. Only internal, registered MCP servers are allowed; tool names,
+descriptions and schemas are versioned and hashed so a changed description is rejected (tool poisoning, C25).
+
+### 3.8 Memory architecture (v2.6)
+| Memory | Holds | Store | Scope and key | Retention | Written by |
+|---|---|---|---|---|---|
+| Working | The current request's graph state: messages, tool results, plan | In-process, then checkpointed | One request | Request | Graph runtime |
+| Checkpointer | Graph state after every node; pauses for human approval (interrupt) and resumes; replay for debugging | Cosmos DB `checkpoints` (encrypted) | Thread = RM session; checkpoint per node | 7 days (30 while a UC3 draft is open) | Graph runtime |
+| Session | Conversation turns and a rolling summary for the current session | Cosmos DB `sessions` | RM `oid` + session | 24 h | `web-bff`, `supervisor` |
+| Episodic | What happened before with this customer: past briefs, approved call reports, open tasks | CRM is the source of truth (read via tools); copilot episode log of the RM's own interactions | RM `oid` + customer; entitlement re-checked at recall | Episode log 90 days | Only RM-approved or RM-authored content |
+| Semantic | Bank knowledge: policies, products | AI Search (versioned, effective-dated) | Clearance filter | Per policy lifecycle | Ingestion pipeline |
+| Procedural | How to do the job: prompts, graph definitions, tool schemas, few-shot examples, guardrail rules | Git + prompt registry, pinned in App Configuration | Global, versioned | Versioned forever | Engineers, through the eval gate only |
+| Profile | RM preferences: language, brief format, default customers | Cosmos DB `rm-profile` | RM `oid` | Until changed | The RM |
+
+Rules: customer facts are never memorised (read live); no memory crosses RMs; every memory item carries provenance
+(source, author, time, version); quarantined or injected text is never written to memory (C26); procedural memory is
+never changed at runtime by the model; erasure crypto-shreds checkpoints and episodes with the customer key.
+
 ## 4. Data flows (the deck and the prototype must match these numbers)
 
 ### 4.1 Read path: UC1 pre-meeting brief
@@ -208,12 +256,21 @@ Latency budget per use case (p95, ms):
 | C21 | Audit immutability vs. erasure and imperfect masking | WORM holds hashes, metadata and pointers; content encrypted per customer key, crypto-shredded on erasure without breaking the chain |
 | C22 | Entitlement staleness and delegation | Cache ≤ 60 s + event invalidation; delegation (holiday cover) from CRM delegation records with expiry; team lead read-only role |
 | C23 | No model risk management | MRM section in `05`: inventory, independent validation (including evaluators), lineage in every audit event, monitoring, AI-assisted marking in CRM |
+| C24 | Agent identity sprawl and over-privilege | One identity per agent with only its tools' app roles; tokens via federated credential from the pod's managed identity (no secrets); effective permission = user ∩ agent ∩ workload; quarterly access review |
+| C25 | MCP tool poisoning or rogue MCP servers | Internal registered MCP servers only; tool descriptions and schemas versioned and hashed; `tools/list` filtered per agent; no external MCP servers |
+| C26 | Memory poisoning (injected text saved, recalled later as fact) | Only RM-approved or RM-authored content enters episodic memory; quarantine runs before any memory write; provenance on every item |
+| C27 | Memory leaking across RMs or customers | Memory partitioned by RM `oid`; entitlement re-checked at recall; no shared memory; tests for cross-RM recall |
+| C28 | Multi-agent error compounding, cost and latency | Supervisor hands off once, at most 2 agent hops; fixed graphs; step budgets; verification in code |
+| C29 | Checkpoints hold customer data | Encrypted, UAE-resident, short TTL, PIM-gated replay, crypto-shredded on erasure |
 
 ## 7. Data retention (defaults, [confirm] with records management)
 
 | Data | Store | Retention |
 |---|---|---|
 | Session state | Cosmos DB | 24 h TTL |
+| Graph checkpoints | Cosmos DB `checkpoints` | 7 days; 30 days while a UC3 draft is open |
+| Episodic interaction log | Cosmos DB `episodes` | 90 days; crypto-shred on erasure |
+| RM profile and preferences | Cosmos DB `rm-profile` | Until changed or the RM leaves |
 | Drafts | Cosmos DB `drafts` | 30 days TTL (committed items live in CRM) |
 | jti replay store | Cosmos DB | 1 day TTL (> token life) |
 | Approval verdicts, saga state and outbox items | Cosmos DB `approvals` | 30 days after the last item reaches a final state |
@@ -255,7 +312,8 @@ fixes. 4. Verification: tests, evals, stack smoke and load run, slide layout, pr
 9. CRM: iframe embedding and extension model for the sidebar; Teams tab on mobile through Entra Private Access.
 10. Networking for the Sentinel playbook (Logic Apps) and in-network CI runners; DNS forwarding (Private Resolver or the Bank's forwarders).
 11. **Go-live gate for UC3 writes:** the CRM supports an external-reference lookup or an idempotency key (ADR-010). Without it, UC3 stays draft-only.
-12. Bank: residency and outsourcing approvals, records retention, erasure rules (PDPL banking scope, CBUAE, DIFC/ADGM where relevant), MRM standard, CRM idempotency / external reference support, SLAs and support hours for each system of record.
+12. Microsoft Entra Agent ID availability for agent identities; managed identity as a federated credential for the agent identity; agent OBO (actor) token support; APIM MCP gateway features in UAE North.
+13. Bank: residency and outsourcing approvals, records retention, erasure rules (PDPL banking scope, CBUAE, DIFC/ADGM where relevant), MRM standard, CRM idempotency / external reference support, SLAs and support hours for each system of record.
 13. Cosmos DB in UAE North: periodic backup with geo-redundant backup storage (interval, retention, restore by support request, where the copy lives); zone-redundant SLA figure.
 14. Event Hubs: Standard has no customer-managed keys; Premium availability, SLA and geo-replication in UAE North; maximum retention per tier.
 15. Storage: GZRS replication lag and whether geo priority replication is offered in UAE North (audit RPO ≤ 15 min is a target until then); immutability with protected append writes on GZRS.
@@ -304,3 +362,9 @@ fixes. 4. Verification: tests, evals, stack smoke and load run, slide layout, pr
 - v2.5 (26 Nov): walkthrough against the AI system design method (`08-ai-system-design-walkthrough.md`). Added a
   policy freshness target (searchable within 60 minutes of publish); prompt caching allowed where the model supports
   it (no answers cached) [confirm]; semantic cache stays off in the pilot.
+- v2.6 (26 Nov): owner review. Added §3.7 supervisor-led multi-agent orchestration (supervisor, brief, policy and
+  follow-up agents; at most 2 hops; commit is not an agent tool), the three-identity model (RM via OIDC/OBO, agent
+  service principal, workload managed identity as its federated credential; effective permission = intersection) and
+  APIM as the MCP gateway in front of `tool-gateway` MCP servers; §3.8 memory architecture (working, checkpointer,
+  session, episodic, semantic, procedural, profile); C24 to C29; retention rows; new [confirm] facts. ADR-023 to
+  ADR-026; ADR-005 amended.
