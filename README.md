@@ -5,16 +5,17 @@ An AI assistant for SME relationship managers, built around three use cases: a *
 | Deliverable | Where |
 |---|---|
 | Presentation (29 slides, with speaker notes) | https://claude.ai/artifact/SQ99QXKTFqqkcG8qZvvGB1 (source in `deck/project/`). Export to PowerPoint or PDF from the deck's Share menu. |
-| Clickable prototype | https://claude.ai/artifact/QMmwAsgAQZnoUtVf2iTkWA (source: `prototype/rm-copilot.html`, which also opens offline in any browser) |
-| Sample code | `code/`. See `code/README.md`. Python standard library only; `python3 demo.py`, `python3 -m evals.run_evals`, `python3 -m unittest` |
+| Clickable prototype | https://claude.ai/artifact/QMmwAsgAQZnoUtVf2iTkWA (source: `prototype/rm-copilot.html`, which also opens offline in any browser). The "How it works" tab shows the Azure architecture and lights up what the last request touched |
+| Azure architecture pack | `docs/architecture/`: plan and baseline (`00-plan.md`), HLD (`01`), LLD (`02`), 22 ADRs with trade-offs (`adr/`), interfaces and SLAs (`04`), NFRs, failure modes, DR and model risk (`05`), deployment and operations (`06`), ARB review log and verdict (`07`) |
+| Working prototype on mock Azure | `code/`. See `code/README.md`. Python standard library only. `python3 stack.py` starts 7 services over HTTP against mock Azure APIs (Entra ID, APIM, Azure OpenAI, Content Safety, AI Language, AI Search, Key Vault, App Configuration, Cosmos DB, Event Hubs) with a console; `python3 -m unittest`, `python3 -m evals.run_evals`, `python3 loadtest.py`, `python3 demo.py` |
 
 ## How the deck maps to the brief
 
-1. **Business problem and use cases**: slides 3–8
-2. **Solution architecture** (layers, read and write data flows, component map, Azure deployment and network, data, AI components, RAG, agents, security): slides 9–18
-3. **Delivery approach** (roadmap, risks, success metrics): slides 19–21
-4. **Technical deep dive** (decisions, technology trade-offs on Azure, interface agreements and SLOs, hallucination, evaluation, governance): slides 22–27
-5. **Demo and next steps**: slides 28–29
+1. **Business problem and use cases**: slides 3 to 8
+2. **Solution architecture** (layers, read and write data flows, component map, Azure deployment and network, data, AI components, RAG, agents, security): slides 9 to 18
+3. **Delivery approach** (roadmap, risks, success metrics): slides 19 to 21
+4. **Technical deep dive** (decisions, technology trade-offs on Azure, interface agreements and SLOs, hallucination, evaluation, governance): slides 22 to 27
+5. **Demo and next steps**: slides 28 and 29
 
 ## Assumptions to confirm or replace before presenting
 
