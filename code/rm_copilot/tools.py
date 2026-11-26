@@ -77,12 +77,19 @@ def require_entitlement(user: User, customer_id: str) -> None:
 
 
 # --------------------------------------------------------------------------- read tools
+TOOL_CONTRACT_VERSION = "tools/1.2"  # recorded in audit lineage; bump on any change to a tool's inputs or outputs
+PROFILE_FIELDS = ("name", "crm_id", "sector", "since", "turnover_aed", "revenue_yoy_pct", "contact")
+
+
+def minimise_profile(record: dict) -> dict:
+    """Field-level minimisation: only the fields the use cases need. The national ID never leaves the tool layer."""
+    return {k: record[k] for k in PROFILE_FIELDS}
+
+
 @tool("read")
 def get_customer_profile(user: User, customer_id: str) -> dict:
     require_entitlement(user, customer_id)
-    c = data.CUSTOMERS[customer_id]
-    # Field-level minimisation: the national ID is never returned to the orchestrator.
-    return {k: c[k] for k in ("name", "crm_id", "sector", "since", "turnover_aed", "revenue_yoy_pct", "contact")}
+    return minimise_profile(data.CUSTOMERS[customer_id])
 
 
 @tool("read")
@@ -104,9 +111,15 @@ def get_transaction_signals(user: User, customer_id: str) -> list[dict]:
 
 
 @tool("read")
+def get_news(user: User, customer_id: str) -> list[dict]:
+    require_entitlement(user, customer_id)
+    return copy.deepcopy(data.NEWS.get(customer_id, []))
+
+
+@tool("read")
 def search_policies(user: User, query: str, k: int = 3) -> list[dict]:
-    # Version and classification filters are applied inside retrieval, before ranking.
-    return search(query, data.POLICY_PASSAGES, clearance=user.clearance, k=k)
+    # Version, effective-date and classification filters are applied inside retrieval, before ranking.
+    return search(query, data.POLICY_PASSAGES, clearance=user.clearance, k=k, as_of=data.AS_OF.isoformat())
 
 
 # --------------------------------------------------------------------------- approvals

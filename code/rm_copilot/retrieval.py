@@ -25,9 +25,12 @@ def tokenize(text: str) -> list[str]:
     return [_stem(SYNONYMS.get(w, w)) for w in words if w and w not in STOP]
 
 
-def eligible(passages: list[dict], clearance: str) -> list[dict]:
+def eligible(passages: list[dict], clearance: str, as_of: str | None = None) -> list[dict]:
+    """Security trimming before ranking: current version, within the user's clearance and, when `as_of`
+    (ISO date) is given, already in force. The AI Search mock applies the same rules as an OData filter."""
     limit = CLEARANCE_RANK[clearance]
-    return [p for p in passages if p["status"] == "current" and CLEARANCE_RANK[p["classification"]] <= limit]
+    return [p for p in passages if p["status"] == "current" and CLEARANCE_RANK[p["classification"]] <= limit
+            and (as_of is None or p.get("effective_from", "0000-01-01") <= as_of)]
 
 
 def bm25(query: str, passages: list[dict], k1: float = 1.4, b: float = 0.75) -> list[tuple[float, dict]]:
@@ -63,8 +66,13 @@ def rerank(query: str, scored: list[tuple[float, dict]]) -> list[tuple[float, di
     return sorted(out, key=lambda x: x[0], reverse=True)
 
 
-def search(query: str, passages: list[dict], clearance: str, k: int = 3, candidates: int = 20) -> list[dict]:
-    pool = eligible(passages, clearance)                                     # 1. filter first
+def rank(query: str, pool: list[dict], k: int = 3, candidates: int = 20) -> list[tuple[float, float, dict]]:
+    """Recall then precision over an already-filtered pool. Returns (rerank score, bm25 score, passage)."""
     first_pass = [(s, p) for s, p in bm25(query, pool) if s > 0][:candidates]  # 2. recall
-    ranked = rerank(query, first_pass)[:k]                                     # 3. precision
-    return [{**p, "score": round(s, 2)} for s, p in ranked]
+    bm = {id(p): s for s, p in first_pass}
+    return [(s, bm[id(p)], p) for s, p in rerank(query, first_pass)[:k]]       # 3. precision
+
+
+def search(query: str, passages: list[dict], clearance: str, k: int = 3, candidates: int = 20, as_of: str | None = None) -> list[dict]:
+    pool = eligible(passages, clearance, as_of)                                # 1. filter first
+    return [{**p, "score": round(s, 2)} for s, _, p in rank(query, pool, k, candidates)]

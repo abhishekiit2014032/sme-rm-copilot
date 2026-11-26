@@ -15,7 +15,24 @@ PII_PATTERNS = {
     "national_id": re.compile(r"\b784-?\d{4}-?\d{7}-?\d\b"),
     "iban": re.compile(r"\bAE\d{2}\s?(?:\d{4}\s?){4}\d{3}\b"),
     "card": re.compile(r"\b(?:\d[ -]?){15,16}\b"),
+    "trade_licence": re.compile(r"\b(?:TL|CN)-\d{6,7}\b"),
+    "email": re.compile(r"\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b"),
+    "phone": re.compile(r"(?:\+971|\b00971|\b0)[ -]?(?:5\d|[2-9])[ -]?\d{3}[ -]?\d{4}\b"),
 }
+GUARDRAIL_VERSION = "guardrails/2026.11.2"  # recorded in audit lineage; bump on any rule change
+
+# Number words the model must not write itself (plan C19). English plus basic Arabic, with the common
+# attached prefixes (wa-, bi-, li-). Digits in any script are caught by \d (Unicode-aware).
+_EN_NUMBER_WORDS = ("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen "
+                    "seventeen eighteen nineteen twenty thirty forty fifty sixty seventy eighty ninety hundred thousand million "
+                    "billion dozen half quarter percent").split()
+_AR_NUMBER_WORDS = ("صفر واحد واحدة اثنان اثنين اثنتان ثلاث ثلاثة أربع أربعة خمس خمسة ست ستة سبع سبعة ثمان ثمانية تسع تسعة "
+                    "عشر عشرة عشرون عشرين مائة مئة ألف آلاف مليون ملايين مليار نصف ربع بالمائة بالمئة").split()
+NUMBER_WORDS = re.compile(r"(?<!\w)(?:(?:" + "|".join(_EN_NUMBER_WORDS) + r")s?|(?:و|ب|ل)?(?:" + "|".join(_AR_NUMBER_WORDS) + r"))(?!\w)", re.I)
+
+# Commitments only the credit or pricing process can make (plan C19: policy check on UC1 and UC3 output).
+POLICY_PROMISE = re.compile(r"approv\w*|guarantee\w*|pricing|\bprice[sd]?\b|discount\w*|\bwaive\w*|increase (?:the |your )?limit|"
+                            r"we will (?:lend|extend|offer credit)", re.I)
 
 
 def detect_injection(text: str) -> list[str]:
@@ -70,5 +87,12 @@ def groundedness(answer: str, passages: list[dict], min_support: float = 0.6) ->
 
 
 def free_numbers(model_text: str) -> list[str]:
-    """Digits the model wrote itself, outside {placeholders}. Should always be empty."""
-    return re.findall(r"\d+", re.sub(r"\{[^}]+\}", "", model_text))
+    """Digits or number words (English, basic Arabic) the model wrote itself, outside {placeholders}.
+    Should always be empty: every figure must come from a tool via a placeholder."""
+    text = re.sub(r"\{[^}]+\}", "", model_text)
+    return re.findall(r"\d+", text) + [m.group(0) for m in NUMBER_WORDS.finditer(text)]
+
+
+def policy_violations(model_text: str) -> list[str]:
+    """Promises of approval, pricing or limits written by the model. Should always be empty."""
+    return [m.group(0) for m in POLICY_PROMISE.finditer(re.sub(r"\{[^}]+\}", "", model_text))]
