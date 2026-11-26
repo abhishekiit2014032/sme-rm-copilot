@@ -32,12 +32,12 @@ before go-live.
 | ADR-016 | Channels: CRM sidebar and Teams personal tab first, Teams bot after residency sign-off | Accepted (Phase 1); Teams bot Proposed for Phase 2, gated on C1 | [ADR-016-channels-crm-sidebar-teams-tab.md](ADR-016-channels-crm-sidebar-teams-tab.md) |
 | ADR-017 | Network private by default | Accepted | [ADR-017-network-private-by-default.md](ADR-017-network-private-by-default.md) |
 | ADR-018 | Evaluation, release gates and model risk management | Accepted | [ADR-018-evaluation-and-model-risk.md](ADR-018-evaluation-and-model-risk.md) |
-| ADR-019 | State store: Cosmos DB for NoSQL | Pending (parallel workstream) | [ADR-019-state-store-cosmos-db.md](ADR-019-state-store-cosmos-db.md) |
-| ADR-020 | Feature flags and kill switches | Pending (parallel workstream) | [ADR-020-feature-flags-kill-switch.md](ADR-020-feature-flags-kill-switch.md) |
-| ADR-021 | Infrastructure as code and CI/CD | Pending (parallel workstream) | [ADR-021-iac-and-cicd.md](ADR-021-iac-and-cicd.md) |
-| ADR-022 | No streaming of unverified output | Pending (parallel workstream) | [ADR-022-no-unverified-streaming.md](ADR-022-no-unverified-streaming.md) |
+| ADR-019 | Operational state in Azure Cosmos DB for NoSQL | Accepted | [ADR-019-state-store-cosmos-db.md](ADR-019-state-store-cosmos-db.md) |
+| ADR-020 | Feature flags and kill switches in Azure App Configuration | Accepted | [ADR-020-feature-flags-kill-switch.md](ADR-020-feature-flags-kill-switch.md) |
+| ADR-021 | Infrastructure as code with Bicep and Azure Verified Modules, CI/CD with OIDC | Accepted (CI platform follows the Bank standard [confirm]) | [ADR-021-iac-and-cicd.md](ADR-021-iac-and-cicd.md) |
+| ADR-022 | No unverified streaming: buffer, verify, release | Accepted | [ADR-022-no-unverified-streaming.md](ADR-022-no-unverified-streaming.md) |
 
-ADR-009 to ADR-022 are authored in a parallel workstream. Titles and statuses above are taken from each file where it exists; rows marked Pending use the agreed file name and a working title, to be aligned when the file lands.
+Titles and statuses above are taken from each ADR file.
 
 ## Map to the plan's critical issues (plan §6)
 
