@@ -1,6 +1,6 @@
 # SME RM Copilot on Azure: low-level design (LLD)
 
-Status: **v1.1 (workstream B1, aligned to plan v2.4 after the ARB review, `07-review-log.md`)** · Contract: [`00-plan.md`](00-plan.md) v2.4 · Date: 26 Nov 2026 · Audience: engineering, security, platform, MRM
+Status: **v1.2 (workstream B1, aligned to plan v2.4 after the ARB review, `07-review-log.md`; v2.6 additions for agents, the MCP gateway, agent identities and memory in §15 and §16)** · Contract: [`00-plan.md`](00-plan.md) v2.6 · Date: 26 Nov 2026 · Audience: engineering, security, platform, MRM
 
 This document is the build specification for the services in `00-plan.md` §3.2. It uses the plan's names,
 numbers and decisions. Where the plan is silent the LLD makes a decision and labels it **[LLD decision]**; where
@@ -27,8 +27,10 @@ Contents
 10. Sequence diagrams
 11. Observability specification
 12. Security controls mapping
-13. Traceability matrix (C1 to C23)
+13. Traceability matrix (C1 to C29)
 14. Open items, [confirm] list and plan inconsistencies
+15. Agents, MCP gateway and identities (plan §3.7, v2.6)
+16. Memory (plan §3.8, v2.6)
 
 ---
 
@@ -80,8 +82,11 @@ Contents
 | `Retry-After` | response | any | Seconds; set on `429` and on `503` when a retry can help |
 | `x-rm-remaining-tokens` | response (internal) | APIM AI gateway | Remaining daily tokens for the RM; read by `orchestrator` for budget decisions, never shown in UI |
 | `x-rm-assertion` | request | APIM system API facade only | Signed RM identity for legacy systems of record (§7.2). Stripped if a caller sends it |
+| `x-agent-token` (v2.6) | request (internal) | `orchestrator` (one per agent) | The calling agent's app-only token (audience `tool-gateway`), sent on every MCP call next to `Authorization` (workload token) and `x-rm-token` (§15.4). Validated by the APIM MCP gateway and again by `tool-gateway`. Never logged |
+| `x-rmc-agent` (v2.6) | request (internal) | `orchestrator` | Agent id (`supervisor`, `brief-agent`, `policy-agent`, `followup-agent`) on AI gateway calls, used only as a metric dimension and per-agent token limit key; accepted only from the orchestrator's `azp`. Not an authorisation input |
+| `MCP-Protocol-Version`, `Mcp-Session-Id` (v2.6) | both | MCP client (`orchestrator`), MCP server (`tool-gateway`) | Streamable HTTP transport headers (§15.6) **[confirm protocol version supported by APIM]** |
 
-Headers that must never be logged or put on spans: `Authorization`, `x-rm-token`, `x-rm-assertion`, `Cookie`,
+Headers that must never be logged or put on spans: `Authorization`, `x-rm-token`, `x-agent-token`, `x-rm-assertion`, `Cookie`,
 `Set-Cookie`, `x-csrf-token`, `Idempotency-Key` (hash it if needed).
 
 ### 1.4 Error envelope and error-code catalogue
@@ -109,25 +114,28 @@ downstream error text. Upstream errors are mapped, never passed through.
 | Code | HTTP | Retryable | Raised by | Meaning and client behaviour |
 |---|---|---|---|---|
 | `VALIDATION_FAILED` | 400 | no | any | Body or parameter fails schema. `details.field` = JSON pointer. Reasons: `SCHEMA`, `UNKNOWN_FIELD`, `TOO_LARGE`, `BAD_DATE`, `WEEKEND_DATE`, `POLICY_VIOLATION` (a task asks to approve, price or change a limit), `UNSUPPORTED_CONTRACT_VERSION` |
-| `UNAUTHENTICATED` | 401 | no | any | Missing, expired or invalid token. Reasons: `MISSING_TOKEN`, `INVALID_TOKEN`, `WRONG_AUDIENCE`, `WRONG_TENANT`, `WORKLOAD_TOKEN_MISSING`, `WORKLOAD_NOT_ALLOWED`. Client re-acquires a token silently once |
+| `UNAUTHENTICATED` | 401 | no | any | Missing, expired or invalid token. Reasons: `MISSING_TOKEN`, `INVALID_TOKEN`, `WRONG_AUDIENCE`, `WRONG_TENANT`, `WORKLOAD_TOKEN_MISSING`, `WORKLOAD_NOT_ALLOWED`, `AGENT_TOKEN_INVALID` (v2.6, missing or invalid `x-agent-token`). Client re-acquires a token silently once |
 | `SESSION_EXPIRED` | 401 | no | `web-bff` | Session document gone (24 h TTL) or idle > 8 h **[LLD decision]**. Client reloads the session |
 | `STEP_UP_REQUIRED` | 401 | no | `web-bff` | Approve needs the authentication context `approve-write` (`acrs` contains `c1`; fallback: ID token `auth_time` ≤ 10 min, plan §3.4). Response carries `WWW-Authenticate: Bearer error="insufficient_claims", claims="<base64 claims challenge>"`. Client runs MSAL interactive with the claims, then retries the same request with the same `Idempotency-Key` |
 | `INSUFFICIENT_SCOPE` | 403 | no | `tool-gateway`, `web-bff` | Token lacks `Tools.Read` / `Tools.Write` or an app role. Not shown to RMs as a normal path |
 | `ORIGIN_REJECTED` | 403 | no | `web-bff` | `Origin` not allowed |
 | `CSRF_FAILED` | 403 | no | `web-bff` | CSRF token missing or wrong |
-| `NOT_ENTITLED` | 403 | no | `tool-gateway` | The RM may not access this customer (or may not write for it: team lead). No data has moved. Counted for C15 analytics |
+| `NOT_ENTITLED` | 403 | no | `tool-gateway` | The RM may not access this customer (or may not write for it: team lead). No data has moved. Counted for C15 analytics. Reason `CLEARANCE` (v2.6): the tool's data class is above the RM's clearance (§15.5) |
+| `AGENT_NOT_PERMITTED` (v2.6) | 403 | no | APIM MCP gateway, `tool-gateway` | The agent or workload may not call this tool. Reasons: `TOOL_NOT_ALLOWED` (tool not in the agent's allow-list or role missing), `WORKLOAD_MISMATCH` (agent token presented from a workload not registered for that agent), `UNEXPECTED_ROLES` (agent token carries roles beyond its manifest: over-privilege, C24), `ACTOR_MISMATCH` (user token actor is not the calling agent), `WRITE_TOOL_ON_MCP`. Always a defect or an attack: P1 security alert, never retried. The RM sees `500 INTERNAL` (generic) |
 | `APPROVAL_INVALID` | 403 | no | `tool-gateway` | Approval token failed verification. Reasons in §4.6. Client must approve again |
 | `NOT_FOUND` | 404 | no | any | Draft, saga or document does not exist **for this RM** (also used instead of 403 for another RM's draft id, to avoid enumeration) |
 | `REPLAYED` | 409 | no | `tool-gateway` | `jti` already used by a different request (§4.5). Client shows existing saga status if `details.saga_id` is present |
 | `IDEMPOTENCY_CONFLICT` | 409 | no | `web-bff`, `tool-gateway` | Same `Idempotency-Key`, different body |
+| `RESUME_CONFLICT` (v2.6) | 409 | no | `orchestrator` | The checkpoint is already `resuming` or `completed` under another `Idempotency-Key` (§16.3). Client shows the existing saga status |
 | `DRAFT_CONFLICT` | 412 | no | `web-bff` | `If-Match` etag stale. Client reloads the draft |
 | `GUARDRAIL_BLOCKED` | 422 | no | `orchestrator` | Input blocked: Prompt Shields user-prompt attack, harmful content, or content filter on input. Reasons: `PROMPT_ATTACK`, `HARMFUL_CONTENT`, `CONTENT_FILTER`. The message is generic; the RM can rephrase. Counted in the false-positive review |
 | `RATE_LIMITED` | 429 | yes | `web-bff`, APIM | Request-rate limit hit (per RM: 30 requests/min **[LLD decision]**; per backend at the facade). `Retry-After` set |
-| `BUDGET_EXCEEDED` | 429 | no (until reset) | `orchestrator` (mapping APIM), APIM | Token budget exhausted. Reasons: `RM_DAILY` (400k tokens/RM/day), `USE_CASE` (per-use-case limit), `REQUEST_STEPS` (> 6 tool steps), `REQUEST_TOKENS` (> 12k input or 1.5k output). `details.resets_at` for `RM_DAILY` (midnight GST **[confirm APIM daily window is UTC or configurable]**) |
+| `BUDGET_EXCEEDED` | 429 | no (until reset) | `orchestrator` (mapping APIM), APIM | Token budget exhausted. Reasons: `RM_DAILY` (400k tokens/RM/day), `USE_CASE` (per-use-case limit), `REQUEST_STEPS` (> 6 tool steps), `REQUEST_TOKENS` (> 12k input or 1.5k output), `HOP_LIMIT` (v2.6: a second handoff, more than 2 agent hops, §15.2), `AGENT_STEPS` (v2.6: an agent's own tool-call budget). `details.resets_at` for `RM_DAILY` (midnight GST **[confirm APIM daily window is UTC or configurable]**) |
 | `FEATURE_DISABLED` | 503 | no | `web-bff`, `orchestrator`, `tool-gateway`, `outbox-worker` | Kill switch or feature flag off (`details.flag`). UI shows a banner and hides the action. Not counted against the SLO when set by an operator (counted separately) |
 | `DEPENDENCY_UNAVAILABLE` | 503 | yes | any | Circuit open or dependency down and no degraded path exists (for example Cosmos down during commit). Reasons: `CIRCUIT_OPEN`, `AUDIT` (neither Event Hubs nor the Cosmos `audit-spool` acknowledged, or Event Hubs did not acknowledge `approval_verified` on a commit, so nothing was released or written), `ENTITLEMENT_SOURCE`, `KEY_VAULT`, `STATE_STORE`. `Retry-After` set |
 | `DEPENDENCY_TIMEOUT` | 504 | yes | any | A required dependency did not answer within its deadline-derived timeout and no degraded path exists |
 | `DEADLINE_EXCEEDED` | 504 | yes | any | The request's own deadline (`x-deadline-ms`) had expired on arrival or before work started (fail fast, no downstream call) |
+| `TOOL_SCHEMA_MISMATCH` (v2.6) | 500 | no | `orchestrator` (MCP client), `tool-gateway` | A tool definition's hash (name, description, input and output schema) differs from the pin in App Configuration (§15.3, C25). The tool is refused for every caller until the pin and the served definition agree; P1 security alert |
 | `INTERNAL` | 500 | yes | any | Unexpected. Message generic; exception text scrubbed (C5) |
 
 **Degraded is not an error.** A degraded answer is `200` with `"mode": "degraded"` and a warning entry:
@@ -155,6 +163,8 @@ App registrations **[LLD decision on names]**:
 | `rmc-ai-gateway` (`api://rm-copilot-ai-gateway`) | app roles `AiGateway.Generate`, `AiGateway.Embed`, `AiGateway.Judge` | `orchestrator` (Generate), `tool-gateway` and `ingestion-worker` (Embed), `eval-runner` (Generate, Embed, Judge) |
 | `rmc-system-api` (`api://rm-copilot-system-api`) | app roles `SystemApi.Read`, `SystemApi.Write`, `SystemApi.DeferredWrite` | `tool-gateway` only |
 | `rmc-audit-admin` (`api://rm-copilot-audit-admin`) | app roles `Audit.Verify` (auditors), `Audit.Erase` (data protection officer, PIM, four-eyes) | `audit-writer` admin endpoints |
+| `rmc-tool-gateway` agent app roles (v2.6) | app roles `Tools.CustomerData.Read`, `Tools.CustomerData.Profile`, `Tools.PolicySearch`, `Tools.CrmDrafts.Create`, `Tools.Memory.Recall`; operator role `Ops.Replay` (PIM, checkpoint replay, §16.3) | agent identities (§15.2), operators |
+| `rmc-agent-supervisor`, `rmc-agent-brief`, `rmc-agent-policy`, `rmc-agent-followup` (v2.6) | nothing exposed; each is a client holding the agent app roles above. Entra Agent ID agent identities where available, else app registrations with a service principal **[confirm, plan §10 item 12]**. Only credential: a federated identity credential trusting the managed identity `id-rmc-orchestrator` (no secrets, no certificates) | `orchestrator` (§15.4) |
 
 Workload identities: one user-assigned managed identity per service, federated to its Kubernetes service account
 (`id-rmc-web-bff`, `id-rmc-orchestrator`, `id-rmc-tool-gateway`, `id-rmc-outbox-worker`, `id-rmc-ingestion-worker`,
@@ -169,11 +179,12 @@ Token on each hop:
 |---|---|---|
 | client → `web-bff` | RM token, `aud=api://rm-copilot-web-bff`, `scp` contains `Copilot.Use`, role `RmCopilot.RM` or `RmCopilot.TeamLead` | n/a |
 | `web-bff` → `orchestrator` | `web-bff` workload token, `aud=api://rm-copilot-orchestrator`, role `Orchestrator.Invoke` | OBO token, `aud=api://rm-copilot-tool-gateway`, `scp=Tools.Read` (approve: `Tools.Read Tools.Write`) |
-| `orchestrator` → `tool-gateway` | `orchestrator` workload token, `aud=api://rm-copilot-tool-gateway`, role `Tools.Invoke` | forwarded unchanged |
+| `orchestrator` → `tool-gateway` (v2.6: commit, audit, saga status and the meetings list only; agent tools go through the MCP gateway) | `orchestrator` workload token, `aud=api://rm-copilot-tool-gateway`, role `Tools.Invoke` | forwarded unchanged |
 | `orchestrator` → APIM AI gateway | `orchestrator` workload token, `aud=api://rm-copilot-ai-gateway`, role `AiGateway.Generate` | not sent; `x-rm-oid` = RM `oid` (quota key, accepted only from the orchestrator's `azp`) |
 | `tool-gateway` → APIM system API facade | `tool-gateway` workload token, `aud=api://rm-copilot-system-api` | forwarded unchanged on interactive calls; absent on outbox deliveries (`SystemApi.DeferredWrite`) |
 | `tool-gateway` → Graph | OBO token (second hop, from the validated `x-rm-token`) for Graph, `Calendars.ReadBasic` only (C20); `tool-gateway` owns the call (plan v2.3) | n/a |
 | `outbox-worker` → `tool-gateway` | `outbox-worker` workload token, role `Outbox.Deliver` | absent (RM not present; authority = persisted verdict, §5) |
+| `orchestrator` agent → APIM MCP gateway → `tool-gateway` MCP servers (v2.6) | `orchestrator` workload token, role `Tools.Invoke`; plus `x-agent-token` (agent app token with its tool roles) | forwarded unchanged (§15.4) |
 
 `tool-gateway` derives the RM **only** from the `oid` of a validated `x-rm-token` (checks `iss`, `aud`, `tid`,
 `exp`, `nbf`, `scp`). Any `rm_id`, `oid` or `user` field in a body or other header is ignored and, if present on a
@@ -556,6 +567,18 @@ Illustrative resources: requests `500m` / `1Gi`, limits `2` / `2Gi`. Node pool `
 without a generated answer, UC3 manual call report form); entitlement denied → `403 NOT_ENTITLED` with no model
 call; budget exceeded → `429 BUDGET_EXCEEDED`; nothing unverified is ever returned (C18).
 
+**v2.6 changes (plan §3.7, §3.8).** The workflows above run as agent graphs: `supervisor` plus one specialist
+(§15.1, §15.2). New endpoint `POST /internal/v1/threads/{thread_id}/resume` (caller `web-bff`, `Idempotency-Key`
+required) resumes an interrupted UC3 thread after approval (§16.3); `POST /internal/v1/uc3/commit` remains as the
+cold-resume path. Additional outbound rights: Entra token requests for the four agent identities (federated
+credential from `id-rmc-orchestrator`, §15.4); APIM MCP gateway with workload token plus agent token; Cosmos
+data-plane RBAC on `checkpoints` only (read, create, replace); Key Vault `wrapKey` and `unwrapKey` (no `sign`, no
+`get` of private material) on the per-customer content keys for checkpoint encryption (§16.2) **[LLD decision; plan
+§3.3 Keys lists the orchestrator as "none", see §14.2 item 16]**. Configuration keys added:
+`rmc:orchestrator:agent:<agent_id>` (agent manifest version), `rmc:orchestrator:graph:<graph_id>` (graph version),
+`rmc:orchestrator:max_hops` (2), `rmc:mcp:pins:<server>:<tool>` (tool definition pin, §15.3),
+`rmc:orchestrator:session:max_turns` (6), `rmc:orchestrator:session:context_tokens` (1500).
+
 ### 2.3 `tool-gateway`
 
 **Responsibilities.** The security boundary (C4). Validates both tokens on every call; entitlement check first
@@ -619,7 +642,7 @@ user token with role `Ops.Outbox` and `acrs` contains `c1`, reached only through
 Outbound: workload token to APIM facade (`SystemApi.Read`, `SystemApi.Write`, `SystemApi.DeferredWrite`) and AI
 gateway (`AiGateway.Embed`); OBO to Graph (`Calendars.ReadBasic`); AI Search `Search Index Data Reader` on the
 policy index; Cosmos data-plane RBAC (custom role, containers `entitlements`, `approvals`, `idempotency`,
-`audit-spool` (create only); no access to `drafts` or `sessions`); Event Hubs `Azure Event Hubs Data Sender` on `audit-events` and `audit-content`, `Azure Event Hubs Data Receiver` on
+`audit-spool` (create only); v2.6: `drafts` create only (the `crm-drafts` MCP server, partition = token `oid`) and `episodes` create and read (the `memory` server); no access to `sessions`, `checkpoints` or `rm-profile`); Event Hubs `Azure Event Hubs Data Sender` on `audit-events` and `audit-content`, `Azure Event Hubs Data Receiver` on
 `crm-portfolio-events` (consumer group `tool-gateway`); Key
 Vault custom role with `keys/read` only on `approval-signing` (public key).
 
@@ -854,6 +877,10 @@ data outside prod; online sampling reads only masked content.
 - Tools are invoked only by `orchestrator` workflows (fixed code paths), never chosen freely by the model. The
   model never sees tool names, arguments or raw tool output; it sees masked facts (UC1), masked passages (UC2) or
   masked notes (UC3).
+- v2.6: the read tools below are also exposed as MCP tools of the `customer-data`, `policy-search`, `crm-drafts`
+  and `memory` servers (§15.3) and called by agents through the APIM MCP gateway. The rule above still holds: the
+  tool-call nodes of each agent graph are code, not model function calling (§15.1). Contracts, versions, entitlement
+  and masking are unchanged; MCP is a transport and discovery layer on top of them.
 - Request envelope: `POST /v1/tools/{tool}` with `{"contract_major": <int>, "input": {...}}`. Response envelope:
   `{"tool", "contract_version", "output", "sources", "cache", "entitlement"}` (example in §2.3).
 - Inputs are schema-validated with `additionalProperties: false`. Any field naming a user (`rm_id`, `oid`,
@@ -1489,6 +1516,11 @@ queried paths, so content fields are never indexed.
 | `entitlements` | `/id` (`rm_oid`) | 50 s (+ 10 s in-process = 60 s, plan §7) | n/a | none | `tool-gateway` | `tool-gateway` |
 | `audit-spool` (ADR-013, ADR-019) | `/producer_pod` | none (each document deleted when drained) | n/a | `/occurred_at/?` | `tool-gateway` (create only) | `audit-writer` (read, delete) |
 | `audit-chain-heads` [LLD] | `/id` (`chain_id`) | none | n/a | none | `audit-writer` (ETag-guarded) | `audit-writer` |
+| `checkpoints` (v2.6, ADR-026) | `/thread_id` | 604,800 s (7 days) | 2,592,000 s (30 days) while a UC3 draft is open | `/thread_id/?`, `/checkpoint_ns/?`, `/status/?`, `/created_at/?`, `/customer_ref/?` | `orchestrator` (graph runtime) | `orchestrator`; operators with `Ops.Replay` (PIM) |
+| `episodes` (v2.6) | `/pk` (`<rm_oid>:<customer_id>`) | 7,776,000 s (90 days) | n/a | `/pk/?`, `/type/?`, `/created_at/?`, `/quarantined/?`, `/customer_ref/?`, `/rm_oid/?` | `tool-gateway` (create only) | `tool-gateway` (`memory` server) |
+| `rm-profile` (v2.6) | `/id` (`rm_oid`) | none (deleted by the leaver process) | n/a | none | `web-bff` | `web-bff` |
+
+Memory containers and the v2.6 fields added to `sessions` (`context.turns`, `context.summary`) are specified in §16.2.
 
 Example `sessions`:
 
@@ -2090,13 +2122,14 @@ policy), CRM platform team (publisher).
 
 | Template id | Alias | Temperature | Max output tokens | Response format | Input token cap | Notes |
 |---|---|---|---|---|---|---|
-| `router.intent` | `gen-small` | 0 | 50 | structured output `{intent, customer_mention}` | 1,000 | Only for free-text entry in the Teams tab; skipped when launched from a CRM record (plan §4.1) |
+| `router.intent` | `gen-small` | 0 | 50 | structured output `{intent, customer_mention}` | 1,000 | Only for free-text entry in the Teams tab; skipped when launched from a CRM record (plan §4.1). v2.6: owned by the `supervisor` agent |
 | `uc1.brief` | `gen-large` | 0.2 | 400 | structured output `{talking_points: string[≤ 4]}` with placeholders | 6,000 | System prompt from `code/rm_copilot/llm.py` `BRIEF_SYSTEM`, extended with "no links, no Markdown" |
 | `uc2.rewrite` | `gen-small` | 0 | 120 | structured output `{query, language}` | 1,000 | |
 | `uc2.answer` | `gen-large` | 0 | 350 | plain text with `[n]` citations or exactly `INSUFFICIENT_EVIDENCE` | 5,000 | `POLICY_QA_SYSTEM` |
 | `uc2.answer.strict` | `gen-large` | 0 | 350 | as above | 5,000 | adds `STRICT_SUFFIX` |
 | `uc3.extract` | `gen-small` | 0 | 900 | **structured outputs, strict JSON Schema** `followup_extract` | 4,000 | `EXTRACT_SYSTEM` |
 | `eval.judge.groundedness` | `gen-large` (eval use case) | 0 | 300 | structured output | 8,000 | eval-runner only |
+| `session.summarise` (v2.6) | `gen-small` | 0 | 300 | structured output `{summary, refs[]}` | 2,000 | `supervisor`, after the reply is released (§16.4) |
 
 Per-request totals stay inside the plan's budget (≤ 12k input, ≤ 1.5k output): UC1 ≤ 7k / 450, UC2 ≤ 11k / 820
 (rewrite + answer + one strict retry), UC3 ≤ 4k / 900.
@@ -2792,10 +2825,13 @@ named exactly.
 | 28 | Graph least privilege; no mail scope | Entra app permissions; `compose_email_link` | `test_graph_scopes_calendars_readbasic_only` (IaC), `test_email_is_compose_link_only` |
 | 29 | Signed RM header to legacy systems; caller-supplied assertion stripped | APIM facade | `test_facade_strips_client_assertion`, `test_deferred_mode_only_for_post_with_role` |
 | 30 | Data residency (UAE North only, no cross-border failover) | Bicep (allowed locations policy), APIM pools in-region | Azure Policy `allowed-locations` test, `test_backend_pool_regions_uae_only` (IaC) |
+| 31 | Three identities per tool call; effective permission = user ∩ agent ∩ workload (v2.6) | APIM MCP gateway (G1 to G9), `tool-gateway` PDP (T1 to T14), §15.5 | `test_agent_token_without_tool_role_denied`, `test_agent_token_from_unregistered_workload_denied`, `test_user_without_entitlement_denied_despite_agent_role`, `test_tools_write_scope_rejected_on_mcp` |
+| 32 | Registered MCP servers only; tool definition hashes pinned; `tools/list` filtered per agent (v2.6) | `tool-gateway` registry, orchestrator MCP client, App Configuration pins, Cilium | `test_changed_tool_description_rejected`, `test_tools_list_filtered_per_agent`, `test_unregistered_mcp_server_unreachable` |
+| 33 | Memory scope, provenance and write rules; PIM-gated checkpoint replay (v2.6) | `tool-gateway` `memory` server, graph runtime checkpointer, §16 | `test_cross_rm_recall_returns_nothing`, `test_injected_text_never_written_to_episodes`, `test_replay_requires_pim_role_and_acrs`, `test_checkpoint_state_encrypted_with_customer_key` |
 
 ---
 
-## 13. Traceability matrix (plan C1 to C23)
+## 13. Traceability matrix (plan C1 to C29)
 
 | # | Issue (short) | LLD sections | Tests (generic names where code does not exist yet) |
 |---|---|---|---|
@@ -2822,6 +2858,12 @@ named exactly.
 | C21 | Audit immutability vs erasure | §6.4 (`customer_ref` HMAC), §6.5, §6.6 | `test_erasure_makes_content_unreadable_chain_intact`, `test_chain_verify_detects_modification` |
 | C22 | Entitlement staleness, delegation | §2.3 (50 s + 10 s, events, delegation, team lead) | `test_entitlement_cache_max_staleness_60s`, `test_delegation_expiry`, `test_team_lead_cannot_write` |
 | C23 | Model risk management | §6.4 (lineage in every event), §8.1 (prompt hashes), §8.5, §2.7 | `test_every_audit_event_has_lineage`, eval report schema check |
+| C24 | Agent identity sprawl and over-privilege | §1.5 (agent identities, app roles), §15.2 (catalogue), §15.4 (tokens, federated credential), §15.5 (intersection, `UNEXPECTED_ROLES`) | `test_agent_token_without_tool_role_denied`, `test_agent_token_from_unregistered_workload_denied`, `test_agent_token_with_extra_roles_rejected`, `test_no_client_secret_on_agent_identities` (IaC), quarterly access review export |
+| C25 | MCP tool poisoning, rogue MCP servers | §15.3 (registered servers, definition hashes, pins), §15.5 steps G1, G5 and T3, §15.6 (filtered `tools/list`) | `test_changed_tool_description_rejected`, `test_tools_list_filtered_per_agent`, `test_unregistered_mcp_server_unreachable` (network policy), `test_server_instructions_not_passed_to_model` |
+| C26 | Memory poisoning | §16.2 (`episodes` provenance), §16.5 (write rules, re-check on recall), §9 (quarantine) | `test_injected_text_never_written_to_episodes`, `test_only_approved_or_rm_authored_episodes`, `test_recalled_episode_with_attack_dropped`, red-team memory slice |
+| C27 | Memory leaking across RMs or customers | §16.2 (partition keys by RM `oid`), §16.5 (entitlement re-check), §16.4 (session per RM) | `test_cross_rm_recall_returns_nothing`, `test_recall_after_portfolio_change_denied`, `test_delegate_does_not_see_delegator_episodes`, `test_checkpoint_resume_other_rm_404` |
+| C28 | Multi-agent error compounding, cost and latency | §15.1, §15.2 (one handoff, at most 2 hops, per-agent budgets), §1.4 (`HOP_LIMIT`, `AGENT_STEPS`) | `test_second_handoff_refused_hop_limit`, `test_request_tool_steps_capped_across_agents`, latency budget regression in the load test |
+| C29 | Checkpoints hold customer data | §16.2 (`checkpoints`, encryption, TTL), §16.3 (replay under PIM), §16.7 (erasure) | `test_checkpoint_state_encrypted_with_customer_key`, `test_replay_requires_pim_role_and_acrs`, `test_erasure_makes_checkpoint_unreadable`, `test_checkpoint_ttl_7_days_30_when_draft_open` |
 
 ---
 
@@ -2852,6 +2894,18 @@ named exactly.
     (≤ 10 tasks plus the call report, marker and approval documents per batch).
 16. MRM: one-sided Wilson lower bound method for gates; online sampling of masked audit content by the judge.
 17. OpenTelemetry GenAI attribute names and content-capture switches for the SDK versions in use.
+20. (v2.6) Microsoft Entra Agent ID: availability in the Bank tenant, agent identity token claims (`idtyp`, agent
+    markers), agent OBO and the claim that names the actor; fallback is app registrations with service principals
+    (plan §10 item 12).
+21. (v2.6) A user-assigned managed identity as a federated identity credential of another app or agent identity
+    (audience `api://AzureADTokenExchange`), its limits per identity, and token lifetimes.
+22. (v2.6) APIM MCP server support: GA status in UAE North, Streamable HTTP pass-through for existing MCP servers,
+    whether policies can read and rewrite JSON-RPC bodies (for `tools/list` filtering), supported MCP protocol
+    version (this LLD assumes `2025-06-18`).
+23. (v2.6) Cosmos DB conditional replace (ETag) and TTL per item on `checkpoints`; RU cost of 10 to 40 KB checkpoint
+    documents.
+24. (v2.6) Key Vault `wrapKey` with an RSA key done locally from the public key, `unwrapKey` throughput limits for
+    per-customer keys at scale (Managed HSM if needed).
 
 ### 14.2 Inconsistencies and gaps found in `00-plan.md`
 
@@ -2877,6 +2931,10 @@ v2.2 with **2 APIM units**; item 11 in v2.3; item 15 in v2.3 with the backends n
 | 13 | §4.1 step 5 vs step 4 | Unclear whether the orchestrator calls each tool or `tool-gateway` fans out | `tool-gateway` fans out (composite `get_brief_inputs`, one tool step, one entitlement check), matching step 5 and the prototype |
 | 14 | §3.2 `tool-gateway` "Talks to" omits Key Vault | It needs `keys/read` for the approval public key (§3.3 Key Vault row) | Read-only Key Vault edge added |
 | 15 | §2 Phase 1 "Regional Standard models (no PTU)" vs prototype backend names `aoai-ptu` / `aoai-paygo` | Naming suggests a PTU primary in the pilot | LLD names the pilot backends `aoai-uaen-01` / `aoai-uaen-02` (both Standard, both UAE North); the PTU-plus-spillover pool is the Phase 2 variant of the same policy |
+| 16 (v2.6) | §3.3 Keys "orchestrator: none" vs §3.8 "erasure crypto-shreds checkpoints with the customer key" | The checkpointer runs in the orchestrator; encrypting state under the customer key needs at least `unwrapKey` on resume | Orchestrator gets `wrapKey` and `unwrapKey` only on per-customer content keys (no `sign`, never the approval key); data keys cached in-process ≤ 5 min. Alternative if rejected: no per-customer encryption of checkpoints, relying on the 7-day TTL (30 days for open UC3 drafts) to meet erasure deadlines. Plan §3.3 Keys row to be updated |
+| 17 (v2.6) | §3.7 "`crm-drafts`: create drafts (no commit)" vs LLD v1.1 where `web-bff` stores drafts | Two writers of `drafts` | `crm-drafts` creates the draft (partition = token `oid`, `origin: followup-agent`); `web-bff` keeps edits (`PUT` with `If-Match`), approval and reads. `tool-gateway` gets create only on `drafts` |
+| 18 (v2.6) | §3.7 item 1 "`web-bff` gets an OBO token ... carrying ... the agent as actor" | An OBO token obtained by `web-bff` names `web-bff` as the client, not the agent; only the agent itself can do an agent OBO | Default: the RM OBO token from `web-bff` is forwarded unchanged and the agent is proven by the separate agent token (§15.4). Where Entra Agent ID agent OBO is confirmed, the orchestrator exchanges the RM token as the agent and the actor claim must equal the agent token's `azp` (`ACTOR_MISMATCH` otherwise) |
+| 19 (v2.6) | §3.8 Session "written by `web-bff`, `supervisor`" | The orchestrator has no access to `sessions` | The `supervisor` proposes the rolling summary in its response; `web-bff` persists it with an ETag (§16.4) |
 
 ### 14.3 Prototype alignment (workstream C, `code/azmock/`, `code/services/`)
 
@@ -2902,3 +2960,541 @@ mock simplifications (the plan and this LLD win):
 | Containers | separate `jti` and `outbox`; no `entitlements`, `idempotency`, `audit-spool`, `audit-chain-heads` | ADR-019 set: one `approvals` container (partition `/jti`) for marker, verdict, saga and outbox items; plus `entitlements`, `idempotency`, `audit-spool`, `audit-chain-heads` |
 | AOAI backends | `aoai-primary` (1), `aoai-secondary` (2) | Same, both Regional Standard (plan v2.3) |
 
+---
+
+## 15. Agents, MCP gateway and identities (plan §3.7, v2.6)
+
+Decisions: ADR-023 (APIM as the MCP gateway), ADR-024 (agent identity), ADR-025 (supervisor-led multi-agent
+orchestration, amends ADR-005). HLD view: `01-hld.md` §7.1. Everything in §1 to §14 still applies; this section
+adds the agent layer on top of the tool contracts of §3.
+
+### 15.1 Runtime and graph model
+
+- One deployment, `orchestrator`, hosts the graph runtime and the four agents; one workload identity,
+  `id-rmc-orchestrator`. The framework (Microsoft Agent Framework workflows or LangGraph) is chosen in ADR-025; this
+  LLD uses neutral terms: **graph**, **node**, **thread**, **checkpoint**, **interrupt**.
+- Graphs are procedural memory (§16.6), versioned and hashed: `supervisor.graph`, `uc1.brief.graph`,
+  `uc2.policy.graph`, `uc3.followup.graph`.
+- Each request carries a run state object: `{request_id, use_case, hop, tool_steps, tokens_in, tokens_out,
+  deadline_at, agent_path[]}`. The `supervisor` is hop 1; its single handoff to a specialist is hop 2. A specialist
+  returns to the `supervisor` for assembly (not a hop) and cannot hand off. Any further handoff is refused with
+  `BUDGET_EXCEEDED/HOP_LIMIT` and the `supervisor` answers with what it has (for a mixed request: "ask the policy
+  question separately") (C28).
+- **No model function calling in the pilot.** Each specialist's tool calls are nodes of its fixed graph. The model
+  may fill bounded arguments (the UC2 rewritten query, the UC3 draft body) that are validated against the pinned
+  input schema before the call. §8.3 ("no `tools`") is unchanged. Model-selected tool calls over the filtered
+  `tools/list` are a Phase 2 option behind the same gateway, roles and eval gate (ADR-025).
+- Verification (placeholder fill, numeric, policy and groundedness checks) is code in the specialist graphs, not an
+  agent. The commit is a code node that calls `POST /internal/v1/commits` (§4.4), never an MCP tool.
+
+| Graph | Nodes in order (MCP calls in bold, model calls in italics) | Interrupt |
+|---|---|---|
+| `supervisor.graph` | `route` (rules on the launch context; *`router.intent`* only for Teams free text) → `handoff` → specialist → `assemble` → (after release) *`session.summarise`* | none |
+| `uc1.brief.graph` | **`customer-data.get_brief_inputs`** in parallel with **`memory.recall_episodes`** → `mask_and_shield` → *`uc1.brief`* → `fill_and_check` | none |
+| `uc2.policy.graph` | `shield_and_mask` → *`uc2.rewrite`* → **`policy-search.search_policies`** → `evidence_gate` → *`uc2.answer`* → `groundedness` → (retry rule §9.3) | none |
+| `uc3.followup.graph` | `guard_input` → **`customer-data.get_customer_profile`** → *`uc3.extract`* → `validate` → **`crm-drafts.create_followup_draft`** → `await_approval` → `commit` (REST, code) | `await_approval` |
+
+### 15.2 Agent catalogue
+
+| Agent id | Entra identity and app roles (on `rmc-tool-gateway`) | Allowed MCP tools | Model alias and templates | Budgets per request | Max hops |
+|---|---|---|---|---|---|
+| `supervisor` | `rmc-agent-supervisor`; **no app roles** (it is never issued a tool token; its identity is used for attribution) | none | `gen-small`: `router.intent` (free text only), `session.summarise` (after release) | 0 tool calls; ≤ 1 routing call (≤ 1,000 input, ≤ 50 output tokens, ≤ 1,000 ms); summary ≤ 2,000 / 300 tokens off the request deadline, counted in the RM daily quota | may hand off once (hop 1 → 2) |
+| `brief-agent` (UC1) | `rmc-agent-brief`; `Tools.CustomerData.Read`, `Tools.Memory.Recall` | `customer-data`: `get_brief_inputs`, `get_customer_profile`, `get_facilities`, `get_transaction_signals`, `get_kyc_status`, `get_news`; `memory`: `recall_episodes` | `gen-large`: `uc1.brief` | ≤ 2 tool calls (composite plus recall); ≤ 7k input, ≤ 450 output tokens; tool timeout `min(2,000, remaining − 2,800)`, recall `min(300, ...)` | 0 (cannot hand off) |
+| `policy-agent` (UC2) | `rmc-agent-policy`; `Tools.PolicySearch` | `policy-search`: `search_policies` | `gen-small`: `uc2.rewrite`; `gen-large`: `uc2.answer`, `uc2.answer.strict` | ≤ 1 tool call (the strict retry reuses the passages); ≤ 11k input, ≤ 820 output tokens | 0 |
+| `followup-agent` (UC3) | `rmc-agent-followup`; `Tools.CustomerData.Profile`, `Tools.CrmDrafts.Create` | `customer-data`: `get_customer_profile` only; `crm-drafts`: `create_followup_draft` | `gen-small`: `uc3.extract` | ≤ 2 tool calls; ≤ 4k input, ≤ 900 output tokens | 0 |
+
+The request-level budget of plan §5 (≤ 6 tool steps, ≤ 12k input, ≤ 1.5k output tokens) applies across all agents of
+a request; the per-agent budgets are tighter. Each agent's configuration is an **agent manifest** (procedural
+memory, §16.6), the single source for the gateway registry, the tool-gateway checks and the access review:
+
+```json
+{"agent_id": "brief-agent", "version": 3, "entra_client_id": "<rmc-agent-brief client id>",
+ "allowed_workloads": ["<id-rmc-orchestrator client id>"],
+ "app_roles": ["Tools.CustomerData.Read", "Tools.Memory.Recall"],
+ "tools": {"customer-data": ["get_brief_inputs", "get_customer_profile", "get_facilities", "get_transaction_signals", "get_kyc_status", "get_news"],
+           "memory": ["recall_episodes"]},
+ "graph": "uc1.brief.graph@4", "prompts": ["uc1.brief@5"], "model_aliases": ["gen-large"],
+ "budgets": {"tool_calls": 2, "input_tokens": 7000, "output_tokens": 450}, "max_handoffs": 0,
+ "owner": "copilot-product", "eval_run_id": "ev-2026-11-25-0412", "manifest_sha256": "c41e..."}
+```
+
+### 15.3 MCP servers and tool catalogue
+
+MCP servers are modules of `tool-gateway` (same pods, same security boundary), served at `/mcp/<server>` over the
+Streamable HTTP transport with single JSON responses (no server-sent event streams), and exposed only through the
+APIM MCP gateway at `https://apim-rmc-<env>.<internal-domain>/mcp/<server>` **[LLD decision; confirm APIM MCP
+support, §14.1 item 22]**. Registered servers are listed in `rmc:mcp:servers`; nothing else is routable (Cilium
+policy: the orchestrator reaches only APIM, never `tool-gateway` MCP paths directly). No external MCP servers (C25).
+
+| Server | Version | Tools | Backing | Kill switch flag |
+|---|---|---|---|---|
+| `customer-data` | 1.3.0 | 6 read tools | §3.2 to §3.7 contracts via the APIM system API facade | `mcp_customer_data` (plus `uc1`, `uc3`) |
+| `policy-search` | 1.0.0 | `search_policies` | §3.8, AI Search | `mcp_policy_search` (plus `uc2`) |
+| `crm-drafts` | 1.0.0 | `create_followup_draft` | Cosmos `drafts` (copilot store, not the CRM) | `mcp_crm_drafts` (plus `uc3`) |
+| `memory` | 1.0.0 | `recall_episodes` | Cosmos `episodes` (§16.5) | `mcp_memory` (off = brief without recall) |
+
+| Server | Tool and version | Input (summary) | Output (summary) | Required agent app role | Required delegated scope | Data class | Kind |
+|---|---|---|---|---|---|---|---|
+| `customer-data` | `get_brief_inputs` 1.0.0 | `{customer_id}` | per-source envelopes plus `critical_ok` (§3.2) | `Tools.CustomerData.Read` | `Tools.Read` | Confidential | read |
+| `customer-data` | `get_customer_profile` 1.2.0 | `{customer_id}` | minimised profile (§3.3) | `Tools.CustomerData.Read` or `Tools.CustomerData.Profile` | `Tools.Read` | Confidential | read |
+| `customer-data` | `get_facilities` 1.1.0 | `{customer_id}` | ≤ 5 facilities, limits, utilisation (§3.4) | `Tools.CustomerData.Read` | `Tools.Read` | Confidential | read |
+| `customer-data` | `get_transaction_signals` 1.0.0 | `{customer_id}` | aggregated signals only (§3.5) | `Tools.CustomerData.Read` | `Tools.Read` | Confidential | read |
+| `customer-data` | `get_kyc_status` 1.0.0 | `{customer_id}` | status and review dates, no screening data (§3.6) | `Tools.CustomerData.Read` | `Tools.Read` | Confidential | read |
+| `customer-data` | `get_news` 1.0.0 | `{customer_id}` | ≤ 3 items, untrusted text (§3.7) | `Tools.CustomerData.Read` | `Tools.Read` | Confidential (the query reveals the relationship) | read |
+| `policy-search` | `search_policies` 2.0.0 | `{query ≤ 500 chars, language, top_k ≤ 5}` | passages with document, clause, version, scores (§3.8); clearance filter from the user token | `Tools.PolicySearch` | `Tools.Read` | Internal, per-document clearance | read |
+| `crm-drafts` | `create_followup_draft` 1.0.0 | `{customer_id, meeting_date, draft: followup/1, lineage, notices[]}` | `{draft_id, etag, validation: {ok, moved_dates[], dropped_items[]}}` | `Tools.CrmDrafts.Create` | `Tools.Read` (no system-of-record write; `Tools.Write` stays reserved for commits, plan §3.4) | Confidential | draft (copilot store only; idempotent on `request_id`) |
+| `memory` | `recall_episodes` 1.0.0 | `{customer_id, types[] from brief_viewed, followup_committed, rm_note; max_items ≤ 5}` | `{episodes: [{episode_id, type, created_at, text ≤ 600 chars, provenance}], dropped, truncated}` | `Tools.Memory.Recall` | `Tools.Read` | Confidential | read |
+
+Not exposed over MCP: `create_call_report`, `create_task` (saga only, §5), `compose_email_link` (commit response),
+`get_upcoming_meetings` (meetings list route, §3.9) and the episode append (internal endpoint, §16.5).
+
+**Schema hash pinning (C25).**
+1. A tool definition is the object served in `tools/list`: `{name, title, description, inputSchema, outputSchema,
+   annotations}` (the `_meta` member is excluded). `tool_def_sha256 = SHA-256(RFC 8785 JCS(definition))`.
+2. CI builds `contracts/mcp/registry.json` (`server`, `tool`, `version`, `tool_def_sha256`, `contract_sha256` of the
+   §3 JSON Schemas, `eval_run_id`) and packages it into both the `tool-gateway` and `orchestrator` images.
+3. Pins live in App Configuration: `rmc:mcp:pins:<server>:<tool>` = `{"version": "1.2.0", "sha256": "9f2c..."}`. A pin
+   may only point to a registry entry with a passing release-gate `eval_run_id` (same rule as prompts, §8.1).
+4. `tool-gateway` recomputes every served definition's hash at start-up and refuses readiness on any mismatch with
+   the packaged registry; it serves only pinned versions.
+5. The `orchestrator` (MCP client) recomputes the hash of every definition returned by `tools/list` and compares it
+   with the pin; on a mismatch the tool is refused (`TOOL_SCHEMA_MISMATCH`, P1 alert) and the request takes the
+   failure path of §15.7. It sends the pinned hash in `params._meta["rmc/tool_def_sha256"]` on each `tools/call`,
+   which `tool-gateway` checks too (step T3, §15.5). `notifications/tools/list_changed` is not used; the list is
+   re-read only on a pin change.
+6. Server `instructions` and tool `description` text never enter a model prompt in the pilot (no function calling),
+   so a poisoned description has no channel to the model; the hash check rejects it anyway.
+
+### 15.4 Tokens and claims (user, agent, workload)
+
+Issuance (all cached per pod in memory until 5 minutes before expiry, so normally off the request path; dependency
+IF-24 in `04-interfaces-and-slas.md`):
+1. **Workload (W).** The pod's projected service account token (`system:serviceaccount:rm-copilot:orchestrator`) is
+   exchanged with Entra for tokens of the managed identity `id-rmc-orchestrator` (AKS workload identity, plan §3.4
+   step 3): (a) audience `api://AzureADTokenExchange`, used only as a client assertion in step 2 and never sent to
+   any API; (b) audience `api://rm-copilot-tool-gateway` (W); (c) audience `api://rm-copilot-ai-gateway` (unchanged).
+2. **Agent (A).** Client credentials grant for `rmc-agent-<name>` with `client_assertion` = token 1(a) (the managed
+   identity is the agent's federated identity credential; no secret exists) and scope
+   `api://rm-copilot-tool-gateway/.default` **[confirm managed identity as federated credential and Entra Agent ID
+   flow, §14.1 items 20 and 21]**.
+3. **User (U).** The RM OBO token from `web-bff` (audience `tool-gateway`, `scp=Tools.Read`), forwarded unchanged
+   in `x-rm-token`. Where Entra Agent ID agent OBO is confirmed, the orchestrator instead exchanges it as the agent,
+   so that U names the agent as actor (§14.2 item 18).
+
+| Claim | User token U (`x-rm-token`) | Agent token A (`x-agent-token`) | Workload token W (`Authorization`) |
+|---|---|---|---|
+| `iss` | Bank tenant v2 issuer | same | same |
+| `tid` | Bank tenant | same | same |
+| `aud` | `api://rm-copilot-tool-gateway` (app ID URI or client id **[confirm form]**) | same | same |
+| `idtyp` | `user` | `app` | `app` |
+| `oid` | the RM (the only RM identity) | the agent's service principal | the managed identity's principal |
+| `azp` | `rmc-web-bff` client id; the agent's client id when agent OBO is used **[confirm]** | the agent's client id | the managed identity's client id |
+| `scp` | `Tools.Read` (MCP routes accept nothing else) | absent | absent |
+| `roles` | user roles: `Clearance.Internal`, `Clearance.Restricted`, `RmCopilot.TeamLead` | exactly the agent's roles (§15.2) | `Tools.Invoke` |
+| actor | the agent, only with agent OBO **[confirm claim name]** | n/a | n/a |
+| agent markers | n/a | claims marking an Entra Agent ID agent identity **[confirm]** | n/a |
+| `xms_mirid` | n/a | n/a | managed identity resource id **[confirm presence]** |
+| Lifetime | 60 to 90 min **[confirm]**, 60 s skew | about 60 min **[confirm]** | about 24 h for managed identities **[confirm]** |
+
+Decoded payload of an agent token (illustrative):
+
+```json
+{"iss": "https://login.microsoftonline.com/0000-bank-tenant/v2.0", "aud": "api://rm-copilot-tool-gateway",
+ "tid": "0000-bank-tenant", "oid": "a9e1...", "azp": "5c2d...", "idtyp": "app",
+ "roles": ["Tools.CustomerData.Read", "Tools.Memory.Recall"], "iat": 1795665000, "nbf": 1795665000, "exp": 1795668600}
+```
+
+### 15.5 Authorization decision algorithm
+
+**At the APIM MCP gateway** (inbound policy, every JSON-RPC request; registry = the agent manifests of §15.2 loaded
+into an APIM named value by the pipeline):
+
+```text
+G1  route     path /mcp/{server} in rmc:mcp:servers                          else 404, no backend call
+G2  workload  validate-jwt Authorization: iss, tid, aud, exp, nbf, idtyp = app,
+              roles contains Tools.Invoke, azp in workload allow-list          else 401  -32001 UNAUTHENTICATED/WORKLOAD_NOT_ALLOWED
+G3  agent     validate-jwt x-agent-token: iss, tid, aud, exp, nbf, idtyp = app,
+              agent = azp(A) in registry                                        else 401  -32001 UNAUTHENTICATED/AGENT_TOKEN_INVALID
+              azp(W) in registry[agent].allowed_workloads                       else 403  -32003 AGENT_NOT_PERMITTED/WORKLOAD_MISMATCH
+              roles(A) subset of registry[agent].app_roles                      else 403  -32003 AGENT_NOT_PERMITTED/UNEXPECTED_ROLES (C24 alert)
+G4  user      validate-jwt x-rm-token: iss, tid, aud, exp, nbf, idtyp = user,
+              scp contains Tools.Read and not Tools.Write                       else 401 -32001 or 403 -32003 INSUFFICIENT_SCOPE
+              if an actor claim is present: actor = azp(A)                      else 403  -32003 AGENT_NOT_PERMITTED/ACTOR_MISMATCH
+G5  method    initialize, notifications/initialized, ping, tools/list, tools/call only    else -32601
+              tools/call: params.name in registry[agent].tools[server]          else 403  -32003 AGENT_NOT_PERMITTED/TOOL_NOT_ALLOWED
+G6  limits    rate-limit-by-key: per agent (brief 120/min, policy 120/min, followup 60/min),
+              per RM oid 30 tools/call per min, per x-request-id 6 tools/call   else 429  -32029 RATE_LIMITED or BUDGET_EXCEEDED/REQUEST_STEPS
+G7  hygiene   strip x-rm-assertion and x-rm-oid; body <= 64 KiB; no body logging (metadata only)
+G8  forward   to tool-gateway /mcp/{server}, three tokens unchanged, timeout = x-deadline-ms - 50 ms
+G9  response  tools/list filtered to registry[agent].tools[server] when the policy can rewrite the body [confirm];
+              tool-gateway has already filtered it (authoritative)
+```
+
+**In `tool-gateway`** (policy decision point, every `tools/list` and `tools/call`; never trusts APIM alone):
+
+```text
+T1  tokens     re-validate W, A and U as in G2 to G4; rm = oid(U); agent = azp(A); workload = azp(W)
+T2  tool       (server, name) in the packaged registry and pinned                 else -32602 unknown tool
+T3  pin        sha256(served definition) = pin = params._meta["rmc/tool_def_sha256"] if sent
+                                                                                    else 500 -32009 TOOL_SCHEMA_MISMATCH (tool refused for all, P1)
+T4  input      arguments valid against the pinned inputSchema, additionalProperties false,
+               no rm_id, oid or user fields                                       else -32602 VALIDATION_FAILED
+T5  agent      tool.required_roles intersect roles(A) is not empty                else 403 -32003 AGENT_NOT_PERMITTED/TOOL_NOT_ALLOWED
+T6  workload   workload in manifest[agent].allowed_workloads, roles(W) has Tools.Invoke
+                                                                                    else 403 -32003 AGENT_NOT_PERMITTED/WORKLOAD_MISMATCH
+T7  user       tool.required_scope in scp(U)                                      else 403 -32003 INSUFFICIENT_SCOPE
+T8  kind       tool.kind in {read, draft}                                         else 403 -32003 AGENT_NOT_PERMITTED/WRITE_TOOL_ON_MCP
+T9  flags      use-case flag, server flag and kill switches on                     else 503 -32050 FEATURE_DISABLED
+T10 entitled   customer-scoped tool: entitled(rm, customer_id, read) (§2.3)        else 403 -32003 NOT_ENTITLED
+T11 clearance  tool.data_class within the clearance from roles(U); search_policies also filters passages (§3.8)
+                                                                                    else 403 -32003 NOT_ENTITLED/CLEARANCE
+T12 budget     header x-rmc-tool-step <= 6 and <= manifest[agent].budgets.tool_calls
+                                                                                    else 429 -32029 BUDGET_EXCEEDED/AGENT_STEPS or REQUEST_STEPS
+T13 execute    run the tool with deadline-derived timeouts (§1.6), minimise and mask, attach sources
+T14 audit      tool_called or tool_denied: rm, agent, workload, server, tool, version, tool_def_sha256, failed step
+
+allow = T5 and T6 and T7 and T10 and T11        (user ∩ agent ∩ workload), with T1 to T4, T8, T9, T12 as preconditions
+tools/list = T1 to T3, then only the tools for which T5, T6, T7, T8 and T9 hold, each with _meta pin hash
+```
+
+The run state in the orchestrator enforces the same budgets first (§15.1); G6 and T12 are the independent backstops
+if orchestrator code is wrong or compromised. Every denial is audited with the step that failed; `AGENT_NOT_PERMITTED`
+and `TOOL_SCHEMA_MISMATCH` raise P1 security alerts because the fixed graphs should never produce them.
+
+### 15.6 JSON-RPC examples
+
+Common request headers (values abbreviated): `Authorization: Bearer <W>`, `x-agent-token: <A>`, `x-rm-token: <U>`,
+`x-request-id`, `traceparent`, `x-deadline-ms`, `x-use-case`, `x-rmc-tool-step`, `MCP-Protocol-Version: 2025-06-18`
+**[confirm]**, `Mcp-Session-Id` (after `initialize`; one MCP session per pod, agent and server, re-created on 404).
+
+`initialize` (followup-agent, `customer-data`):
+
+```json
+// POST /mcp/customer-data
+{"jsonrpc": "2.0", "id": 1, "method": "initialize",
+ "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "rmc-orchestrator/followup-agent", "version": "2.6.0"}}}
+// 200, header Mcp-Session-Id: 4f1c...
+{"jsonrpc": "2.0", "id": 1,
+ "result": {"protocolVersion": "2025-06-18", "capabilities": {"tools": {"listChanged": false}},
+            "serverInfo": {"name": "rmc-customer-data", "version": "1.3.0"}, "instructions": ""}}
+```
+
+`tools/list`, filtered: `followup-agent` sees one of the six `customer-data` tools (`brief-agent` sees all six):
+
+```json
+// POST /mcp/customer-data
+{"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+// 200
+{"jsonrpc": "2.0", "id": 2, "result": {"tools": [
+  {"name": "get_customer_profile", "title": "Customer profile (CRM)",
+   "description": "Minimised CRM profile of one customer the signed-in RM is entitled to.",
+   "inputSchema": {"type": "object", "additionalProperties": false, "required": ["customer_id"],
+                   "properties": {"customer_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$"}}},
+   "outputSchema": {"type": "object", "...": "contract get_customer_profile 1.2.0, §3.3"},
+   "annotations": {"readOnlyHint": true, "openWorldHint": false},
+   "_meta": {"rmc/version": "1.2.0", "rmc/tool_def_sha256": "9f2c...", "rmc/data_class": "confidential"}}]}}
+```
+
+`tools/call`, allowed:
+
+```json
+// POST /mcp/customer-data   (x-rmc-tool-step: 1)
+{"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+ "params": {"name": "get_customer_profile", "arguments": {"customer_id": "harbourline"},
+            "_meta": {"rmc/tool_def_sha256": "9f2c..."}}}
+// 200
+{"jsonrpc": "2.0", "id": 3, "result": {"isError": false,
+  "structuredContent": {"tool": "get_customer_profile", "contract_version": "1.2.0",
+    "output": {"customer_id": "harbourline", "name": "Harbourline Logistics LLC", "crm_id": "4471", "sector": "Freight and logistics",
+               "customer_since_year": 2019, "turnover": {"amount": "48000000.00", "currency": "AED"}, "revenue_to_bank_yoy_pct": 12,
+               "contact": {"contact_ref": "crm-contact-88213", "salutation": "Mr Haddad"}},
+    "sources": [{"system": "CRM", "ref": "CRM 4471", "as_of": "2026-11-26T05:40:12Z"}],
+    "entitlement": {"basis": "portfolio_owner", "cache": "hit"}},
+  "content": [{"type": "text", "text": "<the same JSON, serialised, for clients without structured content>"}]}}
+```
+
+`tools/call`, denied at the gateway (`followup-agent` asks for a tool outside its allow-list; no call reaches
+`tool-gateway`):
+
+```json
+// POST /mcp/customer-data
+{"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "get_facilities", "arguments": {"customer_id": "harbourline"}}}
+// 403
+{"jsonrpc": "2.0", "id": 4, "error": {"code": -32003, "message": "Forbidden",
+  "data": {"code": "AGENT_NOT_PERMITTED", "reason": "TOOL_NOT_ALLOWED", "request_id": "01937a4e-8f7d-7c1a-9b2e-5d0c1f6a2b3c", "retryable": false}}}
+```
+
+`tools/call`, denied in `tool-gateway` (`brief-agent`, customer outside the RM's portfolio; all token and role
+checks passed, the user part of the intersection fails):
+
+```json
+// POST /mcp/customer-data
+{"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "get_brief_inputs", "arguments": {"customer_id": "crescent"},
+ "_meta": {"rmc/tool_def_sha256": "1b7d..."}}}
+// 403
+{"jsonrpc": "2.0", "id": 5, "error": {"code": -32003, "message": "Forbidden",
+  "data": {"code": "NOT_ENTITLED", "request_id": "01937a4f-0a11-7c1a-9b2e-5d0c1f6a2b3c", "retryable": false}}}
+```
+
+Pin mismatch (a changed description was deployed without a new pin):
+
+```json
+// 500
+{"jsonrpc": "2.0", "id": 6, "error": {"code": -32009, "message": "Tool definition does not match the pinned version",
+  "data": {"code": "TOOL_SCHEMA_MISMATCH", "tool": "customer-data/get_news", "request_id": "...", "retryable": false}}}
+```
+
+### 15.7 Error codes and mapping
+
+Codes from -32000 to -32099 are the JSON-RPC implementation-defined range; `data.code` and `data.reason` carry the
+§1.4 code and reason, so the orchestrator maps every MCP failure to the same catalogue. A tool that ran but has a
+partial result (for example a non-critical source down in `get_brief_inputs`) is a normal `result` with per-source
+status, not an error.
+
+| JSON-RPC code | HTTP | `data.code` (§1.4) | Raised by | Orchestrator behaviour |
+|---|---|---|---|---|
+| -32700, -32600 | 400 | `VALIDATION_FAILED` | gateway, `tool-gateway` | Defect: `500 INTERNAL` to the RM, alert |
+| -32601 | 200 | `VALIDATION_FAILED` (method) | gateway | Defect: `500 INTERNAL`, alert |
+| -32602 | 200 | `VALIDATION_FAILED` (unknown tool, arguments) | `tool-gateway` | Defect or model argument outside schema: UC2 falls back to the raw masked question once; otherwise `500 INTERNAL` |
+| -32001 | 401 | `UNAUTHENTICATED` (`WORKLOAD_NOT_ALLOWED`, `AGENT_TOKEN_INVALID`, `INVALID_TOKEN`) | gateway, `tool-gateway` | Refresh the token once (cache miss), retry once within the deadline; then `503 DEPENDENCY_UNAVAILABLE` (IF-24) |
+| -32003 | 403 | `AGENT_NOT_PERMITTED`, `INSUFFICIENT_SCOPE` | gateway, `tool-gateway` | Never retried; `500 INTERNAL` (generic) to the RM; P1 security alert |
+| -32003 | 403 | `NOT_ENTITLED` (incl. reason `CLEARANCE`) | `tool-gateway` | `403 NOT_ENTITLED` to the RM, no model call (as today) |
+| -32009 | 500 | `TOOL_SCHEMA_MISMATCH` | `orchestrator` client check, `tool-gateway` | Tool refused; UC1 without that tool if it is `recall_episodes` (soft), otherwise `503 DEPENDENCY_UNAVAILABLE`; P1 |
+| -32029 | 429 | `RATE_LIMITED`, `BUDGET_EXCEEDED` (`REQUEST_STEPS`, `AGENT_STEPS`) | gateway, `tool-gateway` | `429` to the RM with `Retry-After`; no retry inside the request |
+| -32050 | 503 | `DEPENDENCY_UNAVAILABLE`, `FEATURE_DISABLED` | gateway, `tool-gateway` | As §2.2 per use case: critical tool → `503`; `memory` → brief without recall, flagged `memory_unavailable` |
+| -32054 | 504 | `DEPENDENCY_TIMEOUT`, `DEADLINE_EXCEEDED` | gateway, `tool-gateway` | As §2.2; never retried (§1.7) |
+| (no response) | 502, 503 from APIM | gateway unreachable | APIM | Breaker per server (§1.7 defaults); `503 DEPENDENCY_UNAVAILABLE`; degraded paths of plan C3 do not apply because facts come from tools |
+
+---
+
+## 16. Memory (plan §3.8, v2.6)
+
+Decision: ADR-026. HLD view: `01-hld.md` §5.1. The governing rules are plan §3.8: customer facts are never
+memorised (read live), no memory crosses RMs, every item carries provenance, quarantined or injected text is never
+written, procedural memory is never changed at runtime by the model, and erasure crypto-shreds checkpoints and
+episodes with the customer key.
+
+### 16.1 Memory types and where they are specified
+
+| Memory | Store | Section |
+|---|---|---|
+| Working | In-process run state (§15.1), checkpointed | §16.3 |
+| Checkpointer | Cosmos `checkpoints` | §16.2, §16.3 |
+| Session | Cosmos `sessions` (`context` field) | §16.2, §16.4 |
+| Episodic | CRM via tools (source of truth) plus Cosmos `episodes` | §16.2, §16.5 |
+| Semantic | AI Search `policies-v{n}` | §6.2, §3.8 (unchanged) |
+| Procedural | Git registry plus App Configuration pins | §16.6 |
+| Profile | Cosmos `rm-profile` | §16.2 |
+
+### 16.2 Cosmos DB containers
+
+All four live in the existing account and database `rmcopilot` (§6.1): zone-redundant, CMK at rest,
+`disableLocalAuth`, data-plane RBAC per container. Content fields are additionally **envelope-encrypted by the
+writer**: a data key (AES-256-GCM) per thread or per episode, wrapped with the per-customer key `cust-<customer_ref>`
+in `kv-rmc-cust` (§6.6), or with the service key `ckpt-default` for threads that touch no customer (UC2). Deleting
+the customer key makes that customer's checkpoints and episodes unreadable (crypto-shredding, C21, C29). Indexing
+excludes `/*` and includes only the paths listed.
+
+| Container | Partition key | `id` | Default TTL | Per-item TTL | Indexed paths | Writers | Readers |
+|---|---|---|---|---|---|---|---|
+| `checkpoints` | `/thread_id` | `<checkpoint_ns>:<step, 4 digits>` (deterministic, so a retried write is a 409 treated as success) | 604,800 s (7 days) | 2,592,000 s (30 days) while status is `interrupted` and the UC3 draft is open | `/thread_id/?`, `/checkpoint_ns/?`, `/status/?`, `/created_at/?`, `/customer_ref/?` | `orchestrator` | `orchestrator`; `Ops.Replay` operators (PIM) |
+| `sessions` (existing; v2.6 adds `thread_id` and `context`) | `/id` (SHA-256 of the session cookie) | same | 86,400 s (24 h) | n/a | none | `web-bff` | `web-bff` |
+| `episodes` | `/pk` = `<rm_oid>:<customer_id>` | UUIDv7 | 7,776,000 s (90 days) | n/a | `/pk/?`, `/type/?`, `/created_at/?`, `/quarantined/?`, `/customer_ref/?`, `/rm_oid/?` | `tool-gateway` (create, patch `quarantined`) | `tool-gateway` (`memory` server) |
+| `rm-profile` | `/id` = `rm_oid` | `rm_oid` | none (until changed; deleted by the leaver process) | n/a | none | `web-bff` | `web-bff` |
+
+Throughput: `checkpoints` gets its own autoscale throughput (maximum 1,000 RU/s, illustrative) so checkpoint bursts
+cannot throttle `approvals` or `sessions`. Estimate: about 7 checkpoints per UC1 request at 10 to 20 KB each, about 15
+RU per write **[estimate, confirm]**, so ≈ 40 RU/s at the 0.5 req/s peak.
+
+Example `checkpoints` document (UC3, paused for approval):
+
+```json
+{"id": "uc3:01937a50-0f00-7000-8000-0000000000aa:0006", "thread_id": "th:01937a3c-7e00-7000-8000-00000000c0de",
+ "checkpoint_ns": "uc3:01937a50-0f00-7000-8000-0000000000aa", "checkpoint_id": "01937a50-1199-7000-8000-000000000006",
+ "parent_checkpoint_id": "01937a50-1180-7000-8000-000000000005", "step": 6,
+ "rm_oid": "6b1f8a2e-...", "customer_ref": "hmac:7c2f...", "use_case": "uc3_draft",
+ "graph": {"id": "uc3.followup.graph", "version": 2, "sha256": "0d9a..."}, "node": "await_approval", "agent": "followup-agent", "hop": 2,
+ "status": "interrupted", "interrupt": {"kind": "approval", "draft_id": "01937a50-1111-7000-8000-000000000abc", "draft_etag": "4"},
+ "state_enc": {"alg": "A256GCM", "kek_kid": "https://kv-rmc-cust.vault.azure.net/keys/cust-7c2f/91ab", "wrapped_dek": "b64...", "iv": "b64...", "ct": "b64..."},
+ "state_sha256": "e3b1...", "budgets_used": {"tool_calls": 2, "tokens_in": 3120, "tokens_out": 640},
+ "provenance": {"written_by": "orchestrator", "image_digest": "sha256:5a1f...", "request_id": "01937a50-0f00-7000-8000-0000000000aa",
+                "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736", "prompt_versions": ["uc3.extract@4"], "guardrail_version": "guardrails/2026.11.2"},
+ "resume_key": null, "created_at": "2026-11-26T05:38:41Z", "ttl": 2592000}
+```
+
+The encrypted state holds masked notes, the minimised profile, the extracted draft and node outputs; it never holds
+tokens, the PII placeholder mapping or raw system-of-record responses.
+
+v2.6 fields in `sessions` (session memory, §16.4):
+
+```json
+{"id": "3e1a...sha256", "rm_oid": "6b1f8a2e-...", "thread_id": "th:01937a3c-7e00-7000-8000-00000000c0de",
+ "context": {"version": 7,
+   "turns": [{"role": "rm", "use_case": "uc2", "text": "What trading history do we need for an unsecured line?", "at": "2026-11-26T05:30:02Z"},
+             {"role": "copilot", "use_case": "uc2", "text": "Credit Policy 4.2 clause 3.1 requires 3 years of trading history ... [1]", "refs": ["DOC-CP-4.2#3.1"], "at": "2026-11-26T05:30:08Z"}],
+   "summary": {"text": "RM asked about unsecured lending eligibility; answered from Credit Policy 4.2 clause 3.1.",
+               "refs": ["DOC-CP-4.2#3.1"], "by": "supervisor/session.summarise@1", "updated_at": "2026-11-26T05:30:10Z"},
+   "tokens_estimate": 210},
+ "ttl": 86400}
+```
+
+Example `episodes` document (written after an approved commit):
+
+```json
+{"id": "01937a55-2222-7000-8000-000000000e01", "pk": "6b1f8a2e-...:harbourline", "rm_oid": "6b1f8a2e-...",
+ "customer_ref": "hmac:7c2f...", "type": "followup_committed", "created_at": "2026-11-26T05:41:12Z",
+ "text_enc": {"alg": "A256GCM", "kek_kid": "https://kv-rmc-cust.vault.azure.net/keys/cust-7c2f/91ab", "wrapped_dek": "b64...", "iv": "b64...", "ct": "b64..."},
+ "text_sha256": "77aa...", "quarantined": false,
+ "provenance": {"source": "copilot", "source_ref": "CRM call report CR-55102", "author_type": "rm_approved", "author_oid": "6b1f8a2e-...",
+                "approval_jti": "Xq3v9Kd2Q0yB5nT1ZsPq8w", "draft_sha256": "5b0e...", "version": 1,
+                "lineage": {"prompt": "uc3.extract@4", "model_version": "[pinned]", "guardrail_version": "guardrails/2026.11.2"},
+                "checks": {"quarantine_rules": "pass", "prompt_shields": "pass", "pii_masked": true, "checked_at": "2026-11-26T05:41:12Z"}},
+ "ttl": 7776000}
+```
+
+Example `rm-profile` document:
+
+```json
+{"id": "6b1f8a2e-...", "language": "en", "brief_format": "short", "default_customers": ["harbourline", "crescent"],
+ "provenance": {"updated_by": "6b1f8a2e-...", "author_type": "rm", "updated_at": "2026-11-20T06:02:00Z", "version": 3}}
+```
+
+`default_customers` is a convenience list only: every use goes through the entitlement check, so a stale entry
+after a portfolio change grants nothing.
+
+### 16.3 Checkpointer write and resume semantics
+
+1. **Identifiers.** `thread_id` = `th:` + UUIDv7 minted by `web-bff` per session and stored on the session (plan:
+   thread = RM session). `checkpoint_ns` = `<use_case>:<request_id>`, so each graph run is a namespace inside the
+   session thread. `checkpoint_id` = UUIDv7 with `parent_checkpoint_id`; `step` counts nodes within the namespace.
+2. **Write after every node.** `create` (never upsert) with the deterministic `id`; a 409 on a retried write is
+   success. Durability mode: UC1 and UC2 write asynchronously (not awaited between nodes; at most 100 ms awaited
+   before the reply is released; a failed write is counted in `rmc_checkpoint_writes_total{outcome="failed"}` and the
+   request continues, because on these paths checkpoints serve debugging and replay only). UC3 writes `save_draft`
+   and `await_approval` synchronously.
+3. **Interrupt for approval.** `await_approval` writes status `interrupted` with `interrupt {kind: approval,
+   draft_id, draft_etag}` and TTL 30 days; the response to `web-bff` carries `thread_id` and `checkpoint_id`, which
+   `web-bff` stores on the draft (`resume` field). When the draft is deleted, expires or is committed, the thread is
+   set to `completed` and the TTL drops back to 7 days.
+4. **Resume after approval.** `web-bff` calls `POST /internal/v1/threads/{thread_id}/resume` with
+   `{checkpoint_id, draft_id, draft, approval_token}`, `Idempotency-Key` and `x-rm-token` (`Tools.Read Tools.Write`).
+   The orchestrator:
+   1. point-reads the checkpoint (partition `thread_id`); absent, expired or undecryptable: step 6;
+   2. requires `rm_oid` = `oid` of the RM token, else `404 NOT_FOUND` (no enumeration);
+   3. requires status `interrupted`; if `resuming` or `completed` with the same `resume_key` (hash of the
+      `Idempotency-Key`) it returns the stored outcome; otherwise `409 RESUME_CONFLICT`;
+   4. conditionally replaces the document (ETag) to `resuming` with `resume_key` and a 30 s lease;
+   5. unwraps the data key and restores the state with the graph version pinned at interrupt time (the registry
+      keeps old versions; if it is gone, step 6);
+   6. runs the `commit` node: `POST /internal/v1/commits` (§4.4) with the RM's final draft and the approval token. The
+      model is not called again: the RM's edited draft replaces the extracted one and the token binds its hash;
+   7. writes the `completed` checkpoint with the `saga_id` and returns the per-item status.
+5. **What the checkpoint is not.** It carries lineage and context, never authority: `tool-gateway` verifies the
+   approval token and draft hash itself (§4.4), so a tampered checkpoint cannot cause a write.
+6. **Cold resume.** If the checkpoint is missing, expired, unreadable or its graph version is gone, the commit node
+   runs directly from the submitted draft and token (`resume_mode=cold`, metric and audit field). This is the v1.1
+   path (`POST /internal/v1/uc3/commit`) and keeps commits available when the checkpoint store is not.
+7. **Resume after a crash.** (a) Pod lost during an interactive request: `web-bff` may retry once on a connection
+   reset (§1.7) with the same `request_id`; the orchestrator finds the newest checkpoint in `<use_case>:<request_id>`
+   and continues from the next node. Completed tool reads are reused from state unless older than 60 s (the
+   entitlement freshness bound), then they run again; `create_followup_draft` is idempotent on `request_id`.
+   (b) Pod lost during a resume: a retry with the same `Idempotency-Key` takes over a `resuming` document whose lease
+   has expired (ETag) and calls the commit with the same `Idempotency-Key`; `tool-gateway` returns the stored saga
+   (§4.5, §4.6), so nothing is written twice.
+8. **Replay under PIM (C29).** Operators activate `Ops.Replay` through PIM (second-person approval), with `acrs`
+   containing `c1`, on the private admin ingress: `POST /admin/v1/threads/{thread_id}/replay {checkpoint_ns,
+   from_step, reason_ticket}`. Replay runs in the namespace `rm-copilot-replay`, which has no network path to the MCP
+   gateway, the system API facade or Key Vault `sign`; model and tool calls are answered from the outputs recorded in
+   the checkpoints, so replay has no side effects and makes no live calls. Output is a masked state diff for the
+   operator, never sent to an RM. Every replay is audited (`checkpoint_replayed`: operator `oid`, PIM activation id,
+   ticket, thread, steps). Counterfactual replay with another prompt or model version runs only in pre-prod on
+   synthetic threads.
+
+### 16.4 Session context management
+
+| Rule | Value **[LLD decision]** |
+|---|---|
+| Turns kept verbatim | Last N = 6 turns (3 exchanges), each ≤ 1,000 characters, PII masked (AI Language plus regex; the placeholder mapping is not stored) |
+| Rolling summary | ≤ 300 tokens, template `session.summarise@1` (`gen-small`), produced by the `supervisor` **after** the reply is released (adds no latency); turns older than N are folded in |
+| Summary hygiene | Numbers replaced by `[n]` (digits and number words, English and Arabic: the numeric check vocabulary), quarantine rules applied, only references kept (customer ids, document and clause ids); customer facts are not kept (plan §3.8) |
+| Context budget | ≤ 1,500 tokens of the 12k request input budget: summary first, then the newest turns until the budget is used; `rmc:orchestrator:session:context_tokens` |
+| Who receives it | `supervisor` (intent and references such as "that customer") and `policy-agent` (follow-up policy questions). `brief-agent` and `followup-agent` receive only the resolved `customer_id` and the RM profile, because their facts must come from tools |
+| Authority | None: a `customer_id` resolved from context still goes through the entitlement check on the tool call |
+| Persistence | `web-bff` appends the turns after release (ETag on the session document); the orchestrator returns `context_update {summary, refs, base_version}` and `web-bff` applies it only if `base_version` matches |
+| Lifetime | The session's 24 h TTL; sign-out deletes the session document |
+
+Prompt assembly order for an agent call: system prompt (procedural) → few-shot examples (procedural, synthetic) → RM
+profile preferences → session summary → last turns → current input → tool facts and recalled episodes in delimited
+data blocks.
+
+### 16.5 Episodic memory: write rules and recall algorithm
+
+**Writes** are internal to `tool-gateway`; there is no MCP tool and no agent path that writes episodes (C26):
+
+| Episode type | Written when | Text | Author type |
+|---|---|---|---|
+| `brief_viewed` | `brief_built` audit event | none: metadata only (date, sections shown, source references, lineage); generated wording is not RM-approved, so it is not kept | system metadata |
+| `followup_committed` | `write_committed` for the call report | the RM-approved call report text (bound by the approval token's `draft_sha256`) and the CRM reference | `rm_approved` |
+| `rm_note` | RM saves a note ("remember for this customer") through `web-bff` `POST /v1/customers/{customer_id}/notes` → `POST /internal/v1/memory/episodes` | RM-authored, ≤ 500 characters | `rm` |
+
+Every write: entitlement check for the RM and customer; quarantine rules and Prompt Shields document check on the
+text (an attack rejects the write: `422 GUARDRAIL_BLOCKED` for an RM note, an alert for a committed text); PII masked;
+provenance mandatory; `text_sha256` recorded; partition key built from the token's `oid`, never from input. On a
+`portfolio.changed` removal event `tool-gateway` deletes that RM's episodes for that customer **[LLD decision]**.
+
+**Recall** (`memory.recall_episodes`):
+
+```text
+R1  PDP checks T1 to T12 (§15.5): role Tools.Memory.Recall in A, scope Tools.Read in U, workload binding
+R2  rm = oid(U); entitled(rm, customer_id, read) re-checked now, not at write time      else NOT_ENTITLED, nothing returned
+R3  query one partition only: pk = rm + ":" + customer_id; type in requested types; quarantined = false;
+    created_at >= now - 90 days; newest first; top 20                                    (never a cross-partition query)
+R4  per item: provenance complete; author_type in {rm, rm_approved} or type = brief_viewed;
+    sha256(decrypt(text_enc)) = text_sha256                                              else drop and alert (integrity)
+R5  re-scan text with the current quarantine rules (and Prompt Shields when available)  hit: drop, set quarantined = true, alert
+R6  keep the newest items until 800 tokens or max_items (<= 5)
+R7  return items with provenance; the brief-agent places them in a delimited block "previous interactions (memory,
+    not facts)"; placeholders are filled from live tool output only, so a figure that exists only in memory never
+    reaches the RM (the numeric check drops it)
+R8  audit memory_recalled: episode ids, counts returned and dropped, no text
+```
+
+A delegate RM recalls only episodes under their own `oid` (R3), never the delegator's (no memory crosses RMs, C27).
+The CRM remains the source of truth: the brief reads the CRM call history live through `get_brief_inputs`; episodes
+add only the RM's own approved context.
+
+### 16.6 Procedural memory registry
+
+| Artefact | Location (Git) | Hash | Pin (App Configuration) |
+|---|---|---|---|
+| Prompt templates | `prompts/<template_id>/v<n>.yaml` | `template_sha256` (§8.1) | `rmc:orchestrator:prompt:<template_id>` |
+| Few-shot examples (synthetic only) | `prompts/<template_id>/fewshot/v<n>.jsonl` | included in the template hash | with the template |
+| Graph definitions (nodes, edges, interrupt points, budgets) | `graphs/<graph_id>/v<n>.yaml` | `graph_sha256` | `rmc:orchestrator:graph:<graph_id>` |
+| Agent manifests (§15.2) | `agents/<agent_id>/v<n>.json` | `manifest_sha256` | `rmc:orchestrator:agent:<agent_id>` |
+| MCP tool definitions | `contracts/mcp/<server>/<tool>/<version>.json` | `tool_def_sha256` (§15.3) | `rmc:mcp:pins:<server>:<tool>` |
+| Guardrail rules | `guardrails/<version>/` | bundle hash | `rmc:orchestrator:guardrail:version` |
+
+- CI builds `procedural/registry.json` (`kind`, `id`, `version`, `sha256`, `eval_run_id`, `mrm_approval_ref`) and
+  packages it into the `orchestrator` and `tool-gateway` images; at start-up each service recomputes every hash and
+  refuses readiness on a mismatch (as §8.1 does for prompts).
+- **Change only through the eval gate:** pull request with two approvers (MRM for anything used in production) →
+  CI hashes → `eval-runner` release gate (golden set plus red-team, including the agent and memory slices) →
+  canary via feature flag → pin flip by the pipeline identity, audited as `procedural_pin_changed` (models keep
+  `model_pin_changed`) → rollback is a pin flip. A pin that points to a version without a passing `eval_run_id` is
+  rejected and the previous pin stays (alert `ProceduralPinRejected`, generalising `PromptPinRejected`).
+- Only the pipeline identity has write access to these App Configuration keys; no runtime API writes procedural
+  memory and no model output can reach it.
+- Lineage in every audit event (§6.4) gains `agent_id`, `agent_manifest_version`, `graph_version` and the
+  `tool_def_sha256` of each tool called.
+
+### 16.7 Erasure, leavers and access review
+
+- **Erasure (C21, C29).** Deleting the per-customer key makes that customer's checkpoints and episodes unreadable;
+  the erasure job also deletes episodes and checkpoints by `customer_ref` (indexed) and relies on the TTLs for the
+  rest. Completes within the Key Vault soft-delete window, as for audit content (§6.6).
+- **Leavers.** The leaver process deletes the RM's `rm-profile` document and episodes (query on `rm_oid`); sessions
+  and checkpoints expire by TTL and cannot be resumed (the RM token is gone).
+- **Access review (C24).** Quarterly export of the agent identities, their app roles, federated credentials and
+  owners, compared with the agent manifests; any drift (a role on an identity that is not in its manifest, a
+  credential other than the orchestrator's managed identity) is removed and raised as a security incident. Tokens
+  with extra roles are already rejected at G3 (§15.5).

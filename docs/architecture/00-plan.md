@@ -129,7 +129,9 @@ tool**: it runs only through the write API with the RM-signed approval token (§
 
 **Three identities on every tool call.** Effective permission is the **intersection** of:
 1. **User (OIDC):** the RM signs in with Entra ID (OpenID Connect); `web-bff` gets an OBO token for the tool audience
-   carrying the RM `oid`, delegated scopes (`Tools.Read`, `Tools.Write` only on approve) and the agent as actor.
+   carrying the RM `oid` and delegated scopes (`Tools.Read`, `Tools.Write` only on approve). It is forwarded
+   unchanged; the agent proves itself with its own token (two-token baseline). An actor (`act`) claim naming the agent is
+   added only where Entra agent OBO is confirmed **[confirm]** (ADR-024).
 2. **Agent (service principal):** each agent has its own Entra identity (Entra Agent ID where available, else an app
    registration with a service principal) **[confirm]**, holding app roles for exactly its tools (e.g.
    `Tools.CustomerData.Read` for `brief-agent`, `Tools.PolicySearch` for `policy-agent`).
@@ -369,3 +371,4 @@ fixes. 4. Verification: tests, evals, stack smoke and load run, slide layout, pr
   session, episodic, semantic, procedural, profile); C24 to C29; retention rows; new [confirm] facts. ADR-023 to
   ADR-026; ADR-005 amended.
 - v2.6a (26 Nov): ADR feedback. Orchestrator Key Vault role limited to memory-key wrap/unwrap; supervisor routing shares the UC2 rewrite call and uses rules where the intent is known, so the latency budget is unchanged; ADR-019 gains the memory containers.
+- v2.6b (26 Nov): §3.7 wording: two-token baseline (RM token forwarded unchanged plus the agent's own token); actor claim only once agent OBO is confirmed. `crm-drafts` creates drafts in Cosmos (create only); web-bff keeps edits and approval. Runbooks RB-17 to RB-19 added.

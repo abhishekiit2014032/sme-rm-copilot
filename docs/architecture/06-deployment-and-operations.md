@@ -515,6 +515,36 @@ Each runbook is stored in the operations wiki with exact commands and links; bel
 
 ---
 
+### RB-17 Agent identity incident (ADR-024, C24)
+- **Trigger:** an agent identity is suspected compromised or over-privileged (access review finding, FM-77), agent token
+  issuance failing (FM-70), or Sentinel flags calls from an agent identity outside its pod.
+- **Steps:** 1) Disable the affected agent's service principal in Entra ID (or remove the federated credential from the
+  workload identity); the supervisor routes that use case to degraded mode automatically. 2) Revoke active tokens and
+  confirm the MCP gateway rejects the agent (probe). 3) Review its app role assignments against the agent catalogue
+  (02 §15) and remove anything extra. 4) Check the audit chain for calls by that agent since the last good review.
+  5) Re-enable only after the root cause is fixed, with a four-eyes approval.
+- **Verification:** probe tool calls by the agent return `AGENT_NOT_PERMITTED` while disabled; after re-enable, role
+  assignments match the catalogue exactly and the canary passes.
+
+### RB-18 Memory incident: poisoning, cross-RM recall or erasure request (ADR-026, C26, C27)
+- **Trigger:** FM-74 (poisoned memory found), FM-75 (cross-RM recall attempt or finding), a customer erasure request, or
+  an RM leaving the Bank.
+- **Steps:** 1) Turn off episodic recall with the flag `memory.episodic.recall` (briefs continue without it). 2) Find
+  the affected items by provenance (source, author, time, version) in `episodes` and `checkpoints`. 3) Delete them; for
+  erasure, destroy the customer key (crypto-shred covers checkpoints and episodes). 4) For poisoning, add the case to the
+  red-team suite and fix the write path that allowed it. 5) Re-enable recall after the eval gate passes.
+- **Verification:** recall tests for the affected RM and customer return nothing; erasure evidence recorded; the new
+  red-team case passes.
+
+### RB-19 MCP tool schema or description change (ADR-023, C25)
+- **Trigger:** a planned change to a tool's name, description or input schema, or an unplanned `TOOL_SCHEMA_MISMATCH`
+  (FM-72).
+- **Steps (planned):** 1) Change the tool definition in Git; CI computes the new hash. 2) Run the agent evals with the new
+  definition. 3) Publish the new pin to App Configuration with the release; old and new pins overlap for one release.
+- **Steps (unplanned mismatch):** treat as a possible tool-poisoning attempt: keep the tool blocked (the gateway already
+  refuses it), compare the served definition with Git, and open a security incident if it was not a release.
+- **Verification:** `tools/list` shows the new hash for each agent; no `TOOL_SCHEMA_MISMATCH` after the overlap ends.
+
 ## 10. AI incident management
 
 An **AI incident** is any event where the copilot's AI behaviour causes, or could cause, harm: wrong or invented

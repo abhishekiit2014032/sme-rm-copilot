@@ -1,6 +1,6 @@
 # 04 Interfaces and SLAs
 
-Status: v1.1 for ARB (aligned to plan v2.4 after the ARB review, `07-review-log.md`) · Workstream B2 · Owner: solution architecture (resilience, security, operations) · Date: 26 Nov 2026
+Status: v1.2 for ARB (aligned to plan v2.4 after the ARB review, `07-review-log.md`; v2.6 adds IF-23 MCP gateway and IF-24 agent identity tokens) · Workstream B2 · Owner: solution architecture (resilience, security, operations) · Date: 26 Nov 2026
 
 This document is the interface agreement baseline between the SME RM Copilot and every system it depends on. It
 follows the contract in `00-plan.md` (service names §3.2, Azure services §3.3, identity chain §3.4, data flows §4,
@@ -16,7 +16,7 @@ Contents
 2. Common conventions (deadlines, resilience patterns, error contract, classification, severity)
 3. Bank systems of record and third parties (IF-01 to IF-07)
 4. Microsoft identity and AI services (IF-08 to IF-13)
-5. Azure platform services (IF-14 to IF-22)
+5. Azure platform services (IF-14 to IF-22; v2.6: IF-23 MCP gateway, internal, and IF-24 Entra agent identity tokens)
 6. Interface Control Document (ICD) template
 7. RACI
 8. The copilot's own SLOs, error budgets and reporting
@@ -59,6 +59,10 @@ GST (13 h = 46,800 s). Pilot: 30 RMs.
 | UC2 | `gen-small` 1 (rewrite); `embed` 1; AI Search 1; `gen-large` 1.1 (10% stricter retry as an upper bound; at p95 the retry rarely runs, plan §4.3); groundedness check: rule-based in `orchestrator`, no model call (02 §9.1; 05 §2.2 keeps 1.1 `gen-small` calls as capacity headroom only); Content Safety 1 (user prompt, plus groundedness if offered in-region); AI Language 1; audit events about 5 |
 | UC3 draft | Entitlement 1; CRM 1 (profile); AI Language 2; Content Safety 1 (user prompt); `gen-small` 1; audit events about 4 |
 | UC3 commit | Entitlement 1; Key Vault `sign` 1 (`web-bff`); Cosmos jti create 1; CRM writes 3 (one call report plus on average two tasks, plan §4.2 step 9); audit events about 6 |
+
+v2.6: every tool call above now passes the APIM MCP gateway with three tokens (IF-23): about 2 MCP calls per UC1
+request (`get_brief_inputs` plus `recall_episodes`), 1 per UC2 request and 2 per UC3 draft; the commit does not use
+MCP. The graph runtime adds about 7 checkpoint writes per request to Cosmos DB (02 §16.2).
 
 The per-interface volumetrics in sections 3 to 5 multiply this table by section 1.2. "Contracted peak" is the derived
 peak × 3 headroom (bursts, retries, growth), rounded up; it is what we ask each provider to sustain.
@@ -314,7 +318,7 @@ in §9.
 
 | Attribute | Agreement |
 |---|---|
-| Purpose | RM sign-in (MSAL in the CRM sidebar, Teams SSO in the Teams tab), MFA and Conditional Access, step-up for approval (authentication context), OBO for `tool-gateway` and Graph, workload identity for pods, app roles (RM, team lead read-only, operator) |
+| Purpose | RM sign-in (MSAL in the CRM sidebar, Teams SSO in the Teams tab), MFA and Conditional Access, step-up for approval (authentication context), OBO for `tool-gateway` and Graph, workload identity for pods, app roles (RM, team lead read-only, operator). v2.6: agent identity tokens are a separate dependency, IF-24 |
 | Direction and operations | Token issuance (`/oauth2/v2.0/token` incl. OBO grant, federated credential exchange for workload identity), OIDC discovery and JWKS (`/discovery/v2.0/keys`), Conditional Access evaluation |
 | Protocol and auth | OIDC / OAuth 2.0 over HTTPS (Microsoft backbone, outbound allowed, plan §4.1); token validation is local (`iss`, `aud`, `tid`, `scp`, `oid`, `auth_time`) against cached JWKS |
 | Data classification | Confidential (identity claims) |
@@ -516,10 +520,10 @@ in §9.
 
 | Attribute | Agreement |
 |---|---|
-| Purpose | AI gateway in front of Azure OpenAI; system API facade in front of the systems of record |
+| Purpose | AI gateway in front of Azure OpenAI; system API facade in front of the systems of record; v2.6: MCP gateway in front of the `tool-gateway` MCP servers (agreement IF-23) |
 | Direction and operations | Inbound from `orchestrator`, `tool-gateway`, `ingestion-worker`, `eval-runner`; outbound to Foundry/Azure OpenAI (private endpoint), Bank systems (ExpressRoute), news feed (firewall) |
 | Protocol and auth | HTTPS; `validate-jwt` on workload identity tokens; managed identity to backends; client certificates for legacy backends; request/response body logging **off** (body bytes 0), semantic cache **off** (C8) |
-| Volumetrics | System facade about 17,700 calls/day, AI gateway about 12,500 calls/day; total about 30k/day, peak about 3 req/s; far below one unit's capacity |
+| Volumetrics | System facade about 17,700 calls/day, AI gateway about 12,500 calls/day, MCP gateway about 7,200 calls/day (v2.6, IF-23); total about 37k/day, peak about 3.7 req/s; far below one unit's capacity |
 | Availability | Required ≥ 99.95% (critical for everything). Published **Premium 99.95% single region, 99.99% multi-region, per Microsoft SLA, [confirm] current figures**. **2 units across zones from the pilot**, 3 at scale (plan §3.3, v2.2) **[confirm zone-redundancy unit rules and the SLA figure for a zone-redundant instance, plan §10 item 6]** |
 | Latency | Gateway overhead p95 ≤ 20 ms |
 | Change notice | Microsoft APIM release notes and platform updates; our policies versioned in Git (APIOps) |
@@ -570,6 +574,65 @@ in §9.
 | Client-side protections | Batch export with bounded in-memory queue; drop on overflow (never block a request); sampling 100% for errors, adaptive for success |
 | Owner / contact | Cloud platform team (workspace), copilot product team (instrumentation), SOC (Sentinel) |
 | Monitoring and alert | Ingestion heartbeat (alert if no data for 10 min in business hours, P2), daily cap warnings, content-capture policy compliance |
+
+### IF-23 APIM MCP gateway to the `tool-gateway` MCP servers (internal, v2.6)
+
+Added for plan v2.6 §3.7 (ADR-023, ADR-024, ADR-025). This is an internal interface: both ends are copilot
+components, so the agreement is an internal OLA owned by the copilot product team, and the APIM instance is the one of
+IF-19 (a third API product next to the AI gateway and the system API facade).
+
+| Attribute | Agreement |
+|---|---|
+| Purpose | Agents in `orchestrator` (`brief-agent`, `policy-agent`, `followup-agent`; the `supervisor` has no tools) discover and call tools on the `tool-gateway` MCP servers `customer-data`, `policy-search`, `crm-drafts` and `memory` |
+| Direction and operations | `orchestrator` → APIM `/mcp/{server}` → `tool-gateway` `/mcp/{server}`. JSON-RPC 2.0 over the MCP Streamable HTTP transport with single JSON responses: `initialize`, `notifications/initialized`, `ping`, `tools/list` (filtered per agent), `tools/call` (02 §15.6). The commit and the audit endpoint are **not** on this interface |
+| Protocol and auth | HTTPS inside the spoke. Three tokens on every call, audience `tool-gateway`: workload token in `Authorization`, agent token in `x-agent-token`, RM OBO token in `x-rm-token`; APIM `validate-jwt` on all three, agent-to-workload binding, agent tool allow-list, then `tool-gateway` re-validates and decides (02 §15.5). MCP protocol version `2025-06-18` **[confirm APIM MCP support, GA status and UAE North, plan §10 item 12]** |
+| Data classification | Confidential (minimised customer facts, drafts, episodes); Internal (policy passages, filtered by clearance) |
+| Volumetrics | `tools/call` per day at scale: UC1 1,500 × 2 (composite plus recall) + UC2 2,400 × 1 + UC3 draft 900 × 2 = **≈ 7,200/day**; peak 0.139 × 2 + 0.222 + 0.083 × 2 ≈ **0.67 calls/s**; contracted peak 2 calls/s. `initialize` and `tools/list`: one MCP session per pod, agent and server, re-read only on a pin change (negligible) |
+| Availability (SLO, ours) | ≥ 99.95% in business hours, counting successful and correctly refused responses (`NOT_ENTITLED`, budget) as good. No new term in §9: it runs on the APIM instance of IF-19 and the `tool-gateway` pods already in the application tier |
+| Latency | Gateway overhead p95 ≤ 30 ms per call (three `validate-jwt` with cached keys, rate-limit counters) **[estimate, to measure in the pilot]**; `tools/list` p95 ≤ 50 ms end to end. The plan §5 latency budget is unchanged: about 2 tool calls per request add ≤ 60 ms, absorbed by the existing reserves |
+| Timeouts | Client (agent) per call: tool cap `min(2,000, remaining − reserve)` (02 §1.6; UC1 composite `min(2,000, remaining − 2,800)`, `recall_episodes` `min(300, remaining − 2,800)`); gateway `forward-request` timeout = `x-deadline-ms` − 50 ms; `tool-gateway` per-source caps unchanged (§2.1) |
+| Retries | None at the gateway. Client per §2.2 (at most one retry on connection reset before any response bytes, never on a timeout); on `-32001` the client refreshes its agent or workload token once and retries once if the deadline allows |
+| Rate limits | Per agent: `brief-agent` 120, `policy-agent` 120, `followup-agent` 60 calls/min; per RM `oid` 30 calls/min; per `x-request-id` 6 calls (plan §5 step budget) (02 §15.5 G6) |
+| Client-side protections | Breaker per server (§2.2 defaults); tool definition hashes checked against App Configuration pins before use (C25); bulkhead 20 in-flight calls per pod |
+| Degraded behaviour | Gateway or `tool-gateway` MCP down: no tools, so UC1 and UC3 draft return `503 DEPENDENCY_UNAVAILABLE` (a model-only brief without tool facts is never produced) and UC2 is routed to the desks. `memory` server down or `mcp_memory` off: the brief is built without recall and flagged `memory_unavailable` (counts as available) |
+| Change notice | MCP server versions and tool definition pins change only through the eval gate (02 §16.6); APIM policies through APIOps with rollback (RB-14) |
+| Owner / contact | Copilot product team (MCP servers, agent manifests, gateway policies); cloud platform team (APIM instance); Bank identity team (agent identities, IF-24) |
+| Monitoring and alert | Requests by server, tool, agent and outcome (metadata only, no bodies); denials by `data.code` and failed decision step; latency. Alerts: any `AGENT_NOT_PERMITTED`, `UNEXPECTED_ROLES` or `TOOL_SCHEMA_MISMATCH` (P1 security); gateway 5xx > 2% for 5 min (P1); `NOT_ENTITLED` spikes feed the C15 analytics; 429 ratio > 5% for 10 min (P3) |
+
+Error mapping on this interface (detail and JSON-RPC examples in 02 §15.6 and §15.7):
+
+| Condition | HTTP / JSON-RPC | Copilot code (02 §1.4) | Effect for the RM |
+|---|---|---|---|
+| Workload or agent token missing or invalid | 401 / -32001 | `UNAUTHENTICATED` (`WORKLOAD_NOT_ALLOWED`, `AGENT_TOKEN_INVALID`) | One token refresh and retry; then `503 DEPENDENCY_UNAVAILABLE` |
+| Agent not allowed the tool, wrong workload, extra roles, actor mismatch, scope missing | 403 / -32003 | `AGENT_NOT_PERMITTED`, `INSUFFICIENT_SCOPE` | `500 INTERNAL` (generic message); P1 security alert; never retried |
+| RM not entitled to the customer, or clearance too low | 403 / -32003 | `NOT_ENTITLED` (reason `CLEARANCE`) | `403 NOT_ENTITLED`, no data moved (a correct refusal, outside the SLO denominator) |
+| Tool definition hash differs from the pin | 500 / -32009 | `TOOL_SCHEMA_MISMATCH` | Tool refused; `503` unless the tool is `recall_episodes` (brief without recall); P1 |
+| Per-agent, per-RM or per-request limit | 429 / -32029 | `RATE_LIMITED`, `BUDGET_EXCEEDED` | `429` with `Retry-After` |
+| Kill switch or server flag off | 503 / -32050 | `FEATURE_DISABLED` | Banner; action hidden |
+| `tool-gateway` dependency down (critical source) | 503 / -32050 | `DEPENDENCY_UNAVAILABLE` | As today (§2.3) |
+| Timeout | 504 / -32054 | `DEPENDENCY_TIMEOUT`, `DEADLINE_EXCEEDED` | As today (§2.3) |
+| Non-critical source down inside `get_brief_inputs` | 200, `result` with per-source status | `SOURCE_UNAVAILABLE` warning | Partial brief (as today) |
+
+### IF-24 Microsoft Entra ID: agent identity token issuance (v2.6)
+
+Added for plan v2.6 §3.7 (ADR-024). A dependency on the same Entra tenant as IF-08, listed separately because the
+agent identities, their federated credentials and the agent token flow are new and partly **[confirm]**.
+
+| Attribute | Agreement |
+|---|---|
+| Purpose | Tokens for the four agent identities (`rmc-agent-supervisor`, `rmc-agent-brief`, `rmc-agent-policy`, `rmc-agent-followup`): Microsoft Entra Agent ID agent identities where available, else app registrations with service principals **[confirm, plan §10 item 12]**. The orchestrator's workload managed identity is each agent's only credential (federated identity credential) |
+| Direction and operations | `orchestrator` → Entra `/oauth2/v2.0/token`: (1) AKS workload identity exchange of the pod's service account token for managed identity tokens (audience `api://AzureADTokenExchange` for use as a client assertion, audience `tool-gateway` for the workload token); (2) client credentials for the agent identity with that managed identity token as `client_assertion`; (3) agent OBO of the RM token only where Entra supports it **[confirm]** (02 §15.4) |
+| Protocol and auth | OAuth 2.0 over HTTPS to Entra (Microsoft backbone, firewall allow-list); no client secrets or certificates on agent identities |
+| Data classification | Confidential (credentials) |
+| Volumetrics | Per pod about one managed identity token and one token per agent per hour: 3 to 12 pods × 5 tokens × 13 business hours ≈ **200 to 800 token requests/day**; peak far below 1 request/s |
+| Availability | Required ≥ 99.99% (as IF-08). Published: covered by the Entra ID SLA **[confirm whether Entra Agent ID features are covered, preview features may carry no SLA]** |
+| Latency | Token endpoint p95 ≤ 500 ms; off the request path because tokens are cached |
+| Client-side protections | In-memory cache per pod; proactive refresh 5 min before expiry with jitter across pods; a valid cached token keeps being used if a refresh fails; a pod that cannot obtain all agent tokens at start-up is not ready (no traffic) |
+| Degraded behaviour | Entra unavailable: cached agent tokens keep working until expiry (about 60 min **[confirm]**); after that every tool call fails (`503 DEPENDENCY_UNAVAILABLE`) because no tool call is possible without the agent token. There is **no fallback to a shared identity** (that would remove the agent part of the intersection, C24) |
+| Error contract | `AADSTS` invalid client assertion or federated credential mismatch → configuration P1 (no retry); throttling → one retry with jitter; role assignment missing → `403 AGENT_NOT_PERMITTED` at the gateway (P1) |
+| Owner / contact | Bank identity and access management team (agent identities, federated credentials, app role assignments, quarterly access review, C24); copilot product team (agent manifests) |
+| Monitoring and alert | Token acquisition failures per identity, token age at use, Entra sign-in logs for the agent service principals in Sentinel (unexpected client, location or credential). Alerts: more than 3 refresh failures in 10 min (P2); an expired agent token presented (P1); any new credential or role on an agent identity outside the pipeline (P1 security) |
+| Change notice | Entra Agent ID product announcements; changes to agent identities only through IaC and the access review |
 
 ---
 
@@ -800,6 +863,8 @@ back to degraded mode; Event Hubs falls back to the Cosmos `audit-spool` except 
 | Content Safety | 99.9% | Microsoft SLA [confirm] | Soft (local rules) | Soft | Soft (notice) | n/a |
 | Graph | 99.9% | M365 SLA [confirm] | Soft (launch from CRM) | n/a | n/a | n/a |
 | App Configuration, Blob, Azure Monitor, Document Intelligence | various | Off the request path (cached or asynchronous) | none | none | none | none |
+| APIM MCP gateway and Entra agent tokens (v2.6, IF-23, IF-24) | no new term | Same APIM instance and Entra tenant as above; agent tokens cached | Hard (inside APIM and Entra) | Hard (inside APIM and Entra) | Hard (inside APIM and Entra) | n/a (commit is not MCP) |
+| Memory: `memory` server and Cosmos `checkpoints` (v2.6) | no new term | Cosmos DB already hard | Soft (brief without recall) | Soft (checkpoints best effort) | Soft (checkpoints best effort) | Soft (cold resume without checkpoint) |
 
 ### 9.3 Results
 
@@ -864,6 +929,13 @@ minutes/month) of commit availability on Standard and 0.01% on Premium.
 
 ### 9.5 Caveats
 
+- **v2.6 agents, MCP gateway and memory.** No new hard component: the MCP gateway is a product on the existing APIM
+  instance, agent tokens come from the existing Entra tenant (cached for about an hour), and the memory stores are
+  containers in the existing Cosmos DB account, used softly (recall and checkpoints are optional on the read paths;
+  a commit can run as a cold resume). The §9.3 results therefore stand. The residual risks are correlated ones: a bad
+  APIM policy deployment on the MCP product takes all tool use down (FM-37, RB-14), and an Entra Agent ID incident
+  longer than the agent token lifetime stops all tool calls (05 FM-70).
+
 - **Business hours vs 24×7.** Microsoft SLAs are measured over the whole month. Business-hours experience can be
   better (Bank maintenance is outside business hours) or worse (an incident concentrated in a working day). We
   therefore measure ourselves rather than rely on SLA arithmetic.
@@ -894,3 +966,6 @@ minutes/month) of commit availability on Standard and 0.01% on Premium.
 | 11 | Posture when AI Language or Content Safety is down: this document follows the LLD (continue on regex masking and local rules, flagged); InfoSec and DPO may require failing into degraded mode instead | InfoSec, DPO | Before pilot |
 | 12 | Region loss excluded from the availability SLO | Business sponsor | ARB sign-off |
 | 13 | Spool failover drill in pre-prod (block the Event Hubs private endpoint; reads continue, commits fail closed, spool drains into chain `s0`) before Event Hubs is treated as soft in the availability report | SRE | Before pilot |
+| 14 | (v2.6) APIM MCP server support: GA status and availability in UAE North, Streamable HTTP pass-through, body rewrite for `tools/list` filtering, MCP protocol version (IF-23) | Cloud platform team, Microsoft | Before UC1 pilot on agents |
+| 15 | (v2.6) Entra Agent ID availability and SLA coverage, managed identity as a federated credential of an agent identity, agent OBO and its actor claim, agent token lifetime (IF-24, plan §10 item 12) | Bank identity team, Microsoft | Before UC1 pilot on agents |
+| 16 | (v2.6) Measured MCP gateway overhead (target p95 ≤ 30 ms per call) and checkpoint write cost in the pilot load test | SRE | Pilot load test |

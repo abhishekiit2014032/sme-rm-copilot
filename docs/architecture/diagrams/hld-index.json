@@ -8,27 +8,35 @@
     "heading": "5. Container view"
   },
   {
-    "file": "hld-03-6-network-topology-view",
+    "file": "hld-03-5-1-memory-architecture",
+    "heading": "5.1 Memory architecture"
+  },
+  {
+    "file": "hld-04-6-network-topology-view",
     "heading": "6. Network topology view"
   },
   {
-    "file": "hld-04-7-identity-view",
+    "file": "hld-05-7-identity-view",
     "heading": "7. Identity view"
   },
   {
-    "file": "hld-05-8-1-read-path-uc1-pre-meeting-brief",
+    "file": "hld-06-7-1-agents-mcp-gateway-and-identities",
+    "heading": "7.1 Agents, MCP gateway and identities"
+  },
+  {
+    "file": "hld-07-8-1-read-path-uc1-pre-meeting-brief",
     "heading": "8.1 Read path: UC1 pre-meeting brief (plan §4.1)"
   },
   {
-    "file": "hld-06-8-2-write-path-uc3-follow-up-agent",
+    "file": "hld-08-8-2-write-path-uc3-follow-up-agent",
     "heading": "8.2 Write path: UC3 follow-up agent (plan §4.2)"
   },
   {
-    "file": "hld-07-8-3-uc2-policy-question",
+    "file": "hld-09-8-3-uc2-policy-question",
     "heading": "8.3 UC2 policy question (plan §4.3)"
   },
   {
-    "file": "hld-08-10-deployment-view-by-phase",
+    "file": "hld-10-10-deployment-view-by-phase",
     "heading": "10. Deployment view by phase"
   }
 ]

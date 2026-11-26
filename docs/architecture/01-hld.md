@@ -1,6 +1,6 @@
 # SME RM Copilot on Azure: high-level design
 
-Status: **Draft for ARB** · Workstream A1 · Owner: solution architecture · Date: 26 Nov 2026 · Baseline: `00-plan.md` v2.4 (aligned after the ARB review, `07-review-log.md`)
+Status: **Draft for ARB** · Workstream A1 · Owner: solution architecture · Date: 26 Nov 2026 · Baseline: `00-plan.md` v2.6 (aligned to v2.4 after the ARB review, `07-review-log.md`; v2.6 adds the supervisor-led agents, the MCP gateway, agent identities and memory: §5, §5.1, §7, §7.1, §8.2)
 
 This document is the high-level design (HLD) for the SME RM Copilot on Microsoft Azure. It is derived from
 `00-plan.md` (the contract) and uses its service names, flows, step numbers, targets and phases unchanged. Where
@@ -10,9 +10,9 @@ fictional and unbranded ("the Bank"); figures are illustrative in an AED / UAE-s
 disagrees with the plan, it does not diverge: the objection is recorded in §15 "Open points for the lead".
 
 Contents: 1 Purpose and scope · 2 Architecture principles · 3 Business context and use cases · 4 System context
-view · 5 Container view · 6 Network topology view · 7 Identity view · 8 Data flows · 9 Trust boundaries and data
-classification · 10 Deployment view by phase · 11 Azure service mapping · 12 Quality attributes · 13 Cross-references
-· 14 Glossary · 15 Open points for the lead
+view · 5 Container view (5.1 Memory architecture) · 6 Network topology view · 7 Identity view (7.1 Agents, MCP gateway
+and identities) · 8 Data flows · 9 Trust boundaries and data classification · 10 Deployment view by phase · 11 Azure
+service mapping · 12 Quality attributes · 13 Cross-references · 14 Glossary · 15 Open points for the lead
 
 ---
 
@@ -54,6 +54,8 @@ monitoring approval (plan §3.5, C17) are obtained before real data is used.
 | P8 | **Private by default.** No public endpoints on PaaS, egress only via the firewall allow-list, local auth disabled. | Reduces exfiltration paths and the attack surface the ARB must reason about (ADR-017). |
 | P9 | **Telemetry is metadata only; content lives only in the encrypted audit content store.** | Prompts and completions contain customer data; observability must not become a shadow data store (ADR-013, ADR-014). |
 | P10 | **Degrade, do not fail; and every capability has a kill switch.** | A flagged data-only answer is better than an outage; risk can stop a use case in minutes (ADR-015, ADR-020). |
+| P11 | **Three identities on every tool call; effective permission is their intersection.** The RM (OBO), the agent (its own service principal) and the workload (managed identity, the agent's federated credential). | A manipulated agent cannot exceed the RM, and an RM cannot use a tool their agent was not given (plan §3.7, C24; ADR-024, ADR-023). |
+| P12 | **Memory never holds customer facts and never crosses RMs.** Facts are read live; only RM-approved or RM-authored content becomes episodic memory; procedural memory changes only through the eval gate. | Memory is a new place for injected text to hide and for data to leak; scope and provenance make it auditable (plan §3.8, C26, C27; ADR-026). |
 
 ## 3. Business context and use cases
 
@@ -154,6 +156,13 @@ products: the **AI gateway** (in front of Azure OpenAI) and the **system API fac
 record). Solid arrows are synchronous calls on the request path; dotted arrows are asynchronous, batch or
 telemetry paths.
 
+From plan v2.6 (§3.7, ADR-025 amending ADR-005) the `orchestrator` is a graph runtime hosting four agents: the
+`supervisor` and three specialists (`brief-agent`, `policy-agent`, `followup-agent`). Agents reach data only through
+MCP servers exposed by `tool-gateway` (`customer-data`, `policy-search`, `crm-drafts`, `memory`) behind a third APIM
+API product, the **MCP gateway** (ADR-023). The commit and the internal audit endpoint are not MCP tools: they stay
+direct REST calls from deterministic graph nodes. Memory stores (plan §3.8, ADR-026) are Cosmos DB containers in the
+same account, shown separately because their access rules differ (§5.1).
+
 ```mermaid
 flowchart LR
   subgraph Clients["Clients"]
@@ -165,8 +174,14 @@ flowchart LR
 
   subgraph AKS["AKS private cluster, namespace rm-copilot"]
     BFF["web-bff"]
-    ORCH["orchestrator"]
-    TG["tool-gateway"]
+    subgraph ORCHG["orchestrator pods, one workload managed identity"]
+      ORCH["graph runtime<br/>checkpointer, budgets, checks in code"]
+      SUP["supervisor<br/>gen-small, no data tools"]
+      BRA["brief-agent UC1"]
+      POA["policy-agent UC2"]
+      FUA["followup-agent UC3"]
+    end
+    TG["tool-gateway<br/>MCP servers customer-data, policy-search, crm-drafts, memory<br/>policy decision point"]
     OBW["outbox-worker"]
     ING["ingestion-worker"]
     AW["audit-writer"]
@@ -177,6 +192,7 @@ flowchart LR
 
   subgraph APIM["API Management Premium, internal VNet"]
     AIGW["AI gateway"]
+    MCPGW["MCP gateway"]
     SYSF["System API facade"]
   end
 
@@ -190,7 +206,8 @@ flowchart LR
   end
 
   subgraph Data["Data and state, private endpoints"]
-    COSMOS["Cosmos DB for NoSQL"]
+    COSMOS["Cosmos DB for NoSQL<br/>drafts, approvals, entitlements, audit-spool"]
+    MEM["Cosmos DB memory containers<br/>checkpoints, sessions, episodes, rm-profile"]
     SEARCH["AI Search Standard"]
     DOCS["Blob: document store and chunks"]
     EH["Event Hubs<br/>Standard pilot, Premium at scale<br/>audit-events, audit-content, crm-portfolio-events"]
@@ -223,13 +240,25 @@ flowchart LR
   BOT -.->|"Phase 2 only"| BFF
   BFF -->|"OBO exchange"| ENTRA
   BFF -->|"sign approval token"| KV
-  BFF -->|"sessions, drafts"| COSMOS
+  BFF -->|"drafts, approval state"| COSMOS
+  BFF -->|"sessions, rm-profile"| MEM
   BFF -->|"intent, RM OBO token, deadline"| ORCH
-  ORCH -->|"RM token plus workload token"| TG
+  ORCH -->|"runs, hop counter"| SUP
+  SUP -->|"one handoff"| BRA
+  SUP -->|"one handoff"| POA
+  SUP -->|"one handoff"| FUA
+  BRA -->|"tools/call, three tokens"| MCPGW
+  POA -->|"tools/call, three tokens"| MCPGW
+  FUA -->|"tools/call, three tokens"| MCPGW
+  MCPGW -->|"validated, filtered per agent"| TG
+  ORCH -->|"commit and audit only, RM token plus workload token"| TG
+  ORCH -->|"workload token, agent tokens via federated credential"| ENTRA
+  ORCH -->|"checkpoint after every node"| MEM
   ORCH -->|"completions, workload identity"| AIGW
   ORCH -->|"Prompt Shields"| CS
   ORCH -->|"PII detection"| LANG
-  ORCH -->|"flags, kill switches, pins"| APPC
+  ORCH -->|"flags, kill switches, prompt, graph and tool pins"| APPC
+  TG -->|"episodic recall, entitlement re-checked"| MEM
   TG -->|"system calls"| SYSF
   TG -->|"query embeddings"| AIGW
   TG -->|"hybrid query"| SEARCH
@@ -276,6 +305,59 @@ Responsibilities are exactly as in plan §3.2; the points an ARB reviewer usuall
 | Where do system-of-record calls go? | Only from `tool-gateway`, through the APIM system API facade. `tool-gateway` also owns the Graph calendar call (`get_upcoming_meetings`) and the UC1 fan-out (`get_brief_inputs`). |
 | Who produces audit events? | Only `tool-gateway` (plan v2.3). `orchestrator` and `web-bff` post use-case events to its internal audit endpoint. If Event Hubs does not acknowledge, events go to the Cosmos `audit-spool`, which `audit-writer` drains; a commit needs the Event Hubs ack of `approval_verified` before any CRM write (ADR-013). |
 | Why separate `outbox-worker` and `audit-writer`? | Different scaling, failure and privilege profiles: the outbox worker needs CRM write paths; the audit writer needs storage and key access but no business APIs. |
+| How do agents reach data? (v2.6) | Only through `tool-gateway` MCP servers behind the APIM MCP gateway, with three tokens per call (§7.1). The `supervisor` has no data tools; each specialist's agent identity holds app roles for exactly its tools; `tool-gateway` stays the policy decision point. Agents never call each other freely; the supervisor hands off once (at most 2 agent hops, C28). |
+| Can an agent commit a write? (v2.6) | No. The commit is a deterministic graph node that calls `POST /internal/v1/commits` with the RM-signed approval token, not an MCP tool (plan §3.7). `crm-drafts` only creates drafts in the copilot's own store. |
+| Where does memory live? (v2.6) | Cosmos DB containers `checkpoints`, `sessions`, `episodes`, `rm-profile`; AI Search for semantic memory; Git plus App Configuration pins for procedural memory (§5.1). |
+
+### 5.1 Memory architecture
+
+Plan §3.8 defines seven kinds of memory (ADR-026). The rule that shapes all of them: **customer facts are never
+memorised**; they are read live through tools as the RM (ADR-007). Memory holds conversation context, what the RM did
+and approved, and how the system is configured to work.
+
+| Memory | Holds | Store | Scope and key | Retention (plan §7) | Written by | Read by |
+|---|---|---|---|---|---|---|
+| Working | The current request's graph state: messages, tool results, plan | In-process, then checkpointed | One request | Request | Graph runtime | The agent running the node |
+| Checkpointer | Graph state after every node; pause for RM approval (interrupt) and resume; replay for debugging | Cosmos DB `checkpoints`, state encrypted with a per-customer data key | Thread = RM session (UC3: the draft's thread); one checkpoint per node | 7 days; 30 days while a UC3 draft is open | Graph runtime (`orchestrator`) | Graph runtime; PIM-gated replay (C29) |
+| Session | Last turns and a rolling summary of the current session | Cosmos DB `sessions` | RM `oid` + session | 24 h | `web-bff` persists; `supervisor` proposes the summary | `web-bff`, passed to the `supervisor` as context |
+| Episodic | What happened before with this customer: past briefs (metadata), approved call reports, RM notes; the CRM stays the source of truth | CRM (via tools) plus Cosmos DB `episodes` (the RM's own interactions) | RM `oid` + customer; entitlement re-checked at recall | Episode log 90 days | `tool-gateway`, only from RM-approved or RM-authored content | `brief-agent` via the `memory` MCP server |
+| Semantic | Bank knowledge: policies, products | AI Search (versioned, effective-dated) | Clearance filter | Per policy lifecycle | `ingestion-worker` | `policy-agent` via `policy-search` |
+| Procedural | Prompts, graph definitions, tool schemas, few-shot examples, guardrail rules | Git and the prompt registry, pinned in App Configuration | Global, versioned, hashed | Versioned forever | Engineers, through the eval gate only | Graph runtime at start-up and on pin change |
+| Profile | RM preferences: language, brief format, default customers | Cosmos DB `rm-profile` | RM `oid` | Until changed or the RM leaves | The RM (through `web-bff`) | `web-bff`, passed as context |
+
+```mermaid
+flowchart LR
+  REQ["One request<br/>working memory, in process"]
+  CK["Checkpointer<br/>Cosmos checkpoints, 7 days"]
+  SES["Session memory<br/>Cosmos sessions, last turns and summary, 24 h"]
+  PRO["Profile memory<br/>Cosmos rm-profile"]
+  EPI["Episodic memory<br/>Cosmos episodes, RM and customer, 90 days"]
+  SEM["Semantic memory<br/>AI Search policy index"]
+  PROC["Procedural memory<br/>Git registry, App Configuration pins"]
+  SOR["CRM and other systems of record<br/>source of truth for facts"]
+  APPR["RM approval or RM-authored note"]
+  GATE["Eval gate and pipeline"]
+
+  REQ -->|"state after every node, interrupt for approval"| CK
+  SES -->|"last turns and summary, token budget"| REQ
+  PRO -->|"language, format"| REQ
+  EPI -->|"recall via memory MCP server, entitlement re-checked"| REQ
+  SEM -->|"policy-search MCP server, clearance filter"| REQ
+  PROC -->|"prompts, graphs, tool schemas"| REQ
+  SOR -->|"live reads only, never memorised"| REQ
+  APPR -->|"only path into episodic memory"| EPI
+  GATE -->|"only path to change"| PROC
+```
+
+Memory rules (plan §3.8, C26, C27, C29):
+- No memory crosses RMs: every memory partition key starts with, or is checked against, the RM `oid` from the token.
+  A delegate RM does not see the delegator's episodes.
+- Every memory item carries provenance (source, author, time, version and, for approved content, the approval `jti`).
+- Quarantine and Prompt Shields run before any memory write; quoted or injected instructions are never stored, and
+  recalled episodes are passed to the model as quoted data, never as instructions or as figures.
+- Procedural memory is never changed at runtime by a model; a pin may only point to a version with a passing eval run.
+- Erasure crypto-shreds checkpoints and episodes with the customer key (C21); the short TTLs bound the rest.
+- Detail (containers, partition keys, checkpointer semantics, recall algorithm, registry) is in `02-lld.md` §16.
 
 ## 6. Network topology view
 
@@ -366,8 +448,9 @@ Network design points:
 
 ## 7. Identity view
 
-The identity chain is plan §3.4 (C4). The sequence below shows sign-in and a read call; the approval and write
-additions are in §8.2. Step numbers on arrows are the §3.4 numbers.
+The identity chain is plan §3.4 (C4), extended in plan v2.6 §3.7 with the agent identity and the MCP gateway (C24,
+ADR-024). The sequence below shows sign-in and a read call; the approval and write additions are in §8.2, and one
+tool call with the full three-token decision is in §7.1. Step numbers on arrows are the §3.4 numbers.
 
 ```mermaid
 sequenceDiagram
@@ -375,7 +458,8 @@ sequenceDiagram
   participant CL as CRM sidebar or Teams tab
   participant ENTRA as Entra ID
   participant BFF as web-bff
-  participant ORCH as orchestrator
+  participant ORCH as orchestrator (supervisor and agents)
+  participant GW as APIM MCP gateway
   participant TG as tool-gateway
   participant APIM as APIM system API facade
   participant MOD as SoR accepting Entra tokens
@@ -392,9 +476,14 @@ sequenceDiagram
   BFF->>ORCH: request plus RM OBO token
   ORCH->>ENTRA: 3. workload identity federation for own token
   ENTRA-->>ORCH: 3. workload token, aud tool-gateway
-  ORCH->>TG: 3. RM OBO token unchanged plus workload token
-  TG->>TG: 4. validate both tokens, RM = oid of user token
+  ORCH->>ENTRA: 3. agent token, client assertion is the workload managed identity token
+  ENTRA-->>ORCH: 3. agent token, app roles of that agent only
+  ORCH->>GW: 3. MCP tools/call with RM OBO token unchanged, agent token, workload token
+  GW->>GW: 3. validate three tokens, agent allowed on this workload, tool in the agent allow-list, limits
+  GW->>TG: 3. forward the three tokens unchanged
+  TG->>TG: 4. re-validate all three, RM = oid of user token
   TG->>TG: 4. ignore any RM id in body or header, entitlement check first
+  TG->>TG: 4. effective permission = RM scope and entitlement, agent role, workload binding (intersection)
   alt system of record accepts Entra tokens
     TG->>ENTRA: 5. OBO for the system audience
     ENTRA-->>TG: 5. downstream token for the RM
@@ -416,11 +505,109 @@ Identity design points:
   token's `auth_time` ≤ 10 min is the fallback (plan §3.4) **[confirm `acrs` on the access token, plan §10 item 8]**.
 - PIM for all admin roles; no standing access to production data planes.
 - Graph is called with `Calendars.ReadBasic` via OBO only (plan C20).
+- Agents (v2.6): one Entra identity per agent (Entra Agent ID where available, else an app registration with a
+  service principal **[confirm, plan §10 item 12]**). The agent's only credential is a federated credential that
+  trusts the orchestrator's workload managed identity, so there is no agent secret and an agent token cannot be
+  minted outside the orchestrator pods (ADR-024). Agent app roles are reviewed quarterly (C24).
+
+Identities and the memory stores (v2.6; data-plane RBAC per container, `disableLocalAuth`, detail in `02-lld.md` §16):
+
+| Identity | `checkpoints` | `sessions` | `episodes` | `rm-profile` | AI Search (semantic) | App Configuration (procedural pins) |
+|---|---|---|---|---|---|---|
+| `orchestrator` workload identity (graph runtime) | read, create, replace | none | none | none | none | read |
+| `tool-gateway` workload identity (`memory`, `policy-search` servers) | none | none | read, create (approved or RM-authored content only) | none | read (`policy-search`) | read |
+| `web-bff` workload identity | none | read, create, replace | none | read, create, replace | none | read |
+| Agent identities | none directly; memory reaches an agent only through MCP tools or as context from its runtime | | | | | |
+| Operators (PIM, `acrs` contains `c1`) | read for replay, audited | none | none | none | none | write through the pipeline only |
+| `ingestion-worker` workload identity | none | none | none | none | write | read |
+
+### 7.1 Agents, MCP gateway and identities
+
+Plan §3.7 (ADR-023, ADR-024, ADR-025). The orchestrator runs a fixed graph per use case. The `supervisor` classifies
+the intent (from the launch context; `gen-small` only for free text), enforces step, time, token and hop budgets,
+hands off once to one specialist and assembles the reply. Specialists call tools only through the MCP gateway.
+Verification (numeric, policy and groundedness checks) stays deterministic code, and the commit stays outside MCP.
+
+| Agent | Job | MCP tools it may call | Agent app roles (on `tool-gateway`) | Model |
+|---|---|---|---|---|
+| `supervisor` | Intent, budgets, one handoff, assemble the reply | none | none | `gen-small` |
+| `brief-agent` (UC1) | Customer brief | `customer-data` (profile, facilities, transactions summary, KYC status, news, the composite `get_brief_inputs`); `memory` (`recall_episodes`) | `Tools.CustomerData.Read`, `Tools.Memory.Recall` | `gen-large` |
+| `policy-agent` (UC2) | Cited policy answers | `policy-search` (`search_policies`) only | `Tools.PolicySearch` | `gen-small` rewrite, `gen-large` answer |
+| `followup-agent` (UC3) | Notes to drafts | `customer-data` (`get_customer_profile` only); `crm-drafts` (`create_followup_draft`, no commit) | `Tools.CustomerData.Profile`, `Tools.CrmDrafts.Create` | `gen-small` |
+
+**Three identities on every tool call.** Each call carries three tokens, all with audience `tool-gateway`:
+
+| Token | Identity | Proves | Obtained by |
+|---|---|---|---|
+| User token (U) | The RM, signed in with OIDC | Which RM; delegated scope (`Tools.Read`; `Tools.Write` never on MCP routes); the agent as actor where Entra supports agent OBO **[confirm]** | `web-bff` OBO (plan §3.4 step 2), forwarded unchanged |
+| Agent token (A) | The agent's service principal | Which agent; app roles for exactly its tools | Client credentials for the agent identity, with the workload token as client assertion (federated credential) |
+| Workload token (W) | The orchestrator pods' managed identity | Which runtime; that the agent is hosted where it should be | AKS workload identity federation (plan §3.4 step 3) |
+
+**Effective permission = intersection.** A call is allowed only if the RM's token has the tool's delegated scope and
+the RM is entitled to the customer with clearance for the tool's data class, **and** the agent token holds the
+tool's app role, **and** the workload is the runtime registered for that agent. The MCP gateway checks tokens, the
+agent-to-tool allow-list and limits, and filters `tools/list`; `tool-gateway` re-checks everything and adds the
+entitlement, clearance and pinned-schema checks (it is the policy decision point). Only internal, registered MCP
+servers exist; tool names, descriptions and schemas are versioned and hashed, so a changed description is rejected
+(tool poisoning, C25).
+
+```mermaid
+sequenceDiagram
+  participant POD as orchestrator pod, brief-agent node
+  participant ENTRA as Entra ID
+  participant GW as APIM MCP gateway
+  participant TG as tool-gateway, customer-data server
+  participant COS as Cosmos DB entitlements
+  participant SYSF as APIM system API facade
+
+  Note over POD: Token U is the RM OBO token from web-bff, aud tool-gateway, scp Tools.Read, oid of the RM
+  POD->>ENTRA: projected service account token, AKS workload identity
+  ENTRA-->>POD: Token W, managed identity id-rmc-orchestrator, role Tools.Invoke
+  POD->>ENTRA: client credentials for rmc-agent-brief, client assertion is the managed identity token
+  ENTRA-->>POD: Token A, roles Tools.CustomerData.Read and Tools.Memory.Recall
+  Note over POD,ENTRA: W and A are cached per pod until 5 min before expiry, issuance is off the request path
+  POD->>GW: tools/call get_brief_inputs, Authorization W, x-agent-token A, x-rm-token U
+  GW->>GW: validate-jwt on W, A and U, issuer, tenant, audience, expiry, idtyp
+  GW->>GW: A allowed on workload W, tool in the allow-list of A, per-agent and per-RM limits
+  alt gateway check fails
+    GW-->>POD: 403, JSON-RPC error -32003 AGENT_NOT_PERMITTED, no call to tool-gateway
+  else gateway check passes
+    GW->>TG: forward, three tokens unchanged
+    TG->>TG: re-validate W, A and U, tool definition hash equals the pinned hash, input matches the pinned schema
+    TG->>COS: entitlement of the RM oid for the customer, cache up to 60 s
+    TG->>TG: allow only if scope in U AND role in A AND W hosts A AND entitled AND data class within clearance
+    alt any check false
+      TG-->>GW: 403, JSON-RPC error -32003 with the reason, audit tool_denied
+      GW-->>POD: 403 passed through, no data moved
+    else all checks true
+      TG->>SYSF: parallel reads as the RM
+      SYSF-->>TG: records
+      TG->>TG: minimise and mask, audit tool_called with RM, agent and workload
+      TG-->>GW: result with structuredContent and sources
+      GW-->>POD: result
+    end
+  end
+```
+
+Design points:
+- The supervisor hands off once; at most 2 agent hops per request; a request still has at most 6 tool steps across
+  agents (plan §5, C28). Agents never talk to each other freely.
+- In the pilot no agent uses model function calling: each specialist's tool calls are nodes of its fixed graph, and
+  the model only fills bounded arguments (for example the rewritten UC2 query) validated against the pinned schema.
+  The filtered `tools/list` and the roles still hold if model-selected tool calls are enabled later (ADR-025).
+- APIM's MCP server support (GA status and availability in UAE North) is **[confirm, plan §10 item 12]**; if a
+  needed feature is missing, the MCP gateway runs as a standard APIM API with the same `validate-jwt` and rate-limit
+  policies, and `tool-gateway` filters `tools/list` itself (it is authoritative either way).
+- Contracts, claims, the decision algorithm and JSON-RPC examples are in `02-lld.md` §15; the gateway's SLO, timeouts
+  and error mapping are interface IF-23 in `04-interfaces-and-slas.md`, and agent token issuance is IF-24.
 
 ## 8. Data flows
 
 Step numbers below match plan §4 exactly. Where one plan step involves several messages, each message carries the
-same step number.
+same step number. From plan v2.6 the `orchestrator` steps run as the `supervisor` plus one specialist agent, and tool
+calls pass through the APIM MCP gateway with three tokens (§7.1); the step numbers do not change. §8.1 and §8.3 keep
+the v2.4 drawing with `orchestrator` as one participant; §8.2 shows the agents, the MCP gateway and the checkpointer
+because the approval pause and resume depend on them.
 
 ### 8.1 Read path: UC1 pre-meeting brief (plan §4.1)
 
@@ -484,16 +671,25 @@ ingestion via AMPLS, and the news feed through the firewall allow-list.
 
 ### 8.2 Write path: UC3 follow-up agent (plan §4.2)
 
+v2.6 additions (plan §3.7, §3.8; ADR-025, ADR-026): the `supervisor` hands off to `followup-agent`; the profile read
+and the draft creation go through the MCP gateway; when the drafts are ready the graph **interrupts** for RM
+approval and the checkpointer saves the paused state (status `interrupted`, TTL 30 days while the draft is open).
+Approve **resumes** the same thread from that checkpoint on any pod; the commit is a deterministic node, not an
+agent tool. If the checkpoint is missing (expired, crash before it was written, store throttled) the commit runs as a
+cold resume from the saved draft, because the commit needs only the draft and the approval token.
+
 ```mermaid
 sequenceDiagram
   actor RM as RM
   participant BFF as web-bff
   participant ENTRA as Entra ID
   participant KV as Key Vault Premium
-  participant ORCH as orchestrator
+  participant ORCH as orchestrator, supervisor and followup-agent
+  participant CKPT as Cosmos checkpoints
   participant SAFE as Content Safety and AI Language
   participant AIGW as APIM AI gateway
   participant AOAI as Azure OpenAI gen-small
+  participant GW as APIM MCP gateway
   participant TG as tool-gateway
   participant COS as Cosmos DB
   participant SYSF as APIM system API facade
@@ -503,16 +699,24 @@ sequenceDiagram
 
   RM->>BFF: 1. paste notes (Phase 2: voice memo via Speech to text)
   BFF->>ORCH: 1. notes, RM OBO token, deadline 10 s
+  ORCH->>ORCH: 1. supervisor routes to followup-agent, one handoff, thread id from the session
   ORCH->>SAFE: 2. Prompt Shields user prompt check
   ORCH->>ORCH: 2. quarantine quoted instructions
   ORCH->>SAFE: 2. mask PII (AI Language plus regex)
   ORCH->>ORCH: 2. deterministic date resolution in GST, week Mon to Fri
+  ORCH->>GW: 3. customer-data get_customer_profile, three tokens
+  GW->>TG: 3. forward, entitlement check first
+  TG-->>ORCH: 3. minimised profile
   ORCH->>AIGW: 3. extract JSON drafts
   AIGW->>AOAI: 3. call report, tasks, signals
   AOAI-->>ORCH: 3. JSON drafts
   ORCH->>ORCH: 3. schema and policy validation, no approval, pricing or limit commitments
-  ORCH-->>BFF: 4. drafts
-  BFF-->>RM: 4. drafts and email text shown, nothing written yet
+  ORCH->>GW: 4. crm-drafts create_followup_draft, no commit
+  GW->>TG: 4. forward
+  TG->>COS: 4. save draft under the RM oid of the user token
+  ORCH->>CKPT: 4. interrupt for RM approval, checkpoint status interrupted, TTL 30 days
+  ORCH-->>BFF: 4. drafts, draft id, thread id and checkpoint id
+  BFF-->>RM: 4. drafts and email text shown, nothing written to the CRM yet
   RM->>RM: 4. edits drafts
   RM->>BFF: 5. Approve
   BFF->>BFF: 5. Origin and CSRF check, acrs contains c1 (auth_time at most 10 min as fallback)
@@ -523,8 +727,10 @@ sequenceDiagram
   BFF->>BFF: 6. canonicalise draft (RFC 8785), SHA-256 hash
   BFF->>KV: 6. sign approval token ES256 (iss, aud, sub, customer_id, op, draft_sha256, schema, iat, exp, jti, kid)
   KV-->>BFF: 6. signature
-  BFF->>ORCH: 7. draft plus approval token plus RM OBO token with Tools.Write
-  ORCH->>TG: 7. commit, orchestrator cannot mint or alter the token
+  BFF->>ORCH: 7. resume thread id and checkpoint id with draft, approval token, RM OBO token with Tools.Write
+  ORCH->>CKPT: 7. load checkpoint, RM oid must match, conditional update to resuming, a second resume gets 409
+  Note over ORCH,CKPT: 7. Checkpoint missing or expired means a cold resume from the saved draft
+  ORCH->>TG: 7. commit node in code, not an agent tool and not via MCP, orchestrator cannot mint or alter the token
   TG->>TG: 8. verify signature for kid, aud, exp with 30 s skew, sub equals RM oid
   TG->>TG: 8. customer_id and op match, hash of canonical submitted draft matches
   TG->>EH: 8. approval_verified, Event Hubs ack required before any CRM write
@@ -541,13 +747,18 @@ sequenceDiagram
     end
   end
   TG-->>ORCH: 9. per-item status committed, queued, failed
+  ORCH->>CKPT: 9. checkpoint status completed
   TG->>EH: 10. approval_issued, write_committed or write_queued or write_failed, with lineage
+  TG->>COS: 10. episode followup_committed, RM-approved content with provenance
   ORCH-->>BFF: 9. status per item
   BFF-->>RM: 10. status, Outlook compose deeplink, CRM marks AI-assisted RM-approved
 ```
 
 Note: `outbox-worker` calls the CRM through the `tool-gateway` write adapters and APIM (plan §3.2); the diagram
-abbreviates that hop. The persisted verdict makes retries valid after the token's `exp` (plan C7).
+abbreviates that hop. The persisted verdict makes retries valid after the token's `exp` (plan C7). The MCP gateway
+also forwards the agent and workload tokens on steps 3 and 4 (§7.1); the profile read in step 3 is the entitlement
+check of plan §4.2. Resume is idempotent on the `Idempotency-Key` of the approve request, so a retried approve never
+starts a second commit (`02-lld.md` §16.3).
 
 ### 8.3 UC2 policy question (plan §4.3)
 
@@ -622,6 +833,8 @@ news failures produce a flagged partial brief (plan §4.1 step 5).
 | TB6 | Azure to Bank data centre | APIM system API facade and systems of record | ExpressRoute private peering, APIM `validate-jwt`, per-consumer quotas, RM `oid` in APIM-signed header for legacy systems |
 | TB7 | Azure to internet | Firewall and news feed, Entra ID, Graph | FQDN allow-list, TLS, licensed feed contract |
 | TB8 | Runtime to evidence stores | Services and Event Hubs / WORM / content store / telemetry | Metadata-only telemetry; content only in per-customer-key encrypted store; immutable retention |
+| TB9 (v2.6) | Agent runtime to tool layer | Agents in `orchestrator` and the APIM MCP gateway in front of `tool-gateway` MCP servers | Three tokens per call (user, agent, workload), intersection decision, filtered `tools/list`, pinned tool definition hashes, per-agent and per-RM limits, internal registered servers only (§7.1, C24, C25) |
+| TB10 (v2.6) | Runtime to memory stores | Graph runtime, `tool-gateway`, `web-bff` and the Cosmos memory containers | Per-container data-plane RBAC, partition by RM `oid`, entitlement re-check at recall, quarantine before write, provenance, per-customer encryption of checkpoint state and episodes, PIM-gated replay (§5.1, C26, C27, C29) |
 
 ### 9.2 Classification scheme used here
 
@@ -650,7 +863,9 @@ documents), **Confidential** (minimised customer facts, masked prompts and compl
 |---|---|---|---|
 | RM notes | Confidential to Restricted (free text may contain anything) | TB1 to TB3 | Raw until step 2 |
 | Notes sent to `gen-small` | Confidential | TB5 | Yes: AI Language plus regex (Emirates ID, IBAN, trade licence, phone); quoted instructions quarantined |
-| JSON drafts and email text | Confidential | TB5 back, TB3, TB1 | Shown to the RM only; stored in Cosmos DB with 30-day TTL (plan §7) |
+| JSON drafts and email text | Confidential | TB5 back, TB9, TB3, TB1 | Shown to the RM only; stored in Cosmos DB `drafts` by the `crm-drafts` MCP server with 30-day TTL (plan §7) |
+| Paused graph state (checkpoint) | Confidential | TB10 | Masked state, encrypted with a data key wrapped by the customer key; 30 days while the draft is open (C29) |
+| Episode after commit | Confidential | TB10 | RM-approved text only, with provenance and approval `jti`; 90 days; crypto-shredded on erasure (C26) |
 | Approval token | Confidential (integrity-critical) | TB3, TB4 | Not secret but unforgeable: ES256, bound to RM, customer, operation, schema, draft hash |
 | CRM write payload | Confidential | TB6 | Unmasked by design: it is the RM-approved record, written as the RM |
 | Email | Confidential | Device only (compose deeplink) | Never transits a mailbox API |
@@ -719,7 +934,7 @@ illustrative and is sized in `06-deployment-and-operations.md`. No prices are gi
 | Identity, SSO, OBO, step-up | Microsoft Entra ID | Bank tenant; Conditional Access; authentication context for approve; PIM | Same; Entra Private Access for remote RMs **[confirm licensing]** | Only identity provider that gives OBO, Teams SSO and workload identity natively (ADR-008) |
 | Ingress and WAF | Application Gateway WAF v2 (internal) | Autoscale, minimum 2 instances across zones (illustrative) | Minimum sized on peak | Internal L7 ingress with OWASP rules; no public listener (ADR-017) |
 | Compute | AKS private cluster | Standard tier; four pools (`system`, `signer`, `verifier`, `core`), 3 nodes each, one per zone (illustrative, `05` §2.7) | `signer`, `verifier` and `core` autoscaled; KEDA for workers | Bank standard; network policy, workload identity, PodMonitor (ADR-002) |
-| AI gateway and system API facade | API Management Premium, internal VNet | 2 units across zones (plan v2.2) | 3 units across zones **[confirm]** | Token limits and metrics, backend pools with breaker, one facade for systems of record (ADR-003) |
+| AI gateway, MCP gateway (v2.6) and system API facade | API Management Premium, internal VNet | 2 units across zones (plan v2.2) | 3 units across zones **[confirm]** | Token limits and metrics, backend pools with breaker, one facade for systems of record (ADR-003); MCP server support for the agent tool layer **[confirm GA and UAE North]** (ADR-023) |
 | Generation and extraction | Azure OpenAI in Azure AI Foundry | `gen-large`, `gen-small` Regional Standard | PTU only if measured volume justifies it | In-region inference with enterprise data terms (ADR-004) |
 | Embeddings | Azure OpenAI `embed` (text-embedding-3-large) | Regional Standard | Regional Standard | Multilingual embeddings; availability in UAE North **[confirm]** (ADR-004, ADR-006) |
 | Prompt and document attack detection | Azure AI Content Safety | Standard (S0) | Standard (S0) | Prompt Shields where available in UAE North **[confirm]**; local rules always on (ADR-011) |
@@ -767,11 +982,15 @@ Full index: [`adr/README.md`](adr/README.md).
 | [ADR-002](adr/ADR-002-aks-compute.md) | AKS private cluster for compute | 5, 6, 11 |
 | [ADR-003](adr/ADR-003-apim-ai-gateway.md) | APIM as AI gateway and system API facade | 5, 8, 11 |
 | [ADR-004](adr/ADR-004-model-hosting-and-tiering.md) | Model hosting and tiering on Azure OpenAI in Foundry | 8, 10, 11 |
-| [ADR-005](adr/ADR-005-orchestration-approach.md) | Thin custom orchestrator with deterministic workflows | 5, 8 |
+| [ADR-005](adr/ADR-005-orchestration-approach.md) | Thin custom orchestrator with deterministic workflows (amended by ADR-025) | 5, 8 |
 | [ADR-006](adr/ADR-006-retrieval-azure-ai-search.md) | Retrieval on Azure AI Search, hybrid plus semantic ranker | 8.3, 11 |
 | [ADR-007](adr/ADR-007-customer-data-live-not-indexed.md) | Customer data read live, not indexed | 2, 8.1, 9 |
 | [ADR-008](adr/ADR-008-identity-obo-and-entitlements.md) | Entra OBO plus workload identity, entitlements in `tool-gateway` | 7, 9 |
 | [ADR-009](adr/ADR-009-approval-token-es256-key-vault.md) to [ADR-022](adr/ADR-022-no-unverified-streaming.md) | Approval token, write reliability, guardrails, PII masking, audit, observability, resilience, channels, network, evaluation and MRM, state store, feature flags, IaC and CI/CD, no unverified streaming | See index |
+| ADR-023 (v2.6) | APIM as the MCP gateway in front of `tool-gateway` MCP servers | 5, 7.1, 9.1 |
+| ADR-024 (v2.6) | Agent identity: one identity per agent, workload managed identity as its federated credential, intersection of user, agent and workload | 2, 7, 7.1 |
+| ADR-025 (v2.6) | Supervisor-led multi-agent orchestration, amends ADR-005 | 5, 7.1, 8.2 |
+| ADR-026 (v2.6) | Memory architecture: working, checkpointer, session, episodic, semantic, procedural, profile | 5.1, 8.2, 9.4 |
 
 ### 13.2 Companion documents
 
@@ -795,6 +1014,11 @@ Full index: [`adr/README.md`](adr/README.md).
 | WORM | Write once, read many (immutable storage) |
 | Degraded mode | A flagged, model-free fallback answer per use case (plan C3) |
 | GST | Gulf Standard Time (UTC+4) |
+| MCP | Model Context Protocol: JSON-RPC protocol through which agents discover (`tools/list`) and call (`tools/call`) tools on MCP servers |
+| MCP gateway | The APIM API product in front of the `tool-gateway` MCP servers: token validation, per-agent filtering and limits (ADR-023) |
+| Agent identity | The Entra identity (Entra Agent ID or a service principal) of one agent; holds app roles for that agent's tools only (ADR-024) |
+| Checkpointer | The graph runtime component that saves graph state after every node, so a graph can pause (interrupt) for RM approval and resume on any pod |
+| Interrupt | A deliberate pause of a graph at a node, here to wait for the RM's approval of UC3 drafts |
 
 ## 15. Open points for the lead
 

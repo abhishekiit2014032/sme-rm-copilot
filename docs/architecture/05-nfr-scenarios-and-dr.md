@@ -1,6 +1,6 @@
 # 05 NFRs, capacity, cost, failure scenarios, DR, threat model, privacy and model risk
 
-Status: v1.1 for ARB (aligned to plan v2.4 after the ARB review, `07-review-log.md`) · Workstream B2 · Owner: solution architecture (resilience, security, operations) · Date: 26 Nov 2026
+Status: v1.2 for ARB (aligned to plan v2.4 after the ARB review, `07-review-log.md`; v2.6 adds agent, MCP gateway and memory failure modes FM-70 to FM-77, STRIDE TB11 and TB12, memory retention rows) · Workstream B2 · Owner: solution architecture (resilience, security, operations) · Date: 26 Nov 2026
 
 Contract: `00-plan.md` (cited as "plan §n"). Interfaces, SLAs and the composite availability maths are in
 `04-interfaces-and-slas.md` (cited as "04 §n"); deployment, runbooks (RB-nn) and operations are in
@@ -197,6 +197,11 @@ burst and background TTL deletes this is ≪ 1,000 RU/s. Recommendation: one dat
 and outbox** (max 1,000 RU/s) so a hot container cannot starve the replay store. Provisioned autoscale rather than
 serverless because zone redundancy and the availability SLA are required [confirm serverless limitations]. Storage:
 drafts 900/day × 4 KB × 30 days ≈ 0.1 GB; negligible.
+
+v2.6 memory (02 §16.2): about 7 checkpoint writes per request at 10 to 20 KB (≈ 15 RU each [estimate]) add about
+100 RU per request, ≈ 40 RU/s at peak; episodes and `rm-profile` add < 1 RU/s. `checkpoints` gets its own autoscale
+container (maximum 1,000 RU/s) so a checkpoint burst cannot throttle `approvals` (FM-73). Storage: checkpoints about
+5,400 requests/day × 7 × 15 KB × 7 days ≈ 4 GB at scale; episodes < 0.5 GB.
 
 ### 2.7 AKS node sizing
 
@@ -425,7 +430,23 @@ mock-Azure prototype and pre-prod (Chaos Studio or APIM mock responses [confirm 
 | FM-68 | Audit spool backlog or spool unavailable | Long Event Hubs outage; `audit-writer` drain stuck; Cosmos throttling on `audit-spool` | `RmcAuditSpoolBacklog` (oldest > 15 min, P1); spool create failures | None while the spool accepts; if both Event Hubs and the spool fail, every use case fails closed (`503 DEPENDENCY_UNAVAILABLE/AUDIT`) | Drain resumes from the oldest document; chain `s0` keeps order | RB-16, RB-10 | ≤ 1 h | FI: Event Hubs blocked for 30 min in pre-prod, then drain |
 | FM-69 | Seal not copied to the seal store | Seal subscription network or RBAC change; `audit-writer` failure | `RmcAuditSealStale` (no seal for > 15 min, P1 security) | None; tamper-evidence window widens | Seals retried in order; gap recorded in the next seal | RB-10 | ≤ 1 h | FI: deny writes to `audit-seals` in pre-prod |
 
-Count: 69 scenarios.
+### 4.5 Agents, MCP gateway and memory (v2.6)
+
+Plan v2.6 §3.7 and §3.8 (C24 to C29; ADR-023 to ADR-026). Interfaces IF-23 (MCP gateway) and IF-24 (agent identity
+tokens) are in 04 §5; the decision algorithm and memory semantics are in 02 §15 and §16.
+
+| ID | Scenario | Trigger | Detection / alert | User impact | Automatic response | Runbook | RTO | Test |
+|---|---|---|---|---|---|---|---|---|
+| FM-70 | Agent identity token failure | Entra or Entra Agent ID incident; federated credential deleted or changed; agent role assignment removed | Token acquisition failures per agent identity (> 3 in 10 min, P2); expired agent token presented (P1); `-32001` or `AGENT_NOT_PERMITTED` at the gateway | None while cached tokens are valid (about 60 min [confirm]); then tool calls fail: UC1, UC2 and UC3 draft `503`; commits unaffected (not MCP) | Cached tokens used until expiry; refresh with jitter; pod not ready if it has no valid agent token at start; **no fallback to a shared identity** | RB-16; IaC revert of the identity change | Microsoft (outage); ≤ 1 h (configuration revert) | FI: revoke the federated credential in test, assert fail closed and alert |
+| FM-71 | MCP gateway down | APIM MCP product misconfigured (bad policy), APIM unit or zone loss, `tool-gateway` MCP endpoint failing | Gateway 5xx > 2% for 5 min (P1); breaker open per MCP server; synthetic `tools/list` probe | Unit or zone loss: none (2 units across zones); bad policy: no tool calls, so UC1 and UC3 draft `503`, UC2 routed to desks; commits continue | Breaker per server; APIOps rollback of the MCP product; no model-only answer without tool facts | RB-14 (policy rollback), RB-16 | ≤ 15 min (rollback) | IT: APIOps rollback rehearsal on the MCP product; FI: block the route |
+| FM-72 | Tool schema hash mismatch | A tool description or schema changed without a new pin (accident or tool poisoning attempt, C25); pin flipped to a version the image does not serve | `TOOL_SCHEMA_MISMATCH` (P1 security); `tool-gateway` not ready at start-up on a registry mismatch | The affected tool is refused for everyone: `503` for that use case, or a brief without recall if it is `recall_episodes` | Orchestrator refuses the tool before calling; `tool-gateway` refuses to serve it; previous pin stays | RB-14 (revert release or pin), RB-11 if poisoning is suspected | ≤ 30 min | IT: change one description, assert refusal and alert |
+| FM-73 | Checkpoint store throttling | Hot partition (one long thread), RU maximum too low, burst of checkpoint writes | 429 rate on `checkpoints`; `rmc_checkpoint_writes_total{outcome="failed"}` > 1% for 10 min (P3) | UC1 and UC2: none (checkpoints are asynchronous and best effort on these paths). UC3: an interrupted thread may lack its checkpoint, so approve runs as a cold resume from the saved draft | SDK retry within deadline; dedicated autoscale on `checkpoints` so `approvals` and `sessions` are not starved; cold resume path (02 §16.3) | RB-16 | ≤ 15 min (raise maximum RU) | Load test with forced 429 on `checkpoints`; assert approvals still commit |
+| FM-74 | Memory poisoning attempt | Injected instruction in notes, a CRM note or news tries to get itself saved and recalled later as fact (C26) | Quarantine and Prompt Shields hits on episode writes; recall-time re-scan drops (`memory_recalled` dropped count > 0, security review) | None: nothing injected is stored; a recalled item that now fails the rules is dropped | Only RM-approved or RM-authored content is written; quarantine before every write; re-scan at recall; recalled text is quoted data and never a figure source (02 §16.5) | RB-11 | n/a | RT memory slice; IT `test_injected_text_never_written_to_episodes` |
+| FM-75 | Cross-RM recall attempt | Bug, manipulated input or compromised orchestrator asks for another RM's or a non-entitled customer's episodes or checkpoint (C27) | `NOT_ENTITLED` on `recall_episodes`; `404` on resume of another RM's thread; Sentinel on repeated denials (C15) | Refused; no data moves | Partition key built from the token `oid`, single-partition queries only, entitlement re-checked at recall, checkpoint `rm_oid` check on resume | RB-09 | n/a | IT `test_cross_rm_recall_returns_nothing`, `test_checkpoint_resume_other_rm_404`; RT identity slice |
+| FM-76 | Supervisor loop or hop limit | Graph defect, mixed intent or manipulated routing tries a second handoff or more tool steps (C28) | `BUDGET_EXCEEDED/HOP_LIMIT` and `AGENT_STEPS` counts (> 0.5% of requests in a day, P3); latency SLO burn | RM gets a clear answer for the first intent and is asked to send the second separately | Hop counter in the run state (at most 2 hops), per-agent and per-request step budgets, APIM per-request counter as backstop | RB-14 if caused by a release | n/a | UT hop and step limits; GS mixed-intent slice |
+| FM-77 | Agent over-privilege found in access review | Quarterly access review finds a role, credential or owner on an agent identity that is not in its manifest (C24) | Access review diff; gateway `UNEXPECTED_ROLES` (P1) if a token with the extra role was ever presented | None (tokens with extra roles are rejected at the gateway) | Gateway rejects tokens whose roles exceed the manifest; review removes the drift through IaC | RB-09 (security incident if the role was used) | ≤ 1 business day | Access review rehearsal; IT `test_agent_token_with_extra_roles_rejected` |
+
+Count: 77 scenarios.
 
 ---
 
@@ -509,7 +530,9 @@ equivalent. **TB1** RM device ↔ Application Gateway / `web-bff`; **TB2** `web-
 **TB5** `orchestrator`/`tool-gateway` ↔ APIM AI gateway ↔ Azure OpenAI and AI services (Microsoft-operated);
 **TB6** external news feed → Azure Firewall → APIM; **TB7** policy DMS → `ingestion-worker` → AI Search;
 **TB8** audit pipeline (producers → Event Hubs → `audit-writer` → Blob, Key Vault); **TB9** CI/CD → Azure control
-plane and AKS; **TB10** administrators and operators → platform.
+plane and AKS; **TB10** administrators and operators → platform; **TB11** (v2.6) agents in `orchestrator` ↔ APIM MCP
+gateway ↔ `tool-gateway` MCP servers (HLD TB9); **TB12** (v2.6) graph runtime, `tool-gateway` and `web-bff` ↔ memory
+stores (Cosmos `checkpoints`, `sessions`, `episodes`, `rm-profile`; HLD TB10).
 
 | TB | STRIDE | Threat | Mitigation | Residual risk |
 |---|---|---|---|---|
@@ -549,6 +572,19 @@ plane and AKS; **TB10** administrators and operators → platform.
 | TB9 | E | Pipeline identity with excessive rights | Per-environment federated identities scoped to resource groups; prod deploy requires approval gate | Low |
 | TB10 | E | Administrator reads customer data or flips controls | PIM just-in-time with approval, Bastion, no standing access, Sentinel alerts on PIM activation, kill-switch changes audited | Low to medium (insider with approval) |
 | TB10 | R | Operator denies a configuration change | Activity log, App Configuration change audit, Git history | Low |
+| TB11 | S | A compromised pod or stolen token impersonates an agent | Agent identity has no secret: its only credential is the orchestrator's managed identity (federated credential); gateway checks the agent-to-workload binding; Cilium allows only orchestrator pods to reach the MCP route | Low |
+| TB11 | T | Tool poisoning: a changed tool description or schema steers an agent, or a rogue MCP server is added | Internal registered servers only; definitions hashed and pinned in App Configuration, checked by client and server; descriptions never reach a model prompt in the pilot (C25) | Low |
+| TB11 | R | Tool call cannot be attributed to an agent or RM | `tool_called` and `tool_denied` audit events carry RM, agent and workload identities, tool version and definition hash | Low |
+| TB11 | I | An agent reads data outside its job (for example the policy agent reads customer data) | `tools/list` filtered per agent; agent app roles for exactly its tools; intersection with the RM's entitlement in `tool-gateway` (C24) | Low |
+| TB11 | D | Agent loop floods the tool layer | Per-agent, per-RM and per-request limits at the gateway; hop and step budgets (C28) | Low |
+| TB11 | E | Agent acquires more privilege (extra app role, `Tools.Write`, a write tool) | Gateway rejects tokens with roles beyond the manifest and `Tools.Write` on MCP routes; write tools are not MCP tools; commit only with the RM-signed approval token; quarterly access review | Low |
+| TB12 | S | A request resumes or recalls another RM's memory | Partition keys from the token `oid`; checkpoint `rm_oid` check on resume; single-partition recall queries (C27) | Low |
+| TB12 | T | Memory poisoning: injected text stored and recalled later as fact | Only RM-approved or RM-authored episodes; quarantine and Prompt Shields before write and at recall; integrity hash; provenance on every item (C26) | Medium (a subtle false statement in an RM-approved note can still be recalled; it is quoted as memory, never used as a figure) |
+| TB12 | T | Tampered checkpoint changes what gets committed | Checkpoints carry no authority: `tool-gateway` verifies the approval token and draft hash independently; state integrity hash | Low |
+| TB12 | R | Replay of a customer's thread without trace | Replay only with PIM `Ops.Replay`, `acrs` contains `c1`, ticket, audit `checkpoint_replayed` | Low |
+| TB12 | I | Checkpoints or episodes expose customer data at rest or to operators | Envelope encryption with per-customer keys, CMK at rest, short TTLs, replay sandbox without egress, crypto-shredding on erasure (C29) | Low |
+| TB12 | D | Checkpoint store throttled | Dedicated autoscale throughput; checkpoints best effort on read paths; cold resume for commits (FM-73) | Low |
+| TB12 | E | Procedural memory changed at runtime (prompt, graph, tool schema, manifest) | Only the pipeline identity can write the pins; pins must reference versions with a passing eval run; images refuse readiness on hash mismatch | Low |
 
 ---
 
@@ -594,6 +630,11 @@ plane and AKS; **TB10** administrators and operators → platform.
 | Audit content (masked prompts, outputs) | Encrypted store, per-customer key | 1 year, crypto-shred on erasure |
 | Telemetry (no content) | App Insights / Log Analytics | 90 days |
 | Metrics | Managed Prometheus | 18 months (platform default) |
+| Graph checkpoints (v2.6) | Cosmos DB `checkpoints` | 7 days; 30 days while a UC3 draft is open; crypto-shred on erasure (plan §7) |
+| Session context: last turns and rolling summary (v2.6) | Cosmos DB `sessions` (`context` field) | With the session: 24 h TTL (plan §7) |
+| Episodic interaction log (v2.6) | Cosmos DB `episodes` | 90 days; crypto-shred on erasure; deleted when the RM loses the customer or leaves (plan §7) |
+| RM profile and preferences (v2.6) | Cosmos DB `rm-profile` | Until changed or the RM leaves (plan §7) |
+| ★ Procedural memory versions (prompts, graphs, agent manifests, tool definitions) (v2.6) | Git and the procedural registry | Versioned forever (plan §3.8); pin history in App Configuration audit, 7 years with the audit trail [confirm] |
 | ★ Audit events in transit | Event Hubs | `audit-events` 3 days, `audit-content` 1 day, `crm-portfolio-events` 1 day (02 §2.6) |
 | ★ Restricted audit metadata table (query copy) | Log Analytics | 1 year interactive, then rely on WORM [confirm] |
 | ★ Policy chunks and embeddings | Blob | While the source version is current, plus 30 days after withdrawal |
@@ -739,3 +780,6 @@ is RM-approved.
 | 4 | Static outage page hosting outside UAE North (§5.3 step 2) | Copilot team |
 | 5 | Signer and verifier node pools cost 6 extra nodes; confirm isolation level with the security ADR (§2.7) | Security ADR |
 | 6 | All capacity numbers to be re-baselined from pilot telemetry at the Phase 2 gate | SRE |
+| 7 | (v2.6) Agent token lifetime and Entra Agent ID SLA coverage decide how long tool use survives an Entra incident (FM-70) [confirm] | Bank identity team |
+| 8 | (v2.6) Residual risk accepted for TB12 tampering: an RM-approved note with a false but number-free statement can be recalled as memory; mitigated by quoting it as memory, not fact, and by the 90-day TTL | Model risk, business owner |
+| 9 | (v2.6) Add agent and memory slices (memory poisoning, cross-RM recall, mixed intent) to the red-team suite of ≥ 1,000 attacks and to the golden set | MRM, security |
