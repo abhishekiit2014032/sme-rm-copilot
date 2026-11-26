@@ -165,6 +165,7 @@ feed through the firewall allow-list.
 | Deadlines | Set at `web-bff`, propagated as a header; every hop's timeout = min(own cap, remaining deadline − reserve). Tool cap 2 s; model cap = remaining deadline; failover to a second backend only if ≥ 4 s remain, else degraded mode |
 | RPO / RTO | Zone failure: audit RPO 0, RTO minutes (automatic). Region loss: audit RPO target ≤ 15 min (GZRS has no RPO guarantee unless geo priority replication is used **[confirm]**), app RTO best effort 24 h (BCP, only if UAE Central's catalogue allows the rebuild) |
 | Quality gates | Groundedness ≥ 0.95 and citation accuracy ≥ 0.95 as the **95% Wilson lower bound** (lower limit of the two-sided 95% interval, z = 1.96) on ≥ 300 scored UC2 answers (needs ≥ 293/300 observed); golden set ≥ 300 UC2 items plus ≥ 50 UC1 briefs and ≥ 50 UC3 note sets; entitlement leaks = 0; numeric mismatches = 0; injection success = 0 on a red-team suite of ≥ 1,000 attacks (zero failures in 300 items only bounds the rate below about 1%); false-positive block rate ≤ 2% |
+| Data freshness | Customer data read live at question time (never indexed); policies searchable within 60 minutes of publish and never before their effective date |
 | Token budget | Per request ≤ 6 tool steps, ≤ 12k input and 1.5k output tokens; per RM per day 400k tokens (APIM `llm-token-limit`) |
 
 Latency budget per use case (p95, ms):
@@ -300,3 +301,6 @@ fixes. 4. Verification: tests, evals, stack smoke and load run, slide layout, pr
   state z = 1.96 and ≥ 300 scored UC2 items plus ≥ 50 UC1 and ≥ 50 UC3 items; retention rows for drafts, audit spool
   and seals; APIM SLA floor 99.95% until the zone-redundant figure is confirmed; §10 items 13 to 17 added for
   [confirm] facts that were in §3 and §5 but missing from §10; en dashes removed.
+- v2.5 (26 Nov): walkthrough against the AI system design method (`08-ai-system-design-walkthrough.md`). Added a
+  policy freshness target (searchable within 60 minutes of publish); prompt caching allowed where the model supports
+  it (no answers cached) [confirm]; semantic cache stays off in the pilot.
