@@ -8,7 +8,7 @@ Imitates:
 Feature flags use the real key prefix and content type
 (`application/vnd.microsoft.appconfig.ff+json;charset=utf-8`), value `{"id", "description", "enabled", "conditions"}`.
 Flags at start-up: `uc1`, `uc2`, `uc3` (per use case) and `writes` (all CRM writes), all enabled.
-RBAC: orchestrator = App Configuration Data Reader; `ops-admin` = Data Owner.
+RBAC: orchestrator, tool-gateway, outbox-worker = App Configuration Data Reader; `ops-admin` = Data Owner.
 
 Differences: no labels beyond the null label, no revisions, snapshots, ETag preconditions or HMAC auth.
 """
@@ -28,7 +28,8 @@ from ._base import Mock
 FF_PREFIX = ".appconfig.featureflag/"
 FF_CONTENT_TYPE = "application/vnd.microsoft.appconfig.ff+json;charset=utf-8"
 FLAGS = {"uc1": "UC1 pre-meeting brief", "uc2": "UC2 policy copilot", "uc3": "UC3 follow-up drafting", "writes": "All CRM writes (kill switch)"}
-RBAC = {"orchestrator": {"kv/read"}, "ops-admin": {"kv/read", "kv/write"}}
+# Data Reader for every service that enforces a flag (tool-gateway and outbox-worker enforce the `writes` kill switch).
+RBAC = {"orchestrator": {"kv/read"}, "tool-gateway": {"kv/read"}, "outbox-worker": {"kv/read"}, "ops-admin": {"kv/read", "kv/write"}}
 
 
 class AppConfigMock(Mock):

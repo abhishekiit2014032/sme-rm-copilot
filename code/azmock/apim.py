@@ -2,9 +2,11 @@
 systems of record (plan §3.3). Implements the policies the design depends on:
 
 AI gateway  POST /openai/deployments/{deployment}/chat/completions | /embeddings   (same shape as Azure OpenAI)
-  1. `validate-jwt`: workload token, audience `api://rm-copilot-apim`, role `AiGateway.Invoke`.
+  1. `validate-jwt`: workload token, audience `api://rm-copilot-apim`, role `AiGateway.Invoke`; chat deployments for
+     the orchestrator only (LLD `AiGateway.Generate`), embeddings for any caller with the role.
   2. `rate-limit-by-key` per RM (calls per minute)                                   -> 429 + Retry-After
-  3. `llm-token-limit` per RM (counter key = `x-rm-oid`, set by the authenticated orchestrator):
+  3. `llm-token-limit` per RM (counter key = `x-rm-oid`, honoured only from the orchestrator and tool-gateway, which
+     validate the RM token; any other caller is metered under its own identity):
      tokens per minute (prompt estimated up front)                                    -> 429 + Retry-After
      daily token quota                                                                -> 403 (APIM's quota behaviour)
   4. backend pool by priority (`aoai-primary` = 1, `aoai-secondary` = 2; both Regional Standard deployments in UAE
@@ -50,6 +52,10 @@ class Backend:
     url: str
     priority: int
     breaker: CircuitBreaker
+
+
+CHAT_CALLERS = ("orchestrator",)                     # LLD §1.5: AiGateway.Generate (ingestion and tool-gateway: Embed only)
+RM_KEY_CALLERS = ("orchestrator", "tool-gateway")     # validate an RM token before they set `x-rm-oid`
 
 
 def _apim_error(status: int, message: str, headers: dict | None = None) -> Response:
@@ -151,8 +157,12 @@ class ApimMock(Mock):
             sleep_ms(4)
         self.require_api_version(r)
         claims = self.caller(r, AUD["apim"], scopes=("AiGateway.Invoke",), app_only=True)
-        key = r.header("x-rm-oid") or claims["azp"]
         deployment, use_case = r.params["deployment"], (r.header("x-use-case") or "unknown")[:24]
+        if r.path.endswith("/chat/completions") and claims["azp"] not in CHAT_CALLERS:
+            self.m_reject.inc(policy="validate-jwt-role")
+            return _apim_error(403, "Caller is not allowed to call generation deployments.")
+        # Per-RM quota key: only callers that hold a validated RM token may name the RM; anyone else is metered as itself.
+        key = (r.header("x-rm-oid") if claims["azp"] in RM_KEY_CALLERS else None) or claims["azp"]
         body = r.json()
         text = json.dumps(body.get("messages") if "messages" in body else body.get("input"))
         rejected = self._admit(key, count_tokens(text))

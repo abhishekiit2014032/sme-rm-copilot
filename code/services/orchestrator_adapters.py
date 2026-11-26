@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import urllib.parse
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -52,6 +53,11 @@ class Budget:
         if self.input_tokens >= self.max_input_tokens or self.output_tokens >= self.max_output_tokens:
             raise HttpError(429, "BUDGET_EXCEEDED", "token budget exceeded", details={"reason": "REQUEST_TOKENS"}, retryable=False)
         return self.max_output_tokens - self.output_tokens
+
+
+def _seg(value: str) -> str:
+    """One URL path segment: never lets a value add segments, a query or a fragment to an internal URL."""
+    return urllib.parse.quote(str(value), safe="")
 
 
 def _budget() -> Budget:
@@ -147,10 +153,10 @@ class HttpTools:
         return r
 
     def brief_inputs(self, user: t.User, customer_id: str) -> dict:
-        return self._call("GET", f"/tools/customers/{customer_id}/brief-inputs").json()
+        return self._call("GET", f"/tools/customers/{_seg(customer_id)}/brief-inputs").json()
 
     def get_customer_profile(self, user: t.User, customer_id: str) -> dict:
-        return self._call("GET", f"/tools/customers/{customer_id}/profile").json()
+        return self._call("GET", f"/tools/customers/{_seg(customer_id)}/profile").json()
 
     def search_policies(self, user: t.User, query: str, k: int = 3) -> list[dict]:
         j = self._call("POST", "/tools/policies/search", {"query": query, "k": k}).json()
@@ -161,14 +167,14 @@ class HttpTools:
         return self._call("GET", "/tools/meetings").json()["value"]
 
     def write_status(self, jti: str) -> ClientResponse:
-        return self._call("GET", f"/tools/writes/{jti}")
+        return self._call("GET", f"/tools/writes/{_seg(jti)}")
 
     def draft_email(self, user: t.User, customer_id: str, body: str) -> dict:
         # No mail scope (plan C20): the email stays text in the UI and opens in Outlook via a compose deeplink.
         return {"to_customer": customer_id, "body": body, "status": "draft", "compose_link": outlook_compose_link(FOLLOWUP_SUBJECT, body)}
 
     def create_call_report(self, user: t.User, customer_id: str, draft: dict, approval_token: str | None = None) -> dict:
-        r = self._call("POST", f"/tools/customers/{customer_id}/call-reports", {"draft": draft, "approval_token": approval_token},
+        r = self._call("POST", f"/tools/customers/{_seg(customer_id)}/call-reports", {"draft": draft, "approval_token": approval_token},
                        timeout=self.svc.cfg.settings.deadline_commit_s)
         return {**r.json(), "http_status": r.status}
 

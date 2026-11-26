@@ -10,7 +10,8 @@ the `oid` of that user token; an RM id in a body or header is never trusted. The
    retry for idempotent reads; only the CRM profile is critical, LOS, ODS, KYC and news degrade to flagged sections;
 3. field minimisation (`rm_copilot.tools.minimise_profile`: no national ID);
 4. one audit event per system call to Event Hubs, acknowledged before the response (fail closed);
-5. writes: approval token verification (public key only), atomic `jti` create in Cosmos DB (409 = replay),
+5. writes: `writes` kill switch (App Configuration, fail closed when stale), schema `followup/1` (NFC), entitlement,
+   approval token verification (public key only), atomic `jti` create in Cosmos DB (409 = replay),
    verdict + draft persisted, saga per item with external reference `jti:item`, Cosmos outbox on timeout/5xx.
 
 Production equivalent: an AKS deployment with workload identity; Redis is not used in Phase 1 (plan §2).
@@ -25,8 +26,9 @@ from rm_copilot.tools import minimise_profile
 from services.approval_verifier import ApprovalRejected, ApprovalVerifier
 from services.common import crm_writes
 from services.common.config import StackConfig
-from services.common.contracts import AUDIT_EVENTS, APPROVAL_OP, TOOL_CONTRACT_VERSION, EventHubAuditSink, followup_payload
+from services.common.contracts import AUDIT_EVENTS, APPROVAL_OP, TOOL_CONTRACT_VERSION, EventHubAuditSink, valid_customer_id, validate_followup
 from services.common.cosmos_client import CosmosClient
+from services.common.flags import FeatureFlags
 from services.common.httpkit import HttpError, Request, Response, TransportError, request_context, run_parallel, time_left
 from services.common.service import Service
 from services.common.telemetry import current_span
@@ -50,6 +52,7 @@ class ToolGateway(Service):
         self.cosmos = CosmosClient(self)
         self.audit = EventHubAuditSink(cfg, self.client, self.tokens, self.name)  # the only Event Hubs producer
         self.verifier = ApprovalVerifier(cfg, self.client, lambda: self.auth_headers("vault"))
+        self.flags = FeatureFlags(self)  # the writes kill switch is enforced here too (LLD §4.4 step 3), not only upstream
         self._entitlements: dict[str, tuple[float, dict]] = {}
         self._lock = threading.Lock()
         m = self.metrics
@@ -226,9 +229,17 @@ class ToolGateway(Service):
     def _commit(self, r: Request) -> Response:
         rm, cid = self._auth(r, write=True), r.params["cid"]
         oid = rm["oid"]
-        self.require_entitled(oid, cid, "create_call_report")
+        if not self.flags.enabled("writes"):
+            self.audit.emit("write_blocked", op=APPROVAL_OP, reason="feature_disabled", customer=cid if valid_customer_id(cid) else None)
+            raise HttpError(503, "FEATURE_DISABLED", "Writes are switched off right now.", details={"flag": "writes"}, retryable=False)
         body = r.json()
-        draft = followup_payload(body.get("draft") or {})
+        if not isinstance(body, dict):
+            raise HttpError(400, "VALIDATION_FAILED", "the request body must be a JSON object", details={"reason": "SCHEMA"})
+        try:
+            draft = validate_followup(body.get("draft") or {})
+        except ValueError as e:
+            raise HttpError(400, "VALIDATION_FAILED", "The draft does not match schema followup/1.", details={"reason": "SCHEMA", "field": str(e)}) from None
+        self.require_entitled(oid, cid, "create_call_report")
         try:
             claims = self.verifier.verify(body.get("approval_token"), oid=oid, customer_id=cid, draft=draft)
         except ApprovalRejected as e:
@@ -307,9 +318,14 @@ class ToolGateway(Service):
             raise HttpError(400, "VALIDATION_FAILED", "1-20 events", details={"reason": "SCHEMA"})
         clean = []
         for e in events:
+            if not isinstance(e, dict):
+                raise HttpError(400, "VALIDATION_FAILED", "audit event does not match schema audit/1", details={"reason": "SCHEMA"})
             meta = e.get("metadata") or {}
             env = e.get("content_envelope")
+            # The customer reference names the content key: plain ids only, so content cannot be filed under an alias
+            # that erasure of the real customer would not shred (C21).
             ok = (e.get("event") in AUDIT_EVENTS and isinstance(meta, dict) and len(meta) <= 40
+                  and (e.get("customer") is None or valid_customer_id(e.get("customer")))
                   and all(isinstance(v, (str, int, float, bool, type(None))) or (isinstance(v, list) and all(isinstance(x, (str, int)) for x in v))
                           for v in meta.values())
                   and all(len(str(v)) <= 300 for v in meta.values())

@@ -24,7 +24,8 @@ from pathlib import Path
 from rm_copilot import data
 from services.common import jose
 from services.common.config import AUD, StackConfig
-from services.common.contracts import APPROVAL_TYP, FOLLOWUP_SUBJECT, approval_claims, followup_payload, outlook_compose_link
+from services.common.contracts import (APPROVAL_TYP, FOLLOWUP_SUBJECT, approval_claims, followup_payload, outlook_compose_link, valid_customer_id,
+                                       validate_followup)
 from services.common.cosmos_client import CosmosClient
 from services.common.httpkit import HttpError, Request, Response, TransportError, current_trace_id, request_context, run_parallel, time_left
 from services.common.service import Service
@@ -47,7 +48,7 @@ class WebBff(Service):
         csp = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'none'; "
                f"connect-src 'self' {entra}; base-uri 'none'; form-action 'none'; frame-ancestors 'self'")
         super().__init__(cfg, response_headers={"Content-Security-Policy": csp, "X-Content-Type-Options": "nosniff",
-                                                "Referrer-Policy": "no-referrer", "Cache-Control": "no-store"})
+                                                "Referrer-Policy": "no-referrer", "Cache-Control": "no-store"}, edge=True)
         self.cosmos = CosmosClient(self)
         self._traces: OrderedDict[str, tuple[str, str]] = OrderedDict()  # request_id -> (trace_id, oid)
         self._kid: str | None = None
@@ -68,7 +69,7 @@ class WebBff(Service):
         a("POST", "/api/uc3/draft")(self._draft)
         a("POST", "/api/uc3/approval-token")(self._approval_token)
         a("POST", "/api/uc3/approve")(self._approve)
-        a("GET", "/api/uc3/writes/{jti}")(lambda r: self._proxy(r, "GET", f"/v1/writes/{r.params['jti']}", None, self.cfg.settings.deadline_commit_s))
+        a("GET", "/api/uc3/writes/{jti}")(lambda r: self._proxy(r, "GET", f"/v1/writes/{urllib.parse.quote(r.params['jti'], safe='')}", None, self.cfg.settings.deadline_commit_s))
         a("GET", "/api/trace/{request_id}")(self._trace)
 
     # ------------------------------------------------------------------ static and config
@@ -188,11 +189,15 @@ class WebBff(Service):
     def _approval_request(self, r: Request) -> tuple[dict, str, str, dict]:
         claims, token = self._approval_checks(r)
         body = r.json()
-        cid = str(body.get("customer_id", ""))
-        if not cid:
-            raise HttpError(400, "VALIDATION_FAILED", "customer_id is required", details={"reason": "SCHEMA"})
+        cid = body.get("customer_id", "") if isinstance(body, dict) else ""
+        if not valid_customer_id(cid):
+            raise HttpError(400, "VALIDATION_FAILED", "customer_id is required", details={"reason": "SCHEMA", "field": "/customer_id"})
         request_context().data["customer_id"] = cid
-        return claims, token, cid, followup_payload(body.get("draft") or {})
+        try:
+            draft = validate_followup(body.get("draft") or {})
+        except ValueError as e:
+            raise HttpError(400, "VALIDATION_FAILED", "The draft does not match schema followup/1.", details={"reason": "SCHEMA", "field": str(e)}) from None
+        return claims, token, cid, draft
 
     def _approval_token(self, r: Request) -> dict:
         self._set_deadline(self.cfg.settings.deadline_commit_s)

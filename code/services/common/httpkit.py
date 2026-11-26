@@ -149,8 +149,12 @@ def _compile(pattern: str) -> re.Pattern:
 
 
 class App:
-    def __init__(self, name: str, telemetry: Telemetry | None = None, cors: bool = False, response_headers: dict | None = None):
+    def __init__(self, name: str, telemetry: Telemetry | None = None, cors: bool = False, response_headers: dict | None = None,
+                 trust_inbound_context: bool = True):
         self.name = name
+        # False at the internet-facing edge (web-bff): a client's `x-request-id` / `traceparent` are not adopted, so a
+        # client cannot put arbitrary text into telemetry, collide with another RM's request id or join their trace.
+        self.trust_inbound_context = trust_inbound_context
         self.telemetry = telemetry or Telemetry(name)
         self.cors = cors
         self.response_headers = response_headers or {}
@@ -189,17 +193,18 @@ class App:
         query = {k: v[0] for k, v in urllib.parse.parse_qs(url.query, keep_blank_values=True).items()}
         headers = {k.lower(): v for k, v in headers.items()}
         if method == "OPTIONS" and self.cors:
-            return self._finish(Response(204, None), headers.get("x-request-id", ""), None)
+            return self._finish(Response(204, None), headers.get("x-request-id", "") if self.trust_inbound_context else "", None)
         fn, route, params, path_known = self._match(method, url.path)
         req = Request(method, url.path, query, headers, body, params, route)
-        request_id = headers.get("x-request-id") or ("req-" + _short_id())
+        trusted = self.trust_inbound_context
+        request_id = (headers.get("x-request-id") if trusted else None) or ("req-" + _short_id())
         deadline_ms = headers.get(DEADLINE_HEADER)
         ctx = RequestContext(request_id, time.monotonic() + max(0.0, float(deadline_ms)) / 1000 if _is_number(deadline_ms) else None)
         token = set_request_context(ctx)
         t0 = time.perf_counter()
         status = 500
         try:
-            with self.telemetry.span(f"{method} {route}", kind="server", parent=parse_traceparent(headers.get("traceparent")),
+            with self.telemetry.span(f"{method} {route}", kind="server", parent=parse_traceparent(headers.get("traceparent")) if trusted else None,
                                      **{"http.method": method, "http.route": route, "rmc.request_id": request_id}) as sp:
                 resp = self._invoke(fn, req, path_known)
                 status = resp.status

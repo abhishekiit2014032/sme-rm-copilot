@@ -76,7 +76,7 @@ class AuditWriter(Service):
         (self.dir / "content").mkdir(parents=True, exist_ok=True)
         self.chain_path = self.dir / "audit-chain.jsonl"
         self._next_seq_in = 0      # Event Hubs checkpoint
-        self._seq, self._prev = 0, GENESIS
+        self._seq, self._prev = self._head()  # resume after a restart: never restart the chain at seq 0 (false tamper alarm)
         self._keys: dict[str, bytes] = {}
         self._lock = threading.Lock()
         m = self.metrics
@@ -88,6 +88,19 @@ class AuditWriter(Service):
         a("GET", "/audit/records")(self._records)
         a("POST", "/audit/erasure")(self._erasure)
         a("GET", "/audit/content/{customer}/{event_id}")(self._content)
+
+    def _head(self) -> tuple[int, str]:
+        """The chain head (next seq, last hash) of an existing chain file. Production: Cosmos `audit-chain-heads`."""
+        if not self.chain_path.exists():
+            return 0, GENESIS
+        last = None
+        for line in self.chain_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                last = line
+        if last is None:
+            return 0, GENESIS
+        rec = json.loads(last)
+        return rec["seq"] + 1, rec["hash"]
 
     def start(self) -> None:
         self.run_loop("consume", self.cfg.settings.audit_poll_s, self.tick)
@@ -207,6 +220,12 @@ class AuditWriter(Service):
             raise HttpError(404, "NotFound", "no content for this event")
         with self._lock:
             key = self._key(customer, create=False)
+        shredded = HttpError(410, "CONTENT_SHREDDED", "the customer's content key was destroyed; content is unrecoverable")
         if key is None:
-            raise HttpError(410, "CONTENT_SHREDDED", "the customer's content key was destroyed; content is unrecoverable")
-        return {"event_id": event_id, "content": json.loads(unseal(key, path.read_bytes()))}
+            raise shredded
+        try:
+            plaintext = unseal(key, path.read_bytes())
+        except ValueError:
+            # Sealed under a key that was shredded; the customer has a newer key for later content.
+            raise shredded from None
+        return {"event_id": event_id, "content": json.loads(plaintext)}

@@ -14,7 +14,7 @@ cd code
 python3 demo.py                         # in-process walk-through of UC1, UC2, UC3 and the controls
 python3 -m evals.run_evals              # release gate on the golden set (passes)
 python3 -m evals.run_evals --careless   # same gate with a hallucinating model (fails, exit 1)
-python3 -m unittest                     # 69 tests: 9 control tests + 17 platform unit tests + 43 stack tests over HTTP
+python3 -m unittest                     # 89 tests: 9 control + 17 platform unit + 43 stack tests over HTTP + 20 red-team tests
 python3 stack.py                        # start the whole stack on 127.0.0.1:8700-8716, console at http://127.0.0.1:8712/
 python3 stack.py --latency realistic    # same, with roughly realistic mock latencies
 python3 stack.py --port-base 0 --smoke  # ephemeral ports, run UC1/UC2/UC3 once, verify the audit chain, stop
@@ -116,8 +116,9 @@ APIM policies: `GET|POST /admin/policies` (tokens per minute, daily quota, calls
   hashed bag-of-words vectors; no streaming, tools, real content filters (a rule stands in for Prompt Shields);
   quotas and regional capacity are not modelled.
 - **APIM**: counters live in one process (real APIM counters are per unit/region, plan §10 item 6); policy error
-  bodies use APIM's `{"statusCode","message"}` shape; the per-RM quota key is an `x-rm-oid` header set by the
-  authenticated orchestrator (LLD: `oid` from a validated RM token); the RM header to legacy backends is an HMAC
+  bodies use APIM's `{"statusCode","message"}` shape; the per-RM quota key is an `x-rm-oid` header honoured only
+  from the orchestrator and tool-gateway (LLD: `oid` from a validated RM token); chat deployments are limited to the
+  orchestrator by caller identity rather than separate `AiGateway.Generate`/`Embed` roles; the RM header to legacy backends is an HMAC
   over (oid, method, path, ts), not the LLD `x-rm-assertion`; one App ID URI for both APIM APIs.
 - **AI Search**: the semantic reranker score is BM25 × query coverage, not the calibrated 0-4 scale, so
   `MIN_RETRIEVAL_SCORE` must be re-tuned with the golden set on real Azure; OData filters support `eq ne lt le gt
@@ -176,4 +177,4 @@ APIM policies: `GET|POST /admin/policies` (tokens per minute, daily quota, calls
 | `rm_copilot/ports.py` | Architecture | The two interfaces the workflows depend on (`ToolPort`, `GuardPort`) and their in-process adapters |
 | `rm_copilot/orchestrator.py` | Architecture | UC1 fixed workflow with `{placeholders}`, numeric and policy checks, partial and degraded briefs; UC2 rewrite, decline threshold, verify, retry once only with ≥ 4 s left, passages-only degraded mode; UC3 drafts with deterministic dates and manual degraded path |
 | `evals/` | Evaluation | Golden set and release gate with thresholds |
-| `tests/` | Governance | `test_controls.py` (in-process controls), `test_platform_units.py` (crypto, JOSE, canonical hash, filters, telemetry), `test_stack_e2e.py` and `test_stack_writes_resilience.py` (the stack over HTTP) |
+| `tests/` | Governance | `test_controls.py` (in-process controls), `test_platform_units.py` (crypto, JOSE, canonical hash, filters, telemetry), `test_stack_e2e.py` and `test_stack_writes_resilience.py` (the stack over HTTP), `test_redteam.py` (attacks on the controls) |

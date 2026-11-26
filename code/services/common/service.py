@@ -11,9 +11,9 @@ from .httpkit import App, HttpClient
 class Service:
     name = "service"
 
-    def __init__(self, cfg: StackConfig, response_headers: dict | None = None):
+    def __init__(self, cfg: StackConfig, response_headers: dict | None = None, edge: bool = False):
         self.cfg = cfg
-        self.app = App(self.name, response_headers=response_headers)
+        self.app = App(self.name, response_headers=response_headers, trust_inbound_context=not edge)
         self.telemetry = self.app.telemetry
         self.metrics = self.telemetry.metrics
         self.client = HttpClient(self.telemetry)

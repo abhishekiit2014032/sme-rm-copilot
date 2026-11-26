@@ -172,7 +172,7 @@ async function approve() {
     const body = { customer_id: state.draft.customer_id, draft: editedDraft(), draft_id: state.draft.draft_id };
     const headers = { "x-session-id": state.session.session_id, "x-csrf-token": state.session.csrf_token };
     let res = await api("POST", "/api/uc3/approve", body, headers);
-    if (res.status === 401 && res.data.error && res.data.error.code === "step_up_required") {
+    if (res.status === 401 && res.data.error && res.data.error.code === "STEP_UP_REQUIRED") {
       out.append(el("p", { class: "muted", text: "Approval needs a fresh sign-in. Signing in again..." }));
       if (await signIn(state.upn)) res = await api("POST", "/api/uc3/approve", body, { "x-session-id": state.session.session_id, "x-csrf-token": state.session.csrf_token });
     }

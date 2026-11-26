@@ -12,14 +12,17 @@ from .retrieval import tokenize
 
 INJECTION = re.compile(r"(ignore (all |any )?(previous|prior|above) instructions|disregard (the )?(system|previous)|you are now|reveal (the )?system prompt|approve .{0,40} immediately)", re.I)
 PII_PATTERNS = {
-    "national_id": re.compile(r"\b784-?\d{4}-?\d{7}-?\d\b"),
-    "iban": re.compile(r"\bAE\d{2}\s?(?:\d{4}\s?){4}\d{3}\b"),
+    # Separators as people write them: hyphens, spaces or dots; IBANs in any case; UAE phone numbers with +971, 00971,
+    # 971 or a trunk 0, an optional "(0)", brackets around the area code and any digit grouping.
+    "national_id": re.compile(r"\b784[-. ]?\d{4}[-. ]?\d{7}[-. ]?\d\b"),
+    "iban": re.compile(r"\b[Aa][Ee]\d{2}[ -]?(?:\d{4}[ -]?){4}\d{3}\b"),
     "card": re.compile(r"\b(?:\d[ -]?){15,16}\b"),
     "trade_licence": re.compile(r"\b(?:TL|CN)-\d{6,7}\b"),
     "email": re.compile(r"\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b"),
-    "phone": re.compile(r"(?:\+971|\b00971|\b0)[ -]?(?:5\d|[2-9])[ -]?\d{3}[ -]?\d{4}\b"),
+    "phone": re.compile(r"(?:(?:\+|\b00)971|\b971)[ -]?(?:\(0\)[ -]?)?\(?(?:5\d|[2-9])\)?(?:[ -]?\d){7}\b"
+                       r"|(?:\(0|\b0)(?:5\d|[2-9])\)?(?:[ -]?\d){7}\b"),
 }
-GUARDRAIL_VERSION = "guardrails/2026.11.2"  # recorded in audit lineage; bump on any rule change
+GUARDRAIL_VERSION = "guardrails/2026.11.3"  # recorded in audit lineage; bump on any rule change
 
 # Number words the model must not write itself (plan C19). English plus basic Arabic, with the common
 # attached prefixes (wa-, bi-, li-). Digits in any script are caught by \d (Unicode-aware).

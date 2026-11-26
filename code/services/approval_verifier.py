@@ -1,13 +1,14 @@
 """Approval token verification for the tool-gateway write API (plan §4.2 step 8, C6, C7).
 
 The verifier holds only the PUBLIC key (fetched from Key Vault by `kid`, cached) and checks, in order:
-structure and `alg` = ES256 (never `none` or HMAC); `kid` under the configured vault and key; signature;
-`iss` = web-bff; `aud` = tool-gateway; `op` and `schema`; `exp` / `iat` with 30 s skew; `sub` = the `oid` of the RM
-token on the call; `customer_id` = the customer in the request; `draft_sha256` = hash of the canonical submitted
-draft. The `jti` replay check (atomic create in Cosmos DB) is done by the caller after these pass.
+size <= 2 KiB, structure, header members exactly {alg, typ, kid}, `alg` = ES256 (never `none` or HMAC); `kid` under
+the configured vault and key; signature; the exact claim set (LLD §4.1); `iss` = web-bff; `aud` = tool-gateway;
+`op` and `schema`; `exp` / `iat` with 30 s skew and 0 < exp - iat <= 300; `sub` = the `oid` of the RM token on the call;
+`customer_id` = the customer in the request; `draft_sha256` = hash of the canonical submitted draft (constant time). The `jti` replay check (atomic create in Cosmos DB) is done by the caller after these pass.
 """
 from __future__ import annotations
 
+import hmac
 import threading
 import time
 from dataclasses import dataclass
@@ -18,6 +19,9 @@ from services.common.contracts import APPROVAL_AUDIENCE, APPROVAL_ISSUER, APPROV
 from services.common.httpkit import HttpClient, HttpError, TransportError
 
 APPROVAL_KEY = "approval-signing"
+CLAIMS = frozenset({"iss", "aud", "sub", "customer_id", "op", "draft_sha256", "schema", "iat", "exp", "jti", "kid"})  # LLD §4.1: exact set
+HEADER = frozenset({"alg", "typ", "kid"})  # no jku, x5u, jwk, x5c, crit (LLD §4.4 step 7)
+MAX_TOKEN_BYTES = 2048
 
 
 class ApprovalRejected(Exception):
@@ -59,11 +63,13 @@ class ApprovalVerifier:
     def verify(self, token: str | None, *, oid: str, customer_id: str, draft: dict) -> dict:
         if not token:
             raise ApprovalRejected("missing")
+        if not isinstance(token, str) or len(token) > MAX_TOKEN_BYTES:
+            raise ApprovalRejected("malformed")
         try:
             d = jose.decode_unverified(token)
         except jose.JoseError:
             raise ApprovalRejected("malformed") from None
-        if d.header.get("alg") != "ES256" or d.header.get("typ") != "approval+jwt":
+        if d.header.get("alg") != "ES256" or d.header.get("typ") != "approval+jwt" or set(d.header) != HEADER:
             raise ApprovalRejected("bad_header")
         kid = d.header.get("kid")
         try:
@@ -71,17 +77,23 @@ class ApprovalVerifier:
         except jose.JoseError as e:
             raise ApprovalRejected("bad_signature" if e.code == "bad_signature" else "bad_header") from None
         c, now, skew = d.claims, time.time(), self.cfg.settings.approval_skew_s
+        if CLAIMS - set(c):
+            raise ApprovalRejected("missing_claim")
+        if set(c) - CLAIMS:
+            raise ApprovalRejected("unexpected_claim")
+        ints = all(isinstance(c[k], int) and not isinstance(c[k], bool) for k in ("iat", "exp"))
         checks = [
             (c.get("iss") == APPROVAL_ISSUER, "bad_issuer"),
             (c.get("aud") == APPROVAL_AUDIENCE, "bad_audience"),
             (c.get("op") == APPROVAL_OP, "bad_op"),
             (c.get("schema") == APPROVAL_SCHEMA, "bad_schema"),
             (c.get("kid") == kid, "bad_header"),
-            (isinstance(c.get("exp"), int) and c["exp"] + skew >= now, "expired"),
-            (isinstance(c.get("iat"), int) and c["iat"] - skew <= now and c.get("exp", 0) - c["iat"] <= self.cfg.settings.approval_ttl_s, "bad_lifetime"),
+            (ints, "malformed"),
+            (ints and c["exp"] + skew >= now, "expired"),
+            (ints and c["iat"] - skew <= now and 0 < c["exp"] - c["iat"] <= self.cfg.settings.approval_ttl_s, "bad_lifetime"),
             (c.get("sub") == oid, "wrong_rm"),
             (c.get("customer_id") == customer_id, "wrong_customer"),
-            (c.get("draft_sha256") == draft_sha256(customer_id, draft), "draft_mismatch"),
+            (isinstance(c.get("draft_sha256"), str) and hmac.compare_digest(c["draft_sha256"], draft_sha256(customer_id, draft)), "draft_mismatch"),
             (isinstance(c.get("jti"), str) and 16 <= len(c["jti"]) <= 64, "bad_jti"),
         ]
         for ok, reason in checks:

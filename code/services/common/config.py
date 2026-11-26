@@ -82,6 +82,7 @@ class Settings:
     tool_timeout_s: float = 2.0
     entitlement_ttl_s: float = 60.0
     flags_ttl_s: float = 5.0
+    writes_flag_max_stale_s: float = 900.0  # LLD §4.4 step 3: `writes` must be fresh within 15 min, else writes fail closed
     step_up_max_age_s: int = 600
     approval_ttl_s: int = 300
     approval_skew_s: int = 30

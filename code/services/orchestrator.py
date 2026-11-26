@@ -13,20 +13,18 @@ and writes fail closed). Output is buffered and verified before it is returned (
 from __future__ import annotations
 
 import json
-import threading
 import time
 import urllib.parse
 
 from rm_copilot import tools as t
 from rm_copilot.orchestrator import Copilot
 from services.common.config import StackConfig
-from services.common.contracts import RemoteAuditSink
+from services.common.contracts import JTI_RE, RemoteAuditSink, valid_customer_id
+from services.common.flags import FLAG_DEFAULTS, FeatureFlags  # noqa: F401 - re-exported
 from services.common.httpkit import HttpError, Request, Response, TransportError, request_context, time_left
 from services.common.service import Service
 from services.common.telemetry import current_span
 from services.orchestrator_adapters import ApimChatModel, Budget, HttpGuard, HttpTools, rm_user
-
-FLAG_DEFAULTS = {"uc1": True, "uc2": True, "uc3": True, "writes": False}  # used only if App Configuration was never reachable
 
 
 def decline_code(reason: str) -> str:
@@ -35,32 +33,6 @@ def decline_code(reason: str) -> str:
         if needle in reason:
             return code
     return "other"
-
-
-class FeatureFlags:
-    def __init__(self, svc: "Orchestrator"):
-        self.svc = svc
-        self._cache: dict[str, tuple[float, bool]] = {}
-        self._lock = threading.Lock()
-
-    def enabled(self, flag: str) -> bool:
-        now = time.monotonic()
-        with self._lock:
-            hit = self._cache.get(flag)
-        if hit and hit[0] > now:
-            return hit[1]
-        key = urllib.parse.quote(f".appconfig.featureflag/{flag}", safe="")
-        try:
-            r = self.svc.client.request("GET", f"{self.svc.cfg.url('appconfig')}/kv/{key}?api-version=2023-11-01",
-                                        headers=self.svc.auth_headers("appconfig"), timeout=1.0, peer="appconfig")
-            value = bool(json.loads(r.json()["value"]).get("enabled")) if r.ok else None
-        except (TransportError, KeyError, ValueError):
-            value = None
-        if value is None:
-            return hit[1] if hit else FLAG_DEFAULTS.get(flag, False)
-        with self._lock:
-            self._cache[flag] = (now + self.svc.cfg.settings.flags_ttl_s, value)
-        return value
 
 
 class Orchestrator(Service):
@@ -135,10 +107,18 @@ class Orchestrator(Service):
                 self.m_degraded.inc(use_case=use_case)
         return result
 
+    @staticmethod
+    def _body(r: Request) -> dict:
+        body = r.json()
+        if not isinstance(body, dict):
+            raise HttpError(400, "VALIDATION_FAILED", "the request body must be a JSON object", details={"reason": "SCHEMA"})
+        return body
+
     def _customer(self, r: Request) -> str:
-        cid = str(r.json().get("customer_id", ""))
-        if not cid or len(cid) > 64:
-            raise HttpError(400, "VALIDATION_FAILED", "customer_id is required", details={"reason": "SCHEMA"})
+        # A plain id only: it is interpolated into tool-gateway URLs and names the audit content key (C21).
+        cid = self._body(r).get("customer_id", "")
+        if not valid_customer_id(cid):
+            raise HttpError(400, "VALIDATION_FAILED", "customer_id is required", details={"reason": "SCHEMA", "field": "/customer_id"})
         request_context().data["customer_id"] = cid
         return cid
 
@@ -150,7 +130,7 @@ class Orchestrator(Service):
         return out
 
     def _ask(self, r: Request, user: t.User) -> dict:
-        q = str(r.json().get("question", "")).strip()
+        q = str(self._body(r).get("question", "")).strip()
         if not q or len(q) > 2000:
             raise HttpError(400, "VALIDATION_FAILED", "question is required (max 2000 characters)", details={"reason": "SCHEMA"})
         out = self.copilot.ask(user, q)
@@ -159,13 +139,13 @@ class Orchestrator(Service):
         return out
 
     def _followup(self, r: Request, user: t.User) -> dict:
-        notes = str(r.json().get("notes", ""))
+        notes = str(self._body(r).get("notes", ""))
         if not notes.strip() or len(notes) > 8000:
             raise HttpError(400, "VALIDATION_FAILED", "notes are required (max 8000 characters)", details={"reason": "SCHEMA"})
         return self.copilot.draft_followup(user, self._customer(r), notes)
 
     def _commit(self, r: Request, user: t.User) -> Response:
-        body = r.json()
+        body = self._body(r)
         cid = self._customer(r)
         draft = body.get("draft") or {}
         # The full approved draft (incl. email text) travels unchanged: the token's hash covers all of it.
@@ -173,5 +153,7 @@ class Orchestrator(Service):
         return Response(result.pop("http_status", 200), result)
 
     def _writes(self, r: Request, user: t.User) -> Response:
+        if not JTI_RE.fullmatch(r.params["jti"]):
+            raise HttpError(404, "NOT_FOUND", "no write with this id for you")
         resp = self.tools.write_status(r.params["jti"])
         return Response(resp.status, resp.json())

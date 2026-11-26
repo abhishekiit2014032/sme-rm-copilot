@@ -5,8 +5,10 @@ In production these live in a small versioned contract library used by web-bff (
 """
 from __future__ import annotations
 
+import re
 import secrets
 import time
+import unicodedata
 import urllib.parse
 from dataclasses import dataclass
 
@@ -28,12 +30,48 @@ TOOL_CONTRACT_VERSION = rm_tools.TOOL_CONTRACT_VERSION
 GUARDRAIL_VERSION = guardrails.GUARDRAIL_VERSION
 
 
+# Identifiers that travel in URLs, audit metadata and content-key names. Plain ids only: no separators, so a
+# customer can never be aliased ("x/../y", "x?") into another URL or another crypto-shred key (C21).
+CUSTOMER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,63}$")
+JTI_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
+MAX_TASKS = 10  # LLD §5.1: items t1..t10
+MAX_TEXT = {"call_report": 8000, "email": 8000, "title": 300, "due": 32, "type": 32}
+
+
+def valid_customer_id(value: object) -> bool:
+    return isinstance(value, str) and bool(CUSTOMER_ID_RE.fullmatch(value))
+
+
+def _nfc(value: object) -> str:
+    return unicodedata.normalize("NFC", str(value))
+
+
+def validate_followup(draft: object) -> dict:
+    """Schema `followup/1` (LLD §4.4 step 4): raises ValueError(field) if the submitted draft does not conform."""
+    if not isinstance(draft, dict):
+        raise ValueError("/draft")
+    for k in ("call_report", "email"):
+        if not isinstance(draft.get(k, ""), str) or len(draft.get(k, "")) > MAX_TEXT[k]:
+            raise ValueError(f"/draft/{k}")
+    tasks = draft.get("tasks", [])
+    if not isinstance(tasks, list) or len(tasks) > MAX_TASKS:
+        raise ValueError("/draft/tasks")
+    for i, t in enumerate(tasks):
+        if not isinstance(t, dict):
+            raise ValueError(f"/draft/tasks/{i}")
+        for k in ("type", "title", "due"):
+            if not isinstance(t.get(k, ""), (str, type(None))) or len(t.get(k) or "") > MAX_TEXT[k]:
+                raise ValueError(f"/draft/tasks/{i}/{k}")
+    return followup_payload(draft)
+
+
 def followup_payload(draft: dict) -> dict:
     """The approved draft (schema followup/1): call report, tasks with type and due date, and the email text.
-    Everything the RM approved is bound by the hash, so the compose link can only carry approved text."""
-    tasks = [{"type": str(t.get("type") or "follow_up"), "title": str(t.get("title", "")), "due": str(t.get("due", ""))}
+    Everything the RM approved is bound by the hash, so the compose link can only carry approved text.
+    Strings are Unicode NFC (LLD §4.2 step 2), so canonically equivalent text hashes and is written identically."""
+    tasks = [{"type": _nfc(t.get("type") or "follow_up"), "title": _nfc(t.get("title", "")), "due": _nfc(t.get("due", ""))}
              for t in draft.get("tasks", []) if isinstance(t, dict)]
-    return {"call_report": str(draft.get("call_report", "")), "tasks": tasks, "email": str(draft.get("email", ""))}
+    return {"call_report": _nfc(draft.get("call_report", "")), "tasks": tasks, "email": _nfc(draft.get("email", ""))}
 
 
 def draft_sha256(customer_id: str, draft: dict) -> str:
