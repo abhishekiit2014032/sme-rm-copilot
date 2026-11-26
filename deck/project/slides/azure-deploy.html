@@ -1,0 +1,69 @@
+<section id="azure-deploy">
+<div class="head">
+<p class="eyebrow">2 · DEPLOYMENT AND NETWORK</p>
+<h2 class="title">One region, three zones, private by default</h2>
+</div>
+<div class="row" style="gap:0; align-items:stretch; height:528px">
+<div class="card" style="flex:none; width:230px; background:#FFFFFF; border:2px solid #0F2233; padding:20px; gap:12px">
+<p class="k">THE BANK</p>
+<p class="lt"><b>Systems of record</b></p>
+<p class="lt" style="color:#4A5866">CRM, core ODS, LOS, KYC, policy DMS</p>
+<p class="lt"><b>RM devices</b></p>
+<p class="lt" style="color:#4A5866">Managed, corporate network or Entra Private Access</p>
+<div class="spacer"></div>
+<p class="lt" style="color:#075A4A"><b>ExpressRoute</b> private peering</p>
+</div>
+<div style="width:52px; flex:none; display:flex; flex-direction:column; justify-content:center; align-items:center">
+<x-connector class="cn" head="both" style="width:40px"></x-connector>
+</div>
+<div class="zone" style="flex:1; min-width:0; padding:16px 18px; display:flex; flex-direction:column; gap:12px">
+<p class="zlabel">AZURE UAE NORTH · 3 AVAILABILITY ZONES · NO PUBLIC ENDPOINTS</p>
+<div class="row" style="gap:0; flex:1; align-items:stretch">
+<div class="node edge" style="width:236px; flex:none; justify-content:flex-start; gap:10px; padding:12px 14px">
+<p class="nn">Hub VNet</p>
+<p class="ns">ExpressRoute gateway</p>
+<p class="ns">Azure Firewall egress allow-list</p>
+<p class="ns">Bastion with PIM</p>
+<p class="ns">Private DNS zones</p>
+</div>
+<div style="width:40px; flex:none; display:flex; flex-direction:column; justify-content:center; align-items:center">
+<x-connector class="cn" head="both" style="width:32px"></x-connector>
+</div>
+<div class="node app" style="flex:1; min-width:0; justify-content:flex-start; gap:10px; padding:12px 14px">
+<p class="nn">Spoke VNet rm-copilot</p>
+<p class="box" style="flex:none; padding:8px 14px">App Gateway WAF v2, internal only</p>
+<div class="box" style="flex:none; padding:8px 14px; display:flex; flex-direction:column; gap:8px">
+<p class="lt">AKS private cluster, node pools in</p>
+<div class="row" style="gap:8px"><p class="chip ink" style="flex:none">Zone 1</p><p class="chip ink" style="flex:none">Zone 2</p><p class="chip ink" style="flex:none">Zone 3</p></div>
+</div>
+<p class="box" style="flex:none; padding:8px 14px">APIM Premium, internal VNet, 2 units across zones</p>
+<div class="box" style="flex:none; padding:8px 14px; display:flex; flex-direction:column; gap:4px">
+<p class="lt"><b>Private endpoints</b></p>
+<p class="lt" style="color:#4A5866">Azure OpenAI · AI Search · Cosmos DB · Key Vault · Event Hubs · Storage · App Configuration</p>
+</div>
+</div>
+</div>
+<p class="lt" style="color:#075A4A"><b>AMPLS</b> to Azure Monitor · egress only to Entra ID, Graph, news feed</p>
+</div>
+<div style="width:52px; flex:none; display:flex; flex-direction:column; justify-content:center; align-items:center">
+<x-connector class="cn audit" style="width:40px"></x-connector>
+</div>
+<div class="card amber" style="flex:none; width:250px; padding:20px; gap:12px">
+<p class="k" style="color:#7A4E06">UAE CENTRAL</p>
+<p class="lt"><b>Region loss is business continuity, not hot DR</b></p>
+<p class="lt" style="color:#4A5866">GZRS copy of the audit store and documents</p>
+<p class="lt" style="color:#4A5866">Cosmos DB geo backups</p>
+<p class="lt" style="color:#4A5866">IaC rebuild of the app tier, RTO 24 h best effort</p>
+</div>
+</div>
+<div class="band" style="gap:24px">
+<p class="bk" style="width:220px">ENVIRONMENTS</p>
+<p class="chip" style="align-self:center; flex:none">dev</p>
+<p class="chip" style="align-self:center; flex:none">test</p>
+<p class="chip" style="align-self:center; flex:none">pre-prod</p>
+<p class="chip amber" style="align-self:center; flex:none">prod</p>
+<p class="bv" style="flex:1">Synthetic data only outside prod; one Azure OpenAI each</p>
+</div>
+<p class="pg"></p>
+<aside>Where it runs. One Azure region, UAE North, across three availability zones, and nothing has a public endpoint. On the left is the Bank: systems of record in its data centre, and RMs on managed devices, either on the corporate network or through Entra Private Access. ExpressRoute private peering connects it to the hub. The hub is the Bank's shared landing zone: the ExpressRoute gateway, Azure Firewall with an egress allow-list, Bastion with PIM for break-glass admin, and private DNS zones. The copilot has its own spoke. The internal Application Gateway with WAF is the only way in. The AKS private cluster spreads its node pools over the three zones. APIM Premium runs in internal VNet mode with two units across zones. Every PaaS service is reached through a private endpoint: Azure OpenAI, AI Search, Cosmos DB, Key Vault, Event Hubs, Storage and App Configuration. Telemetry leaves through the Azure Monitor private link scope. The only other egress is Entra ID and Graph on the Microsoft backbone and the licensed news feed through the firewall. Resilience is zone redundancy. Losing the whole region is treated as a business continuity event, not hot disaster recovery: UAE Central is a restricted region, so we keep a geo-redundant copy of the audit store and documents, geo backups of Cosmos DB, and rebuild the app tier from infrastructure as code, with a best-effort recovery time of 24 hours while RMs fall back to their normal CRM screens. There are four environments, dev, test, pre-prod and prod. Only prod sees real data, and each environment has its own Azure OpenAI resource.</aside>
+</section>

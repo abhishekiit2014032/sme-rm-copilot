@@ -12,12 +12,12 @@
 </div>
 <div class="band">
 <p class="bk" style="width:220px">IF A CHECK FAILS</p>
-<p class="bv" style="flex:1">Regenerate once with stricter instructions. If it still fails, decline, show the sources found and offer a hand-off to the credit or product desk.</p>
+<p class="bv" style="flex:1">Regenerate once with stricter instructions if time allows. Otherwise decline, show the sources found and offer a hand-off to the credit or product desk.</p>
 </div>
 <div class="grid3">
-<div class="col"><p class="big" style="font-size:72px">0</p><p class="cap">generated figures: every number has a tool-call source</p></div>
-<div class="col"><p class="big" style="font-size:72px">100%</p><p class="cap">of policy answers carry a clause-level citation</p></div>
-<div class="col"><p class="big" style="font-size:72px">95%+</p><p class="cap">groundedness required on the golden set before release</p></div>
+<div class="col"><p class="big" style="font-size:72px; line-height:1.1">0</p><p class="cap">generated figures: every number has a tool-call source</p></div>
+<div class="col"><p class="big" style="font-size:72px; line-height:1.1">100%</p><p class="cap">of policy answers carry a clause-level citation</p></div>
+<div class="col"><p class="big" style="font-size:72px; line-height:1.1">95%+</p><p class="cap">groundedness (95% lower bound) on the golden set before release</p></div>
 </div>
 <p class="pg"></p>
 <aside>Hallucination cannot be eliminated by prompting alone, so we defend in depth. Ground: the model answers only from what retrieval and tools return. Constrain: anything factual and numeric, such as a balance, a limit or a date, is inserted from tool output rather than generated, and outputs follow a schema. Verify: a separate check breaks the answer into claims and confirms each is supported by its cited source; numbers are matched exactly against tool results. Show: the RM sees the source for every line, so they can check it in a click. Approve: nothing is written without the RM. When a check fails, the system prefers a safe decline over a confident guess. The three numbers at the bottom are design rules and release criteria, not measured results.</aside>

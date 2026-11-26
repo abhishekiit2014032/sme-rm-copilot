@@ -4,17 +4,17 @@ An AI assistant for SME relationship managers, built around three use cases: a *
 
 | Deliverable | Where |
 |---|---|
-| Presentation (24 slides, with speaker notes) | https://claude.ai/artifact/SQ99QXKTFqqkcG8qZvvGB1 (source in `deck/project/`). Export to PowerPoint or PDF from the deck's Share menu. |
+| Presentation (29 slides, with speaker notes) | https://claude.ai/artifact/SQ99QXKTFqqkcG8qZvvGB1 (source in `deck/project/`). Export to PowerPoint or PDF from the deck's Share menu. |
 | Clickable prototype | https://claude.ai/artifact/QMmwAsgAQZnoUtVf2iTkWA (source: `prototype/rm-copilot.html`, which also opens offline in any browser) |
 | Sample code | `code/`. See `code/README.md`. Python standard library only; `python3 demo.py`, `python3 -m evals.run_evals`, `python3 -m unittest` |
 
 ## How the deck maps to the brief
 
 1. **Business problem and use cases**: slides 3–8
-2. **Solution architecture** (layers, data, AI components, RAG, agents, security): slides 9–14
-3. **Delivery approach** (roadmap, risks, success metrics): slides 15–17
-4. **Technical deep dive** (decisions, technology trade-offs, hallucination, evaluation, governance): slides 18–22
-5. **Demo and next steps**: slides 23–24
+2. **Solution architecture** (layers, read and write data flows, component map, Azure deployment and network, data, AI components, RAG, agents, security): slides 9–18
+3. **Delivery approach** (roadmap, risks, success metrics): slides 19–21
+4. **Technical deep dive** (decisions, technology trade-offs on Azure, interface agreements and SLOs, hallucination, evaluation, governance): slides 22–27
+5. **Demo and next steps**: slides 28–29
 
 ## Assumptions to confirm or replace before presenting
 
@@ -22,4 +22,4 @@ An AI assistant for SME relationship managers, built around three use cases: a *
 - Currency is AED and Arabic support is assumed (a UAE-style context). Change these if the bank is elsewhere.
 - All figures marked as a target or illustrative (time split, 4+ hours saved, ~5 FTE, KPI targets) are hypotheses to baseline in discovery, not measured results.
 - All customers, RMs and policy clauses in the deck, prototype and code are fictional.
-- Vendor and model names are listed as options, not commitments.
+- Microsoft Azure (UAE North) is the committed platform and the Azure services named in the deck are the design baseline (`docs/architecture/00-plan.md`). Exact model versions, regional availability and quotas are still to be confirmed with Microsoft.
