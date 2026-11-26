@@ -14,7 +14,7 @@ cd code
 python3 demo.py                         # in-process walk-through of UC1, UC2, UC3 and the controls
 python3 -m evals.run_evals              # release gate on the golden set (passes)
 python3 -m evals.run_evals --careless   # same gate with a hallucinating model (fails, exit 1)
-python3 -m unittest                     # 89 tests: 9 control + 17 platform unit + 43 stack tests over HTTP + 20 red-team tests
+python3 -m unittest                     # 97 tests: 9 control + 17 platform unit + 43 stack tests over HTTP + 28 red-team tests
 python3 stack.py                        # start the whole stack on 127.0.0.1:8700-8716, console at http://127.0.0.1:8712/
 python3 stack.py --latency realistic    # same, with roughly realistic mock latencies
 python3 stack.py --port-base 0 --smoke  # ephemeral ports, run UC1/UC2/UC3 once, verify the audit chain, stop
@@ -50,8 +50,13 @@ workload token; tool-gateway validates both and takes the RM from the user token
 header. Approvals are ES256 tokens signed by Key Vault for web-bff
 (`{iss, aud, sub, customer_id, op, draft_sha256, schema, iat, exp=iat+300, jti, kid}`, hash over the canonical
 approved draft: call report, tasks with type and due date, and the email text); tool-gateway verifies with the
-public key only, creates the `jti` atomically in Cosmos DB (409 = replay), persists the verdict with the draft and
-runs the write saga (one CRM write per item, external reference `jti:item`, Cosmos outbox on timeout/5xx).
+public key only, accepts only key versions listed in App Configuration `rmc:tool-gateway:approval:allowed_kids`
+(rotation with overlap, emergency revocation; else `APPROVAL_INVALID` / `kid_not_allowed`), audits every rejection as
+`approval_rejected` (reason, jti, kid, token hash; never the draft), creates the `jti` atomically in Cosmos DB
+(409 = replay), persists the verdict with the draft and runs the write saga (one CRM write per item, external
+reference `jti:item`, Cosmos outbox on timeout/5xx). Entitlements are cached at most 60 s and evicted at once when
+the CRM publishes a portfolio or delegation change (`POST /crm-events/v1/portfolio` on APIM, identity
+`crm-integration`, role `CrmEvents.Publish` -> Event Hub `crm-portfolio-events` -> tool-gateway consumer).
 
 ### Logical service → mock → real Azure
 
@@ -64,7 +69,7 @@ then does not start that mock (`NAME` upper case, `-` as `_`, e.g. `RMC_URL_CONT
 | Azure Key Vault (Premium) | `azmock/keyvault.py` (8701) | `{vault}/keys/{name}[/{version}]`, `/sign` (ES256), `/verify`, `/unwrapkey` (RSA-OAEP-256), `/secrets/{name}` (7.4) | `RMC_URL_KEYVAULT` |
 | Azure App Configuration | `azmock/appconfig.py` (8702) | `{store}/kv/{key}`, feature flags `.appconfig.featureflag/{uc1,uc2,uc3,writes}` | `RMC_URL_APPCONFIG` |
 | Azure Cosmos DB for NoSQL | `azmock/cosmos.py` (8703) | `/dbs/rmcopilot/colls/{sessions,drafts,jti,approvals,outbox,leases}/docs`, change feed (`A-IM: Incremental feed`) | `RMC_URL_COSMOS` |
-| Azure Event Hubs | `azmock/eventhubs.py` (8704) | `POST {namespace}/audit/messages` (batch) | `RMC_URL_EVENTHUBS` |
+| Azure Event Hubs | `azmock/eventhubs.py` (8704) | `POST {namespace}/{audit,crm-portfolio-events}/messages` (batch) | `RMC_URL_EVENTHUBS` |
 | Azure OpenAI (Foundry), primary / secondary | `azmock/aoai.py` (8705, 8706) | `/openai/deployments/{gen-large,gen-small,embed}/chat/completions`, `/embeddings` (2024-10-21) | `RMC_URL_AOAI_PRIMARY`, `RMC_URL_AOAI_SECONDARY` |
 | Azure API Management | `azmock/apim.py` (8707) | AI gateway (same paths as Azure OpenAI) and system API facade `/{crm,ods,los,kyc,news}/api/...` | `RMC_URL_APIM` |
 | Azure AI Content Safety | `azmock/content_safety.py` (8708) | `/contentsafety/text:shieldPrompt`, `text:analyze`, `text:detectGroundedness` | `RMC_URL_CONTENT_SAFETY` |
@@ -78,7 +83,7 @@ then does not start that mock (`NAME` upper case, `-` as `_`, e.g. `RMC_URL_CONT
 |---|---|---|
 | `web-bff` | `services/web_bff.py` (8712) | token validation, OBO, session + CSRF, Origin check, step-up (`auth_time` ≤ 10 min), deadlines, approval minting via Key Vault, CSP, console, `/api/trace/{request_id}` |
 | `orchestrator` | `services/orchestrator.py` + `orchestrator_adapters.py` (8713) | runs `rm_copilot.Copilot` with HTTP adapters; budgets, degraded mode, feature flags, guardrail floor, audit via tool-gateway with content envelope-encrypted |
-| `tool-gateway` | `services/tool_gateway.py` (8714) | both tokens, entitlement first (cache ≤ 60 s, delegations), parallel fan-out, minimisation, approval verification (`approval_verifier.py`), saga, sole Event Hubs producer |
+| `tool-gateway` | `services/tool_gateway.py` (8714) | both tokens, entitlement first (cache ≤ 60 s, delegations, evicted by `crm-portfolio-events`), `writes` kill switch, key-version allow-list, parallel fan-out, minimisation, approval verification (`approval_verifier.py`), saga, sole Event Hubs producer |
 | `outbox-worker` | `services/outbox_worker.py` (8715) | Cosmos change feed, read-before-retry, backoff, per-item status |
 | `audit-writer` | `services/audit_writer.py` (8716) | hash chain (`verify_chain`), per-customer content keys in Key Vault, crypto-shred, operator APIs |
 | `ingestion-worker` | `services/ingestion_worker.py` (job at start-up) | PII scan, embeddings via APIM, AI Search index |
@@ -123,12 +128,15 @@ APIM policies: `GET|POST /admin/policies` (tokens per minute, daily quota, calls
 - **AI Search**: the semantic reranker score is BM25 × query coverage, not the calibrated 0-4 scale, so
   `MIN_RETRIEVAL_SCORE` must be re-tuned with the golden set on real Azure; OData filters support `eq ne lt le gt
   ge` joined by `and` only; no analyzers (no `ar.microsoft`), scoring profiles, captions or index aliases.
-- **Content Safety / AI Language**: rules and regexes, English only; no ML classifiers, no Arabic PII model;
+- **Content Safety / AI Language**: rules and regexes, English only; no ML classifiers, no Arabic PII model (Arabic-Indic
+  and Eastern Arabic-Indic digits are normalised to ASCII before matching, ADR-012, so structured IDs and phone numbers
+  in those scripts are masked; Arabic names are not);
   groundedness wraps the local claim-by-claim check.
 - **Cosmos DB**: single partition, equality-only SQL, change feed starts at the beginning when no continuation is
   given, bearer auth instead of the SDK's AAD signature scheme, in memory (lost on restart).
-- **Event Hubs**: one partition, one hub (`audit`; LLD splits `audit-events` and `audit-content`), and a mock-only
-  REST receive API standing in for the AMQP consumer; no checkpoint store.
+- **Event Hubs**: one partition, two hubs (`audit`, with the LLD's `audit-events` / `audit-content` split not modelled,
+  and `crm-portfolio-events`), per-hub sender/receiver roles, and a mock-only REST receive API standing in for the AMQP
+  consumer; no checkpoint store (consumers keep an in-memory checkpoint).
 - **Key Vault**: keys in memory, no HSM, no soft-delete/purge protection (DELETE purges), no rotation policy.
 - **Audit store**: a local JSON-lines file, one chain, no WORM storage, no hourly signed anchors, customer id in
   clear in metadata (LLD: HMAC reference). The content cipher is a **mock** (HMAC-SHA256 counter mode,
@@ -158,11 +166,13 @@ APIM policies: `GET|POST /admin/policies` (tokens per minute, daily quota, calls
      local floor (it always runs).
    - **Key Vault**: create `approval-signing` (EC P-256) and `audit-transport` (RSA, `unwrapKey`), assign RBAC as in
      `azmock/keyvault.py` `RBAC`; publish the transport public JWK to App Configuration key
-     `audit/transport-public-key` (done by `stack.py` locally).
+     `audit/transport-public-key` and the accepted approval key versions to `rmc:tool-gateway:approval:allowed_kids`
+     (JSON list of versions; both done by `stack.py` locally). Without that key every commit fails closed (503).
    - **Cosmos DB**: swap `services/common/cosmos_client.py` for the `azure-cosmos` SDK (real auth header and
      partition keys); containers and TTLs as in `azmock/cosmos.py` `CONTAINERS`.
-   - **Event Hubs**: keep the REST send; replace the audit-writer's mock receive call with the AMQP consumer and a
-     checkpoint store.
+   - **Event Hubs**: keep the REST send; replace the mock receive calls (audit-writer on `audit`, tool-gateway on
+     `crm-portfolio-events`) with the AMQP consumer and a checkpoint store. The CRM publishes to APIM
+     `POST /crm-events/v1/portfolio` with its own Entra identity (`CrmEvents.Publish`).
    - **Systems of record and Graph**: the Bank's contracts (LLD §3) behind APIM; Graph needs only `Calendars.ReadBasic`.
 4. Run `python3 -m evals.run_evals` against the real model, then the stack tests, before any release.
 
@@ -177,4 +187,4 @@ APIM policies: `GET|POST /admin/policies` (tokens per minute, daily quota, calls
 | `rm_copilot/ports.py` | Architecture | The two interfaces the workflows depend on (`ToolPort`, `GuardPort`) and their in-process adapters |
 | `rm_copilot/orchestrator.py` | Architecture | UC1 fixed workflow with `{placeholders}`, numeric and policy checks, partial and degraded briefs; UC2 rewrite, decline threshold, verify, retry once only with ≥ 4 s left, passages-only degraded mode; UC3 drafts with deterministic dates and manual degraded path |
 | `evals/` | Evaluation | Golden set and release gate with thresholds |
-| `tests/` | Governance | `test_controls.py` (in-process controls), `test_platform_units.py` (crypto, JOSE, canonical hash, filters, telemetry), `test_stack_e2e.py` and `test_stack_writes_resilience.py` (the stack over HTTP), `test_redteam.py` (attacks on the controls) |
+| `tests/` | Governance | `test_controls.py` (in-process controls), `test_platform_units.py` (crypto, JOSE, canonical hash, filters, telemetry), `test_stack_e2e.py` and `test_stack_writes_resilience.py` (the stack over HTTP), `test_redteam.py` and `test_redteam_followups.py` (attacks on the controls) |

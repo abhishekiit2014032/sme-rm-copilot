@@ -13,7 +13,7 @@ addresses or ML), no Arabic model; offsets are Python string indexes (the servic
 """
 from __future__ import annotations
 
-from rm_copilot.guardrails import PII_PATTERNS
+from rm_copilot.guardrails import pii_spans
 from services.common.config import AUD, StackConfig
 from services.common.httpkit import HttpError, Request
 
@@ -26,16 +26,9 @@ RBAC = {"orchestrator": {"use"}, "ingestion-worker": {"use"}}
 
 
 def find_entities(text: str) -> list[dict]:
-    """Non-overlapping entities in pattern priority order (IDs and IBANs before generic digit runs)."""
-    taken: list[tuple[int, int]] = []
-    out = []
-    for name, rx in PII_PATTERNS.items():
-        for m in rx.finditer(text):
-            if any(m.start() < e and s < m.end() for s, e in taken):
-                continue
-            taken.append((m.start(), m.end()))
-            out.append({"text": m.group(0), "category": CATEGORY[name], "offset": m.start(), "length": m.end() - m.start(), "confidenceScore": 0.85})
-    return sorted(out, key=lambda e: e["offset"])
+    """Non-overlapping entities in pattern priority order (IDs and IBANs before generic digit runs), detected on
+    digit-normalised text (Arabic-Indic and Eastern Arabic-Indic digits, ADR-012); offsets are into the original."""
+    return [{"text": text[s:e], "category": CATEGORY[name], "offset": s, "length": e - s, "confidenceScore": 0.85} for s, e, name in pii_spans(text)]
 
 
 def redact(text: str, entities: list[dict], policy: str) -> str:

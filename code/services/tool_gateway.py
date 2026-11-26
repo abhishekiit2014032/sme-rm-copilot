@@ -4,20 +4,24 @@ Every call carries two tokens: the orchestrator's workload token (`Authorization
 RM's OBO token for this audience (`X-RM-Authorization`, scope `Tools.Read`, `Tools.Write` for commits). The RM is
 the `oid` of that user token; an RM id in a body or header is never trusted. Then, in this order:
 
-1. entitlement check FIRST (CRM entitlements incl. delegations, in-process cache <= 60 s). Denied -> 403
+1. entitlement check FIRST (CRM entitlements incl. delegations, in-process cache <= 60 s, evicted at once by CRM
+   portfolio-change events from Event Hub `crm-portfolio-events`). Denied -> 403
    `NOT_ENTITLED`, and no customer data is requested from any system of record;
 2. reads fan out in parallel through the APIM system API facade, each with a deadline-derived timeout and one
    retry for idempotent reads; only the CRM profile is critical, LOS, ODS, KYC and news degrade to flagged sections;
 3. field minimisation (`rm_copilot.tools.minimise_profile`: no national ID);
 4. one audit event per system call to Event Hubs, acknowledged before the response (fail closed);
 5. writes: `writes` kill switch (App Configuration, fail closed when stale), schema `followup/1` (NFC), entitlement,
-   approval token verification (public key only), atomic `jti` create in Cosmos DB (409 = replay),
+   approval token verification (public key only, key version in the App Configuration allow-list; every rejection is
+   audited as `approval_rejected`), atomic `jti` create in Cosmos DB (409 = replay),
    verdict + draft persisted, saga per item with external reference `jti:item`, Cosmos outbox on timeout/5xx.
 
 Production equivalent: an AKS deployment with workload identity; Redis is not used in Phase 1 (plan §2).
 """
 from __future__ import annotations
 
+import datetime
+import hashlib
 import threading
 import time
 
@@ -26,16 +30,21 @@ from rm_copilot.tools import minimise_profile
 from services.approval_verifier import ApprovalRejected, ApprovalVerifier
 from services.common import crm_writes
 from services.common.config import StackConfig
-from services.common.contracts import AUDIT_EVENTS, APPROVAL_OP, TOOL_CONTRACT_VERSION, EventHubAuditSink, valid_customer_id, validate_followup
+from services.common import jose
+from services.common.contracts import (AUDIT_EVENTS, APPROVAL_OP, JTI_RE, TOOL_CONTRACT_VERSION, EventHubAuditSink, valid_customer_id,
+                                       validate_followup)
 from services.common.cosmos_client import CosmosClient
-from services.common.flags import FeatureFlags
-from services.common.httpkit import HttpError, Request, Response, TransportError, request_context, run_parallel, time_left
+from services.common.flags import ConfigValues, FeatureFlags
+from services.common.httpkit import (HttpError, Request, RequestContext, Response, TransportError, request_context, run_parallel,
+                                     set_request_context, time_left)
 from services.common.service import Service
 from services.common.telemetry import current_span
 
 SEARCH_API_VERSION = "2024-07-01"
 CRITICAL_SOURCES = ("crm",)  # LLD §2.3: only the CRM profile is critical; other sections degrade
 SECTION = {"los": "facilities", "ods": "signals", "kyc": "kyc", "news": "news"}
+ALLOWED_KIDS_KEY = "rmc:tool-gateway:approval:allowed_kids"  # LLD §4.7: key versions accepted for approval tokens
+PORTFOLIO_HUB = "crm-portfolio-events"                       # plan §4.1 step 4, LLD §7.3
 
 
 class SourceError(Exception):
@@ -51,9 +60,12 @@ class ToolGateway(Service):
         super().__init__(cfg, response_headers={"x-tool-contract": TOOL_CONTRACT_VERSION})
         self.cosmos = CosmosClient(self)
         self.audit = EventHubAuditSink(cfg, self.client, self.tokens, self.name)  # the only Event Hubs producer
-        self.verifier = ApprovalVerifier(cfg, self.client, lambda: self.auth_headers("vault"))
+        self.config = ConfigValues(self)
+        self.verifier = ApprovalVerifier(cfg, self.client, lambda: self.auth_headers("vault"), allowed_kids=lambda: self.config.get(ALLOWED_KIDS_KEY))
         self.flags = FeatureFlags(self)  # the writes kill switch is enforced here too (LLD §4.4 step 3), not only upstream
         self._entitlements: dict[str, tuple[float, dict]] = {}
+        self._evicted: dict[str, float] = {}  # oid -> monotonic time of the last portfolio-change event
+        self._portfolio_seq = 0               # Event Hubs checkpoint of `crm-portfolio-events` (in memory, like the mock)
         self._lock = threading.Lock()
         m = self.metrics
         self.m_denied = m.counter("entitlement_denials_total", "Requests denied by the entitlement check", ())
@@ -62,6 +74,8 @@ class ToolGateway(Service):
         self.m_rejected = m.counter("approval_tokens_rejected_total", "Approval tokens rejected", ("reason",))
         self.m_writes = m.counter("crm_write_items_total", "CRM write items by first-attempt outcome", ("outcome",))
         self.m_sources = m.counter("source_calls_total", "System-of-record calls via APIM", ("system", "outcome"))
+        self.m_portfolio = m.counter("rmc_portfolio_events_total", "CRM portfolio/delegation change events consumed", ("type",))
+        self.m_portfolio_lag = m.gauge("rmc_portfolio_event_lag_seconds", "CRM event time to consumption by tool-gateway", ())
         a = self.app.route
         a("GET", "/tools/customers/{cid}/brief-inputs")(self._brief_inputs)
         a("GET", "/tools/customers/{cid}/profile")(self._profile)
@@ -70,6 +84,9 @@ class ToolGateway(Service):
         a("POST", "/tools/customers/{cid}/call-reports")(self._commit)
         a("GET", "/tools/writes/{jti}")(self._write_status)
         a("POST", "/internal/v1/audit")(self._append_audit)
+
+    def start(self) -> None:
+        self.run_loop("portfolio-events", self.cfg.settings.portfolio_poll_s, self.consume_portfolio_events)
 
     # ------------------------------------------------------------------ identity and entitlements
     def _auth(self, r: Request, write: bool = False) -> dict:
@@ -87,14 +104,39 @@ class ToolGateway(Service):
             self.m_ent_cache.inc(result="hit")
             return hit[1]
         self.m_ent_cache.inc(result="miss")
+        started = time.monotonic()
         try:
             rec = self._sor_json("crm", f"/crm/api/v1/rms/{oid}/entitlements", oid, retry=True)
         except SourceError:
             raise HttpError(503, "DEPENDENCY_UNAVAILABLE", "cannot confirm entitlements right now", details={"reason": "ENTITLEMENT_SOURCE"}) from None
         rec["allowed"] = sorted(set(rec.get("customers", [])) | {d["customer"] for d in rec.get("delegations", [])})
         with self._lock:
-            self._entitlements[oid] = (now + self.cfg.settings.entitlement_ttl_s, rec)
+            if self._evicted.get(oid, -1.0) < started:  # a change event during the read: use the answer once, do not cache it
+                self._entitlements[oid] = (now + self.cfg.settings.entitlement_ttl_s, rec)
         return rec
+
+    def consume_portfolio_events(self) -> int:
+        """Evict the cached entitlements of every RM named in a `portfolio.changed` / `delegation.changed` event, so a
+        portfolio change takes effect at once instead of after the cache TTL (plan §4.1 step 4, C22)."""
+        set_request_context(RequestContext("portfolio-consumer"))
+        r = self.client.request("GET", f"{self.cfg.url('eventhubs')}/{PORTFOLIO_HUB}/consumergroups/tool-gateway/partitions/0/events"
+                                f"?fromSequenceNumber={self._portfolio_seq}&maxCount=200", headers=self.auth_headers("eventhubs"), timeout=2.0, peer="eventhubs")
+        events = r.json().get("value", []) if r.ok else []
+        for e in events:
+            body = e.get("body") if isinstance(e.get("body"), dict) else {}
+            oid = body.get("rm_oid")
+            if isinstance(oid, str):
+                with self._lock:
+                    self._entitlements.pop(oid, None)
+                    self._evicted[oid] = time.monotonic()
+            self.m_portfolio.inc(type=str(body.get("type", "unknown"))[:32])
+            try:
+                occurred = datetime.datetime.fromisoformat(str(body.get("occurred_at")).replace("Z", "+00:00")).timestamp()
+                self.m_portfolio_lag.set(max(0.0, round(time.time() - occurred, 3)))
+            except ValueError:
+                pass
+            self._portfolio_seq = e["sequenceNumber"] + 1
+        return len(events)
 
     def require_entitled(self, oid: str, customer_id: str, tool: str) -> dict:
         ent = self.entitlements(oid)
@@ -219,9 +261,23 @@ class ToolGateway(Service):
         return {"value": out}
 
     # ------------------------------------------------------------------ write API
-    def _reject(self, reason: str) -> HttpError:
+    def _audit_rejected(self, reason: str, token: object, customer_id: str) -> None:
+        """LLD §4.4: `approval_rejected` {reason, kid, jti if parseable, token_sha256}. Never the draft."""
+        jti = kid = None
+        if isinstance(token, str):
+            try:
+                d = jose.decode_unverified(token)
+                jti = d.claims.get("jti") if isinstance(d.claims.get("jti"), str) and JTI_RE.fullmatch(d.claims["jti"]) else None
+                kid = str(d.header.get("kid") or "").rsplit("/", 1)[-1][:64] or None
+            except jose.JoseError:
+                pass
+        self.audit.emit("approval_rejected", op=APPROVAL_OP, reason=reason, jti=jti, kid=kid,
+                        token_sha256=hashlib.sha256(token.encode()).hexdigest() if isinstance(token, str) else None,
+                        customer=customer_id if valid_customer_id(customer_id) else None)
+
+    def _reject(self, reason: str, token: object, customer_id: str) -> HttpError:
         self.m_rejected.inc(reason=reason)
-        self.audit.emit("write_blocked", op=APPROVAL_OP, reason=reason)
+        self._audit_rejected(reason, token, customer_id)
         if reason == "missing":
             return HttpError(401, "APPROVAL_REQUIRED", "This write needs the RM's approval.")
         return HttpError(403, "APPROVAL_INVALID", "The approval is not valid for this write.", details={"reason": reason})
@@ -243,12 +299,12 @@ class ToolGateway(Service):
         try:
             claims = self.verifier.verify(body.get("approval_token"), oid=oid, customer_id=cid, draft=draft)
         except ApprovalRejected as e:
-            raise self._reject(e.reason) from None
+            raise self._reject(e.reason, body.get("approval_token"), cid) from None
         jti = claims["jti"]
         created = self.cosmos.create("jti", {"id": jti, "oid": oid, "exp": claims["exp"]})
         if created.status == 409:
             self.m_rejected.inc(reason="replayed")
-            self.audit.emit("write_blocked", op=APPROVAL_OP, reason="replayed")
+            self._audit_rejected("replayed", body.get("approval_token"), cid)
             raise HttpError(409, "REPLAYED", "This approval was already used.", details={"jti": jti, "items": self._items(jti, oid)})
         if not created.ok:
             raise HttpError(503, "DEPENDENCY_UNAVAILABLE", "cannot record the approval", details={"reason": "STATE_STORE"})

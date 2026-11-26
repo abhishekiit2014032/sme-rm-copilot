@@ -50,3 +50,32 @@ class FeatureFlags:
         with self._lock:
             self._cache[flag] = (now + self.svc.cfg.settings.flags_ttl_s, now, value)
         return value
+
+
+class ConfigValues:
+    """Plain JSON key-values from App Configuration (e.g. `rmc:tool-gateway:approval:allowed_kids`), cached
+    `flags_ttl_s`; on an outage the last known value is used; never read -> None (the caller fails closed)."""
+
+    def __init__(self, svc: "Service"):
+        self.svc = svc
+        self._cache: dict[str, tuple[float, object]] = {}
+        self._lock = threading.Lock()
+
+    def get(self, key: str) -> object | None:
+        now = time.monotonic()
+        with self._lock:
+            hit = self._cache.get(key)
+        if hit and hit[0] > now:
+            return hit[1]
+        try:
+            r = self.svc.client.request("GET", f"{self.svc.cfg.url('appconfig')}/kv/{urllib.parse.quote(key, safe='')}?api-version=2023-11-01",
+                                        headers=self.svc.auth_headers("appconfig"), timeout=1.0, peer="appconfig")
+            ok = r.ok
+            value = json.loads(r.json()["value"]) if ok else None
+        except (TransportError, KeyError, ValueError, TypeError):
+            ok, value = False, None
+        if not ok:
+            return hit[1] if hit else None
+        with self._lock:
+            self._cache[key] = (now + self.svc.cfg.settings.flags_ttl_s, value)
+        return value

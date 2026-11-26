@@ -2,7 +2,7 @@
 
 The verifier holds only the PUBLIC key (fetched from Key Vault by `kid`, cached) and checks, in order:
 size <= 2 KiB, structure, header members exactly {alg, typ, kid}, `alg` = ES256 (never `none` or HMAC); `kid` under
-the configured vault and key; signature; the exact claim set (LLD §4.1); `iss` = web-bff; `aud` = tool-gateway;
+the configured vault and key; key version in the App Configuration allow-list; signature; the exact claim set (LLD §4.1); `iss` = web-bff; `aud` = tool-gateway;
 `op` and `schema`; `exp` / `iat` with 30 s skew and 0 < exp - iat <= 300; `sub` = the `oid` of the RM token on the call;
 `customer_id` = the customer in the request; `draft_sha256` = hash of the canonical submitted draft (constant time). The `jti` replay check (atomic create in Cosmos DB) is done by the caller after these pass.
 """
@@ -35,6 +35,7 @@ class ApprovalVerifier:
     cfg: StackConfig
     client: HttpClient
     vault_headers: callable  # () -> auth headers for Key Vault
+    allowed_kids: callable = None  # () -> list of allowed key versions (or kid URLs) from App Configuration, None if unknown
 
     def __post_init__(self) -> None:
         self._keys: dict[str, jose.VerifyingKey] = {}
@@ -44,6 +45,7 @@ class ApprovalVerifier:
         prefix = f"{self.cfg.url('keyvault')}/keys/{APPROVAL_KEY}/"
         if not isinstance(kid, str) or not kid.startswith(prefix) or "/" in kid[len(prefix):]:
             raise ApprovalRejected("unknown_kid")
+        self._check_allowed(kid)
         with self._lock:
             if kid in self._keys:
                 return self._keys[kid]
@@ -59,6 +61,18 @@ class ApprovalVerifier:
         with self._lock:
             self._keys[kid] = key
         return key
+
+    def _check_allowed(self, kid: object) -> None:
+        """LLD §4.4 step 7 / §4.7: only key versions in the App Configuration allow-list are accepted, so a version can
+        be revoked in an emergency (effective within `flags_ttl_s`) and rotation runs with an overlap of two."""
+        if self.allowed_kids is None:
+            return
+        allowed = self.allowed_kids()
+        if not isinstance(allowed, list):
+            raise HttpError(503, "DEPENDENCY_UNAVAILABLE", "the approval key allow-list is unavailable", details={"reason": "APP_CONFIG"})
+        versions = {str(k).rsplit("/", 1)[-1] for k in allowed}
+        if not isinstance(kid, str) or kid.rsplit("/", 1)[-1] not in versions:
+            raise ApprovalRejected("kid_not_allowed")
 
     def verify(self, token: str | None, *, oid: str, customer_id: str, draft: dict) -> dict:
         if not token:

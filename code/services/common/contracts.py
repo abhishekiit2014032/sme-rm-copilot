@@ -98,7 +98,7 @@ FOLLOWUP_SUBJECT = "Follow-up from today's meeting"
 AUDIT_SCHEMA = "audit/1"
 AUDIT_EVENTS = frozenset({
     "tool_call", "entitlement_denied", "brief_built", "groundedness", "declined", "degraded", "injection_flagged", "followup_drafted",
-    "model_call", "approval_issued", "approval_verified", "write_blocked", "write_committed", "write_queued", "write_failed",
+    "model_call", "approval_issued", "approval_verified", "approval_rejected", "write_blocked", "write_committed", "write_queued", "write_failed",
 })
 
 

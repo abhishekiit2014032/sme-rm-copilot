@@ -36,7 +36,8 @@ from ._base import Mock
 
 CONSOLE_CLIENT_ID = "rm-copilot-console"
 APP_ID_URIS = {"web-bff": AUD["web-bff"], "orchestrator": AUD["orchestrator"], "tool-gateway": AUD["tool-gateway"]}
-WORKLOADS = ("web-bff", "orchestrator", "tool-gateway", "outbox-worker", "audit-writer", "ingestion-worker", "apim", "ops-admin")
+WORKLOADS = ("web-bff", "orchestrator", "tool-gateway", "outbox-worker", "audit-writer", "ingestion-worker", "apim", "ops-admin",
+             "crm-integration")
 # App roles granted to workload identities on our own APIs (client credentials).
 APP_ROLES = {
     "web-bff": {AUD["orchestrator"]: ["Copilot.Invoke"]},
@@ -45,6 +46,7 @@ APP_ROLES = {
     "outbox-worker": {AUD["apim"]: ["SystemApis.Read", "SystemApis.Write"], AUD["tool-gateway"]: ["Audit.Append"]},
     "ingestion-worker": {AUD["apim"]: ["AiGateway.Invoke"]},
     "ops-admin": {AUD["audit"]: ["Audit.ReadContent", "Audit.Erase"]},  # PIM-activated operator role in production
+    "crm-integration": {AUD["apim"]: ["CrmEvents.Publish"]},  # the CRM's publisher identity (LLD §7.3 rmc-crm-events)
 }
 OWN_APIS = {AUD["web-bff"], AUD["orchestrator"], AUD["tool-gateway"], AUD["apim"], AUD["audit"]}
 # Delegated permissions a client may obtain for the signed-in RM (OBO and sign-in).

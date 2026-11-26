@@ -86,14 +86,17 @@ class Stack:
             # Pipeline step in production: publish the audit transport public key where producers can read it.
             jwk = self.components["keyvault"].public_jwk("audit-transport")
             self.components["appconfig"].put_value("audit/transport-public-key", json.dumps(jwk), "application/json")
+            # Pipeline step (LLD §4.7): the approval key versions tool-gateway accepts; ops edit it to rotate or revoke.
+            version = self.components["keyvault"].public_jwk("approval-signing")["kid"].rsplit("/", 1)[-1]
+            self.components["appconfig"].put_value("rmc:tool-gateway:approval:allowed_kids", json.dumps([version]), "application/json")
         self.ingestion = IngestionWorker(self.cfg).run()
-        for n in ("audit-writer", "outbox-worker"):
+        for n in ("audit-writer", "outbox-worker", "tool-gateway"):
             if n in self.components:
                 self.components[n].start()
         return self
 
     def stop(self) -> None:
-        for n in ("outbox-worker", "audit-writer"):
+        for n in ("tool-gateway", "outbox-worker", "audit-writer"):
             if n in self.components:
                 self.components[n].stop()
         for s in self.servers.values():

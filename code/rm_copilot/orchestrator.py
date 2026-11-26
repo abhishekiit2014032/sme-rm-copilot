@@ -83,7 +83,7 @@ class Copilot:
                 watch.append(note)
 
         degraded = None
-        masked_facts, _ = self.guard.mask_pii(json.dumps(facts))
+        masked_facts, _ = self.guard.mask_pii(json.dumps(facts, ensure_ascii=False))  # mask what the model reads, not \u escapes
         try:
             raw = self.llm.complete(BRIEF_SYSTEM, "FACTS:" + masked_facts)
         except ModelUnavailable as e:

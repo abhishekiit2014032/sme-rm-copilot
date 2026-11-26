@@ -22,6 +22,11 @@ System API facade  GET|POST /{system}/api/{path}   for crm, ods, los, kyc, news
   breaker per backend (5 failures in 30 s by default), timeout from the deadline, and the RM's `oid` forwarded in
   a header signed by APIM (`x-apim-rm-oid|ts|sig`) for legacy systems that cannot take Entra tokens (plan §3.4).
 
+CRM events API (`rmc-crm-events`, LLD §7.3)   POST /crm-events/v1/portfolio
+  `validate-jwt` (CRM integration identity, role `CrmEvents.Publish`), `validate-content` (ids only: event_id, type,
+  occurred_at, rm_oid, customer_id, change; <= 100 events, <= 64 KiB), forwarded to Event Hub `crm-portfolio-events`
+  with APIM's managed identity; 202 only after Event Hubs accepts, else 503 (the CRM retries).
+
 Admin (mock only): GET/POST /admin/policies, POST /admin/reset (counters and breakers).
 Differences: in-memory counters on one "unit" (real APIM counters are per region/unit, see plan §10 item 6),
 error bodies use APIM's `{"statusCode", "message"}` shape, no products/subscriptions, no semantic cache (off by design).
@@ -37,6 +42,7 @@ from dataclasses import dataclass
 
 from services.common.auth import TokenProvider
 from services.common.config import AUD, SOR_SYSTEMS, StackConfig, scope
+from services.common.contracts import valid_customer_id
 from services.common.httpkit import HttpError, Request, Response, TransportError, time_left
 from services.common.resilience import STATE_CODE, CircuitBreaker
 from services.common.telemetry import current_span
@@ -89,6 +95,7 @@ class ApimMock(Mock):
         a("POST", "/openai/deployments/{deployment}/embeddings")(self._ai)
         a("GET", "/{system}/api/{rest:path}")(self._sor)
         a("POST", "/{system}/api/{rest:path}")(self._sor)
+        a("POST", "/crm-events/v1/portfolio")(self._crm_events)
         a("GET", "/admin/policies")(lambda r: {**self.policies, "breakers": self._breaker_states()})
         a("POST", "/admin/policies")(self._set_policies)
         a("POST", "/admin/reset")(lambda r: (self.reset(), {"status": "reset"})[1])
@@ -210,6 +217,33 @@ class ApimMock(Mock):
         if sp:
             sp.set(**{"rmc.reason": reason})
         return _apim_error(503, "No backend in the pool is available.", {"x-apim-failover": reason, **(last.headers if last else {})})
+
+    # ------------------------------------------------------------------ CRM events API (rmc-crm-events, LLD §7.3)
+    def _crm_events(self, r: Request) -> Response:
+        """CRM -> APIM -> Event Hub `crm-portfolio-events`: ids only, schema-validated, 202 only after Event Hubs accepts."""
+        self.caller(r, AUD["apim"], scopes=("CrmEvents.Publish",), app_only=True, azp=("crm-integration",))
+        body = r.json() if len(r.body) <= 64 * 1024 else None
+        events = body.get("events") if isinstance(body, dict) else None
+        if not isinstance(events, list) or not 1 <= len(events) <= 100 or not all(self._crm_event_ok(e) for e in events):
+            self.m_reject.inc(policy="validate-content")
+            return _apim_error(400, "The request body does not match the portfolio event schema.")
+        try:
+            up = self.client.request("POST", f"{self.cfg.url('eventhubs')}/crm-portfolio-events/messages",
+                                     json_body=[{"Body": e, "UserProperties": {}} for e in events],
+                                     headers={"authorization": "Bearer " + self.tokens.app_token(scope("eventhubs")),
+                                              "content-type": "application/vnd.microsoft.servicebus.json"}, timeout=2.0, peer="eventhubs")
+        except TransportError:
+            up = None
+        if up is None or up.status != 201:
+            return _apim_error(503, "The event stream is unavailable; retry.")
+        return Response(202, {"accepted": len(events)})
+
+    @staticmethod
+    def _crm_event_ok(e: object) -> bool:
+        keys = {"event_id", "type", "occurred_at", "rm_oid", "customer_id", "change"}
+        return (isinstance(e, dict) and set(e) == keys and e["type"] in ("portfolio.changed", "delegation.changed")
+                and e["change"] in ("added", "removed", "updated") and valid_customer_id(e["customer_id"])
+                and all(isinstance(e[k], str) and 0 < len(e[k]) <= 64 for k in ("event_id", "occurred_at", "rm_oid")))
 
     # ------------------------------------------------------------------ system API facade
     def _sor(self, r: Request) -> Response:

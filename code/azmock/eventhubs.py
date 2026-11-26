@@ -8,8 +8,9 @@ The W3C trace context travels as the `Diagnostic-Id`/`traceparent` application p
 Mock-only read API, standing in for the AMQP consumer client (Event Hubs has no REST receive):
   GET /{hub}/consumergroups/{group}/partitions/0/events?fromSequenceNumber=N&maxCount=M
 
-Differences: one partition, in memory (no Capture, no retention period, no zone redundancy), no checkpoint store
-(the consumer keeps its own checkpoint). RBAC: tool-gateway = Data Sender (sole producer), audit-writer = Data Receiver.
+Hubs: `audit` and `crm-portfolio-events`. Differences: one partition, in memory (no Capture, no retention period, no zone redundancy), no checkpoint store
+(the consumer keeps its own checkpoint). RBAC per hub: `audit` tool-gateway = Data Sender (sole producer), audit-writer = Data Receiver;
+`crm-portfolio-events` APIM = Data Sender, tool-gateway = Data Receiver.
 """
 from __future__ import annotations
 
@@ -22,7 +23,11 @@ from services.common.httpkit import HttpError, Request, Response
 
 from ._base import Mock
 
-RBAC = {"tool-gateway": {"send"}, "audit-writer": {"receive"}}  # tool-gateway is the only producer (LLD §6.4)
+# Per-entity roles: tool-gateway is the only audit producer (LLD §6.4); APIM is the only sender to
+# `crm-portfolio-events` (LLD §7.3) and tool-gateway its only consumer (entitlement invalidation, plan §4.1 step 4).
+RBAC = {"tool-gateway": {"send:audit", "receive:crm-portfolio-events"}, "audit-writer": {"receive:audit"},
+        "apim": {"send:crm-portfolio-events"}}
+HUBS = ("audit", "crm-portfolio-events")
 
 
 class EventHubsMock(Mock):
@@ -30,14 +35,14 @@ class EventHubsMock(Mock):
 
     def __init__(self, cfg: StackConfig):
         super().__init__(cfg)
-        self._hubs: dict[str, list[dict]] = {"audit": []}
+        self._hubs: dict[str, list[dict]] = {h: [] for h in HUBS}
         self._lock = threading.Lock()
         self.app.route("POST", "/{hub}/messages")(self._send)
         self.app.route("GET", "/{hub}/consumergroups/{group}/partitions/{partition}/events")(self._receive)
 
     def _send(self, r: Request) -> Response:
         self.simulate("eventhubs")
-        self.rbac(self.caller(r, AUD["eventhubs"]), RBAC, "send")
+        self.rbac(self.caller(r, AUD["eventhubs"]), RBAC, "send:" + r.params["hub"])
         hub = self._hubs.get(r.params["hub"])
         if hub is None:
             raise HttpError(404, "EntityNotFound", "event hub not found")
@@ -52,7 +57,7 @@ class EventHubsMock(Mock):
         return Response(201, None)
 
     def _receive(self, r: Request) -> dict:
-        self.rbac(self.caller(r, AUD["eventhubs"]), RBAC, "receive")
+        self.rbac(self.caller(r, AUD["eventhubs"]), RBAC, "receive:" + r.params["hub"])
         hub = self._hubs.get(r.params["hub"])
         if hub is None or r.params["partition"] != "0":
             raise HttpError(404, "EntityNotFound", "event hub or partition not found")

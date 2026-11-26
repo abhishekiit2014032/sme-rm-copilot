@@ -22,7 +22,7 @@ PII_PATTERNS = {
     "phone": re.compile(r"(?:(?:\+|\b00)971|\b971)[ -]?(?:\(0\)[ -]?)?\(?(?:5\d|[2-9])\)?(?:[ -]?\d){7}\b"
                        r"|(?:\(0|\b0)(?:5\d|[2-9])\)?(?:[ -]?\d){7}\b"),
 }
-GUARDRAIL_VERSION = "guardrails/2026.11.3"  # recorded in audit lineage; bump on any rule change
+GUARDRAIL_VERSION = "guardrails/2026.11.4"  # recorded in audit lineage; bump on any rule change
 
 # Number words the model must not write itself (plan C19). English plus basic Arabic, with the common
 # attached prefixes (wa-, bi-, li-). Digits in any script are caught by \d (Unicode-aware).
@@ -55,13 +55,31 @@ def quarantine_quotes(text: str) -> tuple[str, list[str]]:
     return re.sub(r'"[^"]*"|“[^”]*”', repl, text), removed
 
 
-def mask_pii(text: str) -> tuple[str, list[str]]:
-    found = []
+# ADR-012: Arabic-Indic (U+0660-0669) and Eastern Arabic-Indic (U+06F0-06F9) digits are normalised to ASCII for
+# detection. The mapping is one character to one character, so spans found in the normalised text mask the original.
+DIGITS_TO_ASCII = str.maketrans("\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669"
+                                "\u06f0\u06f1\u06f2\u06f3\u06f4\u06f5\u06f6\u06f7\u06f8\u06f9", "01234567890123456789")
+
+
+def normalise_digits(text: str) -> str:
+    return text.translate(DIGITS_TO_ASCII)
+
+
+def pii_spans(text: str) -> list[tuple[int, int, str]]:
+    """Non-overlapping (start, end, name) in pattern priority order, detected on the digit-normalised text."""
+    norm, taken = normalise_digits(text), []
     for name, pattern in PII_PATTERNS.items():
-        if pattern.search(text):
-            found.append(name)
-            text = pattern.sub(f"[{name.upper()}]", text)
-    return text, found
+        for m in pattern.finditer(norm):
+            if not any(m.start() < e and s < m.end() for s, e, _ in taken):
+                taken.append((m.start(), m.end(), name))
+    return sorted(taken)
+
+
+def mask_pii(text: str) -> tuple[str, list[str]]:
+    spans = pii_spans(text)
+    for s, e, name in reversed(spans):
+        text = text[:s] + f"[{name.upper()}]" + text[e:]
+    return text, [n for n in PII_PATTERNS if any(name == n for _, _, name in spans)]
 
 
 def _numbers(text: str) -> set[str]:
