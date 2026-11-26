@@ -60,7 +60,7 @@ svg.wires { position: absolute; left: 0; top: 0; pointer-events: none; overflow:
 <body>
 
 <div class="canvas" id="azure" style="width:2440px; height:1540px"></div>
-<div class="canvas" id="local" style="width:2140px; height:1240px"></div>
+<div class="canvas" id="local" style="width:2140px; height:1262px"></div>
 
 <script>
 const NS = 'http://www.w3.org/2000/svg';
@@ -132,11 +132,11 @@ build('azure', {
     { cls: 'gw', t: 'App Gateway WAF v2', s: 'internal ingress only', r: [360, 330, 220, 100] },
 
     { cls: 'svc', t: 'web-bff', s: 'SSO, OBO, CSRF, step-up · signs approvals', r: [640, 290, 260, 100] },
-    { cls: 'svc', t: 'orchestrator', s: 'workflows, budgets, guardrails, checks · holds no key', r: [940, 290, 260, 100] },
+    { cls: 'svc', t: 'orchestrator', s: 'supervisor + 3 agents, budgets, guardrails, checks · holds no key', r: [940, 290, 260, 100] },
     { cls: 'svc', t: 'audit-writer', s: 'hash chain, seals, crypto-shred', r: [640, 450, 260, 100] },
     { cls: 'svc', t: 'tool-gateway', s: 'entitlements first · verifies approvals · only audit producer', r: [940, 450, 260, 110] },
     { cls: 'svc', t: 'outbox-worker', s: 'read-before-retry CRM writes', r: [640, 610, 260, 100] },
-    { cls: 'svc', t: 'ingestion-worker', s: 'policy docs to AI Search · eval-runner is a CI job', r: [940, 610, 260, 100] },
+    { cls: 'svc', t: 'ingestion-worker', s: 'policy docs to AI Search · eval-runner: CI gate + nightly job', r: [940, 610, 260, 100] },
 
     { cls: 'gw', t: 'AI gateway', s: 'token limits per RM, failover, token metrics', r: [1280, 290, 260, 100] },
     { cls: 'gw', t: 'System API facade', s: 'validate-jwt, signed RM header, quotas', r: [1280, 455, 260, 100] },
@@ -211,7 +211,7 @@ build('azure', {
 /* ------------------------------------------------------------------ Current application (local stack) */
 build('local', {
   title: 'Current application · the working stack (python3 stack.py)',
-  subtitle: 'Every box is its own HTTP server on 127.0.0.1. Mocks speak the real Azure REST shapes, so pointing a base URL at Azure replaces a mock. 97 tests, evals gate, load test.',
+  subtitle: 'Every box is its own HTTP server on 127.0.0.1. Mocks speak the real Azure REST shapes, so pointing a base URL at Azure replaces a mock. 122+ tests, RAGAS release gate, load test.',
   groups: [
     { cls: 'ext', label: 'Browser', r: [40, 180, 260, 250] },
     { cls: 'aks', label: 'Copilot services · AKS pods in production', r: [340, 180, 660, 600] },
@@ -227,44 +227,48 @@ build('local', {
     { cls: 'pass', t: 'Console', s: 'console.html · sign in as a fictional RM · run UC1, UC2, UC3, approve', r: [60, 235, 220, 170] },
 
     { cls: 'svc', t: 'web-bff :8712', s: 'Entra token, OBO, session, CSRF, step-up, approval signing via Key Vault, CSP', r: [360, 235, 300, 130] },
-    { cls: 'svc', t: 'orchestrator :8713', s: 'runs the rm_copilot workflows: budgets, deadlines, guardrails, placeholders, degraded mode', r: [690, 235, 290, 130] },
+    { cls: 'svc', t: 'orchestrator :8713', s: 'supervisor + brief, policy, follow-up agents · budgets, guardrails, checks, checkpoints', r: [690, 235, 290, 130] },
     { cls: 'svc', t: 'outbox-worker :8715', s: 'Cosmos change feed, read-before-retry, kill switch holds writes', r: [360, 420, 300, 140] },
-    { cls: 'svc', t: 'tool-gateway :8714', s: 'both tokens, entitlement first, approval verify, saga, only audit producer', r: [690, 420, 290, 140] },
+    { cls: 'svc', t: 'tool-gateway :8714', s: 'MCP servers: customer-data, policy-search, crm-drafts, memory · entitlement first · approval verify, saga', r: [690, 420, 290, 140] },
     { cls: 'svc', t: 'audit-writer :8716', s: 'hash chain, per-customer keys, crypto-shred', r: [360, 615, 300, 130] },
     { cls: 'svc', t: 'ingestion-worker', s: 'start-up job: PII scan, embeddings, index policies', r: [690, 615, 290, 130] },
 
-    { cls: 'gw', t: 'AI gateway', s: 'validate-jwt, token limit per RM, failover if 4 s remain', r: [1070, 235, 290, 130] },
-    { cls: 'gw', t: 'System API facade', s: 'signed RM header, per-backend limits', r: [1070, 420, 290, 140] },
-    { cls: 'gw', t: 'CRM events API', s: 'portfolio changes to Event Hubs', r: [1070, 615, 290, 130] },
+    { cls: 'gw', t: 'AI gateway', s: 'validate-jwt, token limit per RM, failover if 4 s remain', r: [1070, 235, 290, 115] },
+    { cls: 'gw', t: 'MCP gateway /mcp/{server}', s: 'agent + user token, tools/list filtered, per-agent limits', r: [1070, 375, 290, 115] },
+    { cls: 'gw', t: 'System API facade', s: 'signed RM header, per-backend limits', r: [1070, 515, 290, 110] },
+    { cls: 'gw', t: 'CRM events API', s: 'portfolio changes to Event Hubs', r: [1070, 650, 290, 110] },
 
     { cls: 'ai', t: 'primary :8705', s: 'gen-large · gen-small · embed', r: [1450, 235, 290, 90] },
     { cls: 'ai', t: 'secondary :8706', s: 'same deployments', r: [1450, 340, 290, 90] },
     { cls: 'pass', t: 'CRM · ODS · LOS · KYC · news', s: 'fictional data, fault injection per backend', r: [1450, 545, 290, 110] },
     { cls: 'pass', t: 'Graph /graph', s: 'calendar ReadBasic only', r: [1450, 670, 290, 90] },
 
-    { cls: 'pass', t: '/metrics', s: 'Prometheus text on every service, metadata only', r: [1830, 235, 250, 120] },
-    { cls: 'pass', t: '/api/trace/{id}', s: 'one W3C trace across 13 components', r: [1830, 370, 250, 120] },
-    { cls: 'pass', t: 'loadtest.py', s: 'p95 vs plan budgets', r: [1830, 505, 250, 100] },
-    { cls: 'pass', t: '97 tests · evals', s: 'unit, end to end, red team; release gate', r: [1830, 620, 250, 140] },
+    { cls: 'pass', t: '/metrics', s: 'Prometheus text on every service, metadata only', r: [1830, 235, 250, 95] },
+    { cls: 'pass', t: '/api/trace/{id}', s: 'one W3C trace across 13 components', r: [1830, 340, 250, 95] },
+    { cls: 'pass', t: 'loadtest.py', s: 'p95 vs plan budgets', r: [1830, 445, 250, 75] },
+    { cls: 'pass', t: 'ops summary', s: 'p95 per stage, tokens per request, cost', r: [1830, 530, 250, 95] },
+    { cls: 'pass', t: '122+ tests · RAGAS release gate', s: 'unit, end to end, red team, agents, memory', r: [1830, 635, 250, 125] },
 
-    { cls: 'mock', t: 'Entra ID :8700', s: 'tokens, OBO, JWKS', i: '→ Microsoft Entra ID', r: [40, 910, 240, 140] },
-    { cls: 'mock', t: 'Key Vault :8701', s: 'ES256 sign, RSA unwrap', i: '→ Key Vault Premium', r: [300, 910, 240, 140] },
-    { cls: 'mock', t: 'App Config :8702', s: 'flags, kill switches, key allow-list', i: '→ App Configuration', r: [560, 910, 240, 140] },
-    { cls: 'mock', t: 'Cosmos DB :8703', s: 'sessions, drafts, jti, approvals, outbox', i: '→ Cosmos DB for NoSQL', r: [820, 910, 240, 140] },
-    { cls: 'mock', t: 'Event Hubs :8704', s: 'audit, crm-portfolio-events', i: '→ Event Hubs', r: [1080, 910, 240, 140] },
-    { cls: 'mock', t: 'Content Safety :8708', s: 'shieldPrompt, analyze, groundedness', i: '→ AI Content Safety', r: [1340, 910, 240, 140] },
-    { cls: 'mock', t: 'AI Language :8709', s: 'PII recognition', i: '→ AI Language', r: [1600, 910, 240, 140] },
-    { cls: 'mock', t: 'AI Search :8710', s: 'hybrid search, filters, semantic', i: '→ AI Search', r: [1860, 910, 240, 140] },
+    { cls: 'mock', t: 'Entra ID :8700', s: 'tokens, OBO, JWKS', i: '→ Microsoft Entra ID', r: [40, 910, 240, 170] },
+    { cls: 'mock', t: 'Key Vault :8701', s: 'ES256 sign, RSA unwrap', i: '→ Key Vault Premium', r: [300, 910, 240, 170] },
+    { cls: 'mock', t: 'App Config :8702', s: 'flags, kill switches, key allow-list', i: '→ App Configuration', r: [560, 910, 240, 170] },
+    { cls: 'mock', t: 'Cosmos DB :8703', s: 'sessions, drafts, jti, approvals, outbox · memory: checkpoints, episodes, rm-profile', i: '→ Cosmos DB for NoSQL', r: [820, 910, 240, 170] },
+    { cls: 'mock', t: 'Event Hubs :8704', s: 'audit, crm-portfolio-events', i: '→ Event Hubs', r: [1080, 910, 240, 170] },
+    { cls: 'mock', t: 'Content Safety :8708', s: 'shieldPrompt, analyze, groundedness', i: '→ AI Content Safety', r: [1340, 910, 240, 170] },
+    { cls: 'mock', t: 'AI Language :8709', s: 'PII recognition', i: '→ AI Language', r: [1600, 910, 240, 170] },
+    { cls: 'mock', t: 'AI Search :8710', s: 'hybrid search, filters, semantic', i: '→ AI Search', r: [1860, 910, 240, 170] },
   ],
   wires: [
     { p: [[280, 300], [360, 300]] },
     { p: [[660, 300], [690, 300]] },
-    { p: [[980, 300], [1070, 300]] },
-    { p: [[1360, 300], [1405, 300], [1405, 280], [1450, 280]] },
-    { p: [[1405, 300], [1405, 385], [1450, 385]], dash: true },
+    { p: [[980, 290], [1070, 290]] },
+    { p: [[1360, 290], [1405, 290], [1405, 280], [1450, 280]] },
+    { p: [[1405, 290], [1405, 385], [1450, 385]], dash: true },
     { p: [[835, 365], [835, 420]] },
-    { p: [[980, 490], [1070, 490]] },
-    { p: [[1360, 490], [1400, 490], [1400, 580], [1450, 580]] },
+    { p: [[980, 345], [1025, 345], [1025, 415], [1070, 415]] },
+    { p: [[1070, 465], [980, 465]] },
+    { p: [[980, 545], [1070, 545]] },
+    { p: [[1360, 580], [1450, 580]] },
     { p: [[1450, 630], [1420, 630], [1420, 690], [1360, 690]], c: 'amber' },
     { p: [[510, 780], [510, 830]], h: 'none', wd: 6 },
     { p: [[1215, 780], [1215, 830]], h: 'none', wd: 6 },
@@ -272,13 +276,14 @@ build('local', {
   ],
   labels: [
     { t: 'events', x: 1366, y: 700, cls: 'amber' },
+    { t: 'MCP', x: 1000, y: 474 },
   ],
-  legend: { x: 40, y: 1080, html: `
+  legend: { x: 40, y: 1110, html: `
     <span class="k"><span class="sw" style="background:#FFFFFF;border-color:#8CC7B4"></span>copilot service (would be an AKS pod)</span>
     <span class="k"><span class="sw" style="background:#E6ECEF;border-color:#AFC0CA"></span>Azure mock, labelled with the real service it stands in for</span>
     <span class="k"><span class="sw" style="background:#1D3A50;border-color:#1D3A50"></span>model mock (deterministic, returns token usage)</span>` },
   notes: [
-    { x: 40, y: 1125, w: 2060, t: 'Same controls as the Azure design: OBO identity chain, entitlement check before any data moves, ES256 approval tokens bound to RM, customer, op and draft hash with jti used once, write saga with outbox, kill switches, partial briefs and degraded mode, hash-chained audit with crypto-shredding. Not emulated: TLS, private endpoints, managed identity, real model quality, Document Intelligence, Speech, the Teams tab (see code/README.md).' },
+    { x: 40, y: 1155, w: 2060, t: 'Same controls as the Azure design: OBO identity chain, RM ∩ agent ∩ workload identity on every MCP tool call, entitlement check before any data moves, ES256 approval tokens bound to RM, customer, op and draft hash with jti used once, write saga with outbox, kill switches, partial briefs and degraded mode, hash-chained audit with crypto-shredding. Not emulated: TLS, private endpoints, managed identity, real model quality, Document Intelligence, Speech, the Teams tab (see code/README.md).' },
   ],
 });
 </script>

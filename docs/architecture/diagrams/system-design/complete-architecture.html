@@ -6,7 +6,8 @@
 <!-- SME RM Copilot (fictional, unbranded bank) on Azure UAE North, drawn in the four-lane "complete architecture"
      format of an AI system design guide: A online request path, B controlled execution, C state + data freshness,
      D production operations. Badge numbers on boxes are the guide's 11 building blocks plus two from plan v2.6:
-     12 agent identity + MCP gateway (plan §3.7) and 13 memory (plan §3.8).
+     12 agent identity + MCP gateway (plan §3.7) and 13 memory (plan §3.8). Plan v2.7 (§3.9): block 11 is evaluation in
+     four tiers (runtime gates incl. the pre-generation retrieval gate, online sampled RAGAS, scheduled, release gate).
      Every box, arrow, pill and label comes from the SPEC array below and carries a `step`:
        0     = the v1 prototype,  1..13 = the building block that adds it.  `until` = step at which it is replaced;
        `from` = step from which an element (keeping its original `step`) is shown, used when an element moves.
@@ -82,6 +83,7 @@ body { font-family: Inter, "Segoe UI", Arial, sans-serif; color: var(--ink); }
 .lbl.cyan { color: var(--cyan); } .lbl.amber { color: var(--amber); } .lbl.violet { color: #CDB0FF; }
 .pill { position: absolute; font: 700 15.5px/1 Inter, Arial, sans-serif; white-space: nowrap; color: var(--amber); border: 1.5px solid var(--amber);
         border-radius: 8px; padding: 7px 12px; background: rgba(245,184,46,.10); }
+.pill.gate { line-height: 1.3; padding: 6px 14px; }
 .pill.id { color: #D6EBFF; border: 1.5px dashed #7CC4FF; background: rgba(124,196,255,.10); line-height: 1.35; padding: 6px 14px; }
 
 /* highlight: added in this step */
@@ -191,6 +193,8 @@ const MEMX = 748, MEMW = 1182, MEMHD = 52;             // memory group frame and
 const MBW = 223, MBG = 10, MBX = MEMX + 12;            // memory sub-boxes
 const mbx = i => MBX + i * (MBW + MBG);
 const XMEM = 1270;                                     // memory server -> episodic memory
+const RGATE = 'Retrieval gate: chunks ≥ threshold\nelse decline (no model call)', RGW = 300;   // tier-1 runtime eval (plan §3.9)
+const XSMP = 1940, YSMP = 1536;                        // step 11: 5% sampled answers, output guardrails -> evaluation
 
 // ---------- the spec: every element carries `step` (0 = v1 prototype), optional `until` (replaced at that step) ----------
 const SPEC = [
@@ -203,7 +207,7 @@ const SPEC = [
   { type: 'box', id: 'rt', step: 0, until: 7, x: 1432, y: AY, w: 280, h: AH, layout: 'col', icon: 'router', title: 'Router + orchestrator', lines: ['intent · fixed workflows'] },
   { type: 'box', id: 'rt', step: 7, until: 12, x: 1432, y: AY, w: 280, h: AH, layout: 'col', icon: 'router', badges: ['07'], title: 'Router + orchestrator', lines: ['intent · fixed workflows · step, time and token budgets'] },
   { type: 'box', id: 'rt', step: 12, x: 1432, y: AY, w: 280, h: AH, layout: 'col', icon: 'router', badges: ['07'], title: 'Supervisor agent', lines: ['intent · picks one specialist · budgets · ≤ 2 hops'] },
-  { type: 'box', id: 'out', step: 3, x: 1796, y: AY, w: 278, h: AH, layout: 'col', icon: 'guard', badges: ['03'], title: 'Output guardrails', lines: ['numeric + policy checks · groundedness · verify before release'] },
+  { type: 'box', id: 'out', step: 3, x: 1796, y: AY, w: 278, h: AH, layout: 'col', icon: 'guard', badges: ['03'], title: 'Output guardrails', lines: ['faithfulness + answer relevancy · numeric + policy checks · verify before release'] },
   { type: 'box', id: 'ans', step: 0, x: 2122, y: AY, w: 230, h: AH, layout: 'col', icon: 'chat', ans: true, title: 'Answer to RM', lines: ['citations · facts first · safe decline'] },
 
   { type: 'arrow', step: 0, until: 1, kind: 'cyan', pts: [[R('rm'), AM], [1432, AM]] },
@@ -230,6 +234,7 @@ const SPEC = [
   { type: 'arrow', step: 0, until: 12, kind: 'cyan', both: true, pts: [[1517, AY + AH], [1517, VB2], [860, VB2], [860, SY]] },
   { type: 'arrow', step: 0, until: 12, kind: 'cyan', both: true, pts: [[312, SY + SH], [312, LY]] },
   { type: 'arrow', step: 0, until: 12, kind: 'cyan', both: true, pts: [[860, SY + SH], [860, LY]] },
+  { type: 'pill', step: 11, until: 12, style: 'gate', x: RGW / 2 + 872, y: SY - 50, text: RGATE },
   { type: 'pill', step: 6, until: 12, x: 460, y: (SY + SH + LY) / 2, text: 'Writes need RM-signed approval' },
 
   // lane B, always
@@ -246,7 +251,7 @@ const SPEC = [
   { type: 'arrow', step: 7, kind: 'cyan', both: true, pts: [[1572, AY + AH], [1572, BY]] },
   { type: 'arrow', step: 7, kind: 'cyan', both: true, pts: [[1572, BY + BH], [1572, OY]] },
   { type: 'arrow', step: 6, kind: 'amber', pts: [[1672, AY + AH], [1672, F1], [2156, F1], [2156, BY]] },
-  { type: 'label', step: 6, kind: 'amber', x: 1914, y: F1 + 20, text: 'APPROVE / ESCALATE' },
+  { type: 'label', step: 6, kind: 'amber', x: 2050, y: F1 + 20, text: 'APPROVE / ESCALATE' },
   { type: 'arrow', step: 6, kind: 'amber', pts: [[2156, BY + BH], [2156, CY]] },
   { type: 'label', step: 6, kind: 'amber', x: 2172, y: 1000, text: 'sign + audit', align: 'left' },
 
@@ -270,6 +275,7 @@ const SPEC = [
   { type: 'arrow', step: 12, kind: 'cyan', both: true, pts: [[SC('cdata'), SY + SH], [SC('cdata'), LY]] },
   { type: 'arrow', step: 12, kind: 'cyan', both: true, pts: [[520, SY + SH], [520, LY]] },
   { type: 'arrow', step: 12, kind: 'cyan', both: true, pts: [[SC('ps'), SY + SH], [SC('ps'), LY]] },
+  { type: 'pill', step: 11, from: 12, style: 'gate', x: AC('policy') - 10 - RGW / 2, y: (AGY + AGH + MGY) / 2, text: RGATE },
   { type: 'pill', step: 6, from: 12, x: (SC('cdata') + 520) / 2, y: (SY + SH + LY) / 2, text: 'Writes need RM-signed approval' },
   { type: 'arrow', step: 12, until: 13, kind: 'violet', both: true, pts: [[XMEM, SY + SH], [XMEM, CY]] },
 
@@ -293,8 +299,10 @@ const SPEC = [
   { type: 'arrow', step: 13, kind: 'violet', both: true, pts: [[XMEM, SY + SH], [XMEM, CY + MEMHD]] },
 
   // lane D
-  { type: 'box', id: 'obs', step: 10, x: 48, y: DY, w: 546, h: DH, layout: 'row', icon: 'chart', badges: ['10'], title: 'Observability', lines: ['traces · p95 · tokens · cost · alerts · metadata only'] },
-  { type: 'box', id: 'eval', step: 11, x: 634, y: DY, w: 546, h: DH, layout: 'row', icon: 'check', badges: ['11'], title: 'Evaluation', lines: ['golden set ≥ 300 · Wilson gate · red team ≥ 1,000'] },
+  { type: 'box', id: 'obs', step: 10, x: 48, y: DY, w: 546, h: DH, layout: 'row', icon: 'chart', badges: ['10'], title: 'Observability', lines: ['traces · p95 per stage · tokens per request · cost · alerts'] },
+  { type: 'box', id: 'eval', step: 11, x: 634, y: DY, w: 546, h: DH, layout: 'row', icon: 'check', badges: ['11'], title: 'Evaluation (4 tiers)', lines: ['runtime gates · online RAGAS sampling (5%) · nightly regression · release gate'] },
+  { type: 'arrow', step: 11, kind: 'violet', pts: [[XSMP, AY + AH], [XSMP, YSMP], [907, YSMP], [907, DY]] },
+  { type: 'label', step: 11, kind: 'violet', x: 1500, y: YSMP - 17, text: '5% sampled answers' },
   { type: 'box', id: 'rel', step: 9, x: 1220, y: DY, w: 546, h: DH, layout: 'row', icon: 'gear', badges: ['08', '09'], title: 'Reliability + scale', lines: ['AKS 3 zones · KEDA · circuit breakers · outbox queue'] },
   { type: 'box', id: 'rr', step: 11, x: 1806, y: DY, w: 546, h: DH, layout: 'row', icon: 'cycle', title: 'Release + recovery', lines: ['canary · kill switches · rollback · BCP'] },
 ];
@@ -305,6 +313,7 @@ const BLOCKS = ['', 'Authentication & authorization', 'Rate limiting', 'Guardrai
 // caption sub-line where the list of added elements would be too long
 const CAPSUB = {
   12: 'SME RM Copilot · supervisor + brief, policy and follow-up agents · MCP gateway (APIM) · MCP servers · RM ∩ agent ∩ pod identity on every tool call',
+  11: 'SME RM Copilot · evaluation in 4 tiers: retrieval gate before the model, faithfulness + relevancy after · online RAGAS 5% · nightly · release gate',
   13: 'SME RM Copilot · memory: checkpointer · session · episodic · procedural · profile (semantic = policy index)',
 };
 
