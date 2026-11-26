@@ -1,0 +1,2829 @@
+# SME RM Copilot on Azure: low-level design (LLD)
+
+Status: **v1 (workstream B1)** · Contract: [`00-plan.md`](00-plan.md) v2 · Date: 26 Nov 2026 · Audience: engineering, security, platform, MRM
+
+This document is the build specification for the services in `00-plan.md` §3.2. It uses the plan's names,
+numbers and decisions. Where the plan is silent the LLD makes a decision and labels it **[LLD decision]**; where
+the plan and an Azure fact may not agree the item is labelled **[confirm]** and listed in §14. Everything is
+fictional and unbranded ("the Bank"); figures are illustrative, in AED, UAE-style context. Policy XML, KQL and
+PromQL are illustrative and must be checked against current product documentation.
+
+Reference code: `code/rm_copilot/` holds the reference logic (entitlement in the tool layer, placeholders and
+numeric check, groundedness with retry then decline, quote quarantine, approval-gated writes). The mock-Azure
+stack (`code/azmock/`, `code/services/`, workstream C) implements these contracts behind the same REST shapes;
+`00-plan.md` wins over this LLD, and both win over the prototype on any conflict (differences found are in §14.3).
+
+Contents
+
+1. Conventions
+2. Services
+3. Tool contracts
+4. Approval token
+5. Write saga and outbox
+6. Data design
+7. AI gateway and system API facade (APIM) policies
+8. Prompt and model management
+9. Guardrail pipeline
+10. Sequence diagrams
+11. Observability specification
+12. Security controls mapping
+13. Traceability matrix (C1 to C23)
+14. Open items, [confirm] list and plan inconsistencies
+
+---
+
+## 1. Conventions
+
+### 1.1 API style
+
+| Rule | Value |
+|---|---|
+| Style | REST over HTTPS, JSON bodies (`application/json; charset=utf-8`), UTF-8, no HTTP/1.0 |
+| Versioning | Major version in the path: `/v1/...` (RM-facing, via `web-bff`), `/internal/v1/...` (service to service), `/admin/v1/...` (operator, private admin ingress only). Additive changes (new optional fields, new enum values in responses) are non-breaking. A breaking change creates `/v2` and the old version gets `Deprecation` and `Sunset` response headers for at least 90 days |
+| Tool contracts | Versioned separately with semver (`get_facilities@1.1.0`), see §3. Callers send the major version they accept; `tool-gateway` returns the exact version, which goes into audit lineage |
+| Request validation | Every inbound body is validated against a JSON Schema with `additionalProperties: false` on service-to-service and tool inputs. Responses may add fields; clients ignore unknown fields |
+| Body limits | 64 KiB per request; UC3 notes ≤ 8,000 characters; UC2 question ≤ 1,000 characters |
+| Methods | `GET` (safe, no body), `POST` (create or run), `PUT` with `If-Match` (replace a draft). No `PATCH` in v1 |
+| Pagination | **Not applicable.** Every list in v1 is bounded by contract (for example ≤ 5 facilities shown, ≤ 3 news items, ≤ 5 passages, ≤ 10 tasks). An unbounded list is a contract defect |
+| Field names | `snake_case`; enum values lower `snake_case`; error codes UPPER_SNAKE_CASE |
+| Identifiers | `request_id`: UUIDv7 minted by `web-bff`; `draft_id`, `saga_id`: UUIDv7; `jti`: 128-bit random, base64url; customer ids are CRM ids, never national ids |
+| Money | `{"amount": "4600000.00", "currency": "AED"}` (decimal string, never float). Display formatting (`AED 4.6m`) happens only in `orchestrator` placeholder fill, never in the model |
+
+### 1.2 Time and dates (C16)
+
+- Instants (timestamps) are RFC 3339 in UTC with `Z` (`2026-11-26T05:41:09.120Z`) in APIs, storage and audit.
+- Business dates (`due`, `meeting_date`, `effective_from`) are ISO dates (`YYYY-MM-DD`) interpreted in **GST
+  (IANA `Asia/Dubai`, UTC+04:00, no daylight saving)**. "Today" is always computed in `Asia/Dubai`, never from the pod
+  clock's local zone (pods run in UTC).
+- Working week Monday to Friday. A task due date that resolves to a Saturday or Sunday is moved to the next
+  Monday by the deterministic date resolver and the move is shown to the RM. Bank holidays come from a
+  configuration list `rmc:calendar:holidays` (App Configuration) **[confirm source with the Bank]**.
+- Business hours for the SLO: Monday to Friday 07:00 to 20:00 GST (03:00 to 16:00 UTC).
+
+### 1.3 Headers
+
+| Header | Direction | Set by | Rule |
+|---|---|---|---|
+| `Authorization: Bearer <jwt>` | request | caller | RM-facing calls: the RM's Entra token (audience `web-bff`). Service to service: the **caller's workload identity token** (audience = the callee). See §1.5 |
+| `x-rm-token` | request (internal) | `web-bff` | The RM's **OBO token for the `tool-gateway` audience**, forwarded unchanged by `orchestrator` to `tool-gateway` and to the APIM AI gateway (quota key only). Never logged |
+| `traceparent`, `tracestate` | both | `web-bff` creates if absent | W3C Trace Context. A client-supplied `traceparent` is accepted only as a link (`rmc.client_trace_id`), never as the parent, to stop trace spoofing |
+| `x-request-id` | both | `web-bff` | UUIDv7. A client value is recorded as `client_request_id` only. Echoed on every response, in every log line, span and audit event |
+| `x-deadline-ms` | request | `web-bff`, then each hop | **Remaining budget in milliseconds at send time** (relative, like `grpc-timeout`), so pod clock skew does not matter. The receiver computes `deadline_at = receive_time + value`. See §1.6 |
+| `x-use-case` | request (internal) | `web-bff` | `uc1` / `uc2` / `uc3_draft` / `uc3_commit` / `meetings` / `eval` / `ingest`. Used for budgets, APIM per-use-case limits and metric labels |
+| `Idempotency-Key` | request | client (approve), `orchestrator` (commit) | Required on `POST .../approve` and `POST /internal/v1/commits`. UUIDv4. Same key + same body hash returns the stored response; same key + different body returns `409 IDEMPOTENCY_CONFLICT`. Stored 24 h |
+| `If-Match` | request | client | Required on `PUT /v1/followups/drafts/{id}`; value = draft `etag`. Mismatch returns `412 DRAFT_CONFLICT` |
+| `x-csrf-token` | request | client | Required on every state-changing RM call. Bound to the session (§2.1). Missing or wrong returns `403 CSRF_FAILED` |
+| `Origin` | request | browser | Must be in `rmc:web-bff:allowed_origins`. Otherwise `403 ORIGIN_REJECTED` |
+| `x-client-surface` | request | client | `crm_sidebar` / `teams_tab`. Metric label and audit field only |
+| `Accept-Language` | request | client | `en` (default) or `ar`. Arabic generation behind flag `arabic` |
+| `Retry-After` | response | any | Seconds; set on `429` and on `503` when a retry can help |
+| `x-rm-remaining-tokens` | response (internal) | APIM AI gateway | Remaining daily tokens for the RM; read by `orchestrator` for budget decisions, never shown in UI |
+| `x-rm-assertion` | request | APIM system API facade only | Signed RM identity for legacy systems of record (§7.2). Stripped if a caller sends it |
+
+Headers that must never be logged or put on spans: `Authorization`, `x-rm-token`, `x-rm-assertion`, `Cookie`,
+`Set-Cookie`, `x-csrf-token`, `Idempotency-Key` (hash it if needed).
+
+### 1.4 Error envelope and error-code catalogue
+
+Every non-2xx response from every service has the same body:
+
+```json
+{
+  "error": {
+    "code": "APPROVAL_INVALID",
+    "reason": "DRAFT_HASH_MISMATCH",
+    "message": "The submitted draft does not match the approved draft. Approve again.",
+    "request_id": "01937a4e-8f7d-7c1a-9b2e-5d0c1f6a2b3c",
+    "retryable": false,
+    "retry_after_ms": null,
+    "details": {"field": null}
+  }
+}
+```
+
+`code`, `message`, `request_id` and `retryable` are mandatory. `reason` is mandatory for codes that list
+reasons. `message` is safe to show to the RM: it never contains customer data, token contents, stack traces or
+downstream error text. Upstream errors are mapped, never passed through.
+
+| Code | HTTP | Retryable | Raised by | Meaning and client behaviour |
+|---|---|---|---|---|
+| `VALIDATION_FAILED` | 400 | no | any | Body or parameter fails schema. `details.field` = JSON pointer. Reasons: `SCHEMA`, `UNKNOWN_FIELD`, `TOO_LARGE`, `BAD_DATE`, `WEEKEND_DATE`, `POLICY_VIOLATION` (a task asks to approve, price or change a limit), `UNSUPPORTED_CONTRACT_VERSION` |
+| `UNAUTHENTICATED` | 401 | no | any | Missing, expired or invalid token. Reasons: `MISSING_TOKEN`, `INVALID_TOKEN`, `WRONG_AUDIENCE`, `WRONG_TENANT`, `WORKLOAD_TOKEN_MISSING`, `WORKLOAD_NOT_ALLOWED`. Client re-acquires a token silently once |
+| `SESSION_EXPIRED` | 401 | no | `web-bff` | Session document gone (24 h TTL) or idle > 8 h **[LLD decision]**. Client reloads the session |
+| `STEP_UP_REQUIRED` | 401 | no | `web-bff` | Approve needs `auth_time` ≤ 10 min and auth context `c1`. Response carries `WWW-Authenticate: Bearer error="insufficient_claims", claims="<base64 claims challenge>"`. Client runs MSAL interactive with the claims, then retries the same request with the same `Idempotency-Key` |
+| `INSUFFICIENT_SCOPE` | 403 | no | `tool-gateway`, `web-bff` | Token lacks `Tools.Read` / `Tools.Write` or an app role. Not shown to RMs as a normal path |
+| `ORIGIN_REJECTED` | 403 | no | `web-bff` | `Origin` not allowed |
+| `CSRF_FAILED` | 403 | no | `web-bff` | CSRF token missing or wrong |
+| `NOT_ENTITLED` | 403 | no | `tool-gateway` | The RM may not access this customer (or may not write for it: team lead). No data has moved. Counted for C15 analytics |
+| `APPROVAL_INVALID` | 403 | no | `tool-gateway` | Approval token failed verification. Reasons in §4.6. Client must approve again |
+| `NOT_FOUND` | 404 | no | any | Draft, saga or document does not exist **for this RM** (also used instead of 403 for another RM's draft id, to avoid enumeration) |
+| `REPLAYED` | 409 | no | `tool-gateway` | `jti` already used by a different request (§4.5). Client shows existing saga status if `details.saga_id` is present |
+| `IDEMPOTENCY_CONFLICT` | 409 | no | `web-bff`, `tool-gateway` | Same `Idempotency-Key`, different body |
+| `DRAFT_CONFLICT` | 412 | no | `web-bff` | `If-Match` etag stale. Client reloads the draft |
+| `GUARDRAIL_BLOCKED` | 422 | no | `orchestrator` | Input blocked: Prompt Shields user-prompt attack, harmful content, or content filter on input. Reasons: `PROMPT_ATTACK`, `HARMFUL_CONTENT`, `CONTENT_FILTER`. The message is generic; the RM can rephrase. Counted in the false-positive review |
+| `RATE_LIMITED` | 429 | yes | `web-bff`, APIM | Request-rate limit hit (per RM: 30 requests/min **[LLD decision]**; per backend at the facade). `Retry-After` set |
+| `BUDGET_EXCEEDED` | 429 | no (until reset) | `orchestrator` (mapping APIM), APIM | Token budget exhausted. Reasons: `RM_DAILY` (400k tokens/RM/day), `USE_CASE` (per-use-case limit), `REQUEST_STEPS` (> 6 tool steps), `REQUEST_TOKENS` (> 12k input or 1.5k output). `details.resets_at` for `RM_DAILY` (midnight GST **[confirm APIM daily window is UTC or configurable]**) |
+| `FEATURE_DISABLED` | 503 | no | `web-bff`, `orchestrator`, `tool-gateway`, `outbox-worker` | Kill switch or feature flag off (`details.flag`). UI shows a banner and hides the action. Not counted against the SLO when set by an operator (counted separately) |
+| `DEPENDENCY_UNAVAILABLE` | 503 | yes | any | Circuit open or dependency down and no degraded path exists (for example Cosmos down during commit). Reasons: `CIRCUIT_OPEN`, `AUDIT` (the audit stream did not acknowledge, so nothing was released), `ENTITLEMENT_SOURCE`, `KEY_VAULT`, `STATE_STORE`. `Retry-After` set |
+| `DEPENDENCY_TIMEOUT` | 504 | yes | any | A required dependency did not answer within its deadline-derived timeout and no degraded path exists |
+| `DEADLINE_EXCEEDED` | 504 | yes | any | The request's own deadline (`x-deadline-ms`) had expired on arrival or before work started (fail fast, no downstream call) |
+| `INTERNAL` | 500 | yes | any | Unexpected. Message generic; exception text scrubbed (C5) |
+
+**Degraded is not an error.** A degraded answer is `200` with `"mode": "degraded"` and a warning entry:
+
+```json
+{"mode": "degraded", "warnings": [{"code": "DEGRADED", "reason": "MODEL_UNAVAILABLE", "message": "Wording unavailable: facts only."}]}
+```
+
+`DEGRADED` reasons: `MODEL_UNAVAILABLE` (breaker open, 429 with no failover budget, 5xx), `MODEL_DEADLINE`
+(remaining budget below the minimum viable generation budget, §1.6), `FORCED` (flag `degraded_force`),
+`ALL_LINES_DROPPED` (UC1: every model line failed checks; facts-only brief). A partial brief is also `200`:
+`"mode": "partial"` with `warnings[{code:"SOURCE_UNAVAILABLE", section:"kyc"}]`. A UC2 decline is `200` with
+`"status": "declined"`. Both count as "available" for the SLO (`00-plan.md` §5).
+
+### 1.5 Identity and tokens on every hop (C4)
+
+App registrations **[LLD decision on names]**:
+
+| App registration | Exposes | Consumers |
+|---|---|---|
+| `rmc-client` (SPA, public client) | n/a | CRM sidebar (MSAL.js), Teams tab (Teams SSO, `getAuthToken`) |
+| `rmc-web-bff` (`api://rm-copilot-web-bff`) | delegated scope `Copilot.Use`; user app roles `RmCopilot.RM`, `RmCopilot.TeamLead` | `rmc-client` |
+| `rmc-orchestrator` (`api://rm-copilot-orchestrator`) | app role `Orchestrator.Invoke` | `web-bff` workload identity |
+| `rmc-tool-gateway` (`api://rm-copilot-tool-gateway`) | delegated scopes `Tools.Read`, `Tools.Write`; app roles `Tools.Invoke` (orchestrator), `Outbox.Deliver` (outbox-worker), `Audit.Append` (orchestrator, web-bff via orchestrator), `Ops.Outbox` (operators, PIM), user app roles `Clearance.Internal`, `Clearance.Restricted`, `RmCopilot.TeamLead` | `web-bff` (OBO), `orchestrator`, `outbox-worker`, operators |
+| `rmc-ai-gateway` (`api://rm-copilot-ai-gateway`) | app roles `AiGateway.Generate`, `AiGateway.Embed`, `AiGateway.Judge` | `orchestrator` (Generate), `tool-gateway` and `ingestion-worker` (Embed), `eval-runner` (Generate, Embed, Judge) |
+| `rmc-system-api` (`api://rm-copilot-system-api`) | app roles `SystemApi.Read`, `SystemApi.Write`, `SystemApi.DeferredWrite` | `tool-gateway` only |
+| `rmc-audit-admin` (`api://rm-copilot-audit-admin`) | app roles `Audit.Verify` (auditors), `Audit.Erase` (data protection officer, PIM, four-eyes) | `audit-writer` admin endpoints |
+
+Workload identities: one user-assigned managed identity per service, federated to its Kubernetes service account
+(`id-rmc-web-bff`, `id-rmc-orchestrator`, `id-rmc-tool-gateway`, `id-rmc-outbox-worker`, `id-rmc-ingestion-worker`,
+`id-rmc-audit-writer`, `id-rmc-eval-runner`). Workload tokens are app-only: `tool-gateway` and APIM require the
+optional claim `idtyp = app` on the workload token and `idtyp = user` (or presence of `scp`) on the RM token, so a
+user token can never be presented as a workload token and vice versa **[confirm `idtyp` optional claim
+configuration]**.
+
+Token on each hop:
+
+| Hop | `Authorization` | `x-rm-token` |
+|---|---|---|
+| client → `web-bff` | RM token, `aud=api://rm-copilot-web-bff`, `scp` contains `Copilot.Use`, role `RmCopilot.RM` or `RmCopilot.TeamLead` | n/a |
+| `web-bff` → `orchestrator` | `web-bff` workload token, `aud=api://rm-copilot-orchestrator`, role `Orchestrator.Invoke` | OBO token, `aud=api://rm-copilot-tool-gateway`, `scp=Tools.Read` (approve: `Tools.Read Tools.Write`) |
+| `orchestrator` → `tool-gateway` | `orchestrator` workload token, `aud=api://rm-copilot-tool-gateway`, role `Tools.Invoke` | forwarded unchanged |
+| `orchestrator` → APIM AI gateway | `orchestrator` workload token, `aud=api://rm-copilot-ai-gateway`, role `AiGateway.Generate` | forwarded unchanged (quota key = `oid`) |
+| `tool-gateway` → APIM system API facade | `tool-gateway` workload token, `aud=api://rm-copilot-system-api` | forwarded unchanged on interactive calls; absent on outbox deliveries (`SystemApi.DeferredWrite`) |
+| `tool-gateway` → Graph | OBO token (second hop) for Graph, `Calendars.ReadBasic` only (C20) | n/a |
+| `outbox-worker` → `tool-gateway` | `outbox-worker` workload token, role `Outbox.Deliver` | absent (RM not present; authority = persisted verdict, §5) |
+
+`tool-gateway` derives the RM **only** from the `oid` of a validated `x-rm-token` (checks `iss`, `aud`, `tid`,
+`exp`, `nbf`, `scp`). Any `rm_id`, `oid` or `user` field in a body or other header is ignored and, if present on a
+tool input, rejected as `VALIDATION_FAILED/UNKNOWN_FIELD`.
+
+### 1.6 Deadline propagation rule
+
+From `00-plan.md` §5: `web-bff` sets the request deadline; each hop's timeout =
+`min(own cap, remaining deadline − reserve)`. Concretely:
+
+```text
+on receive:   deadline_at = now() + header["x-deadline-ms"]        # relative header, local clock only
+              if deadline_at - now() <= 0: return 504 DEADLINE_EXCEEDED (no downstream call)
+before call:  remaining = deadline_at - now()
+              timeout   = min(cap[dep], remaining - reserve[hop])
+              if timeout < floor[dep]: skip call -> treat as DEPENDENCY_TIMEOUT for that dependency (fail fast)
+              send with header x-deadline-ms = timeout
+```
+
+| Request | Deadline set by `web-bff` | `web-bff` reserve | Orchestrator reserve after generation | Min viable generation budget |
+|---|---|---|---|---|
+| UC1 brief | 8,000 ms | 150 ms | 300 ms (fill + numeric + policy checks + response) | 2,500 ms |
+| UC2 answer | 7,000 ms | 150 ms | 500 ms (groundedness 400 + response) | 2,000 ms |
+| UC3 draft | 10,000 ms | 150 ms | 300 ms (schema + policy validation) | 3,000 ms |
+| UC3 commit | 2,000 ms | 150 ms | 50 ms | n/a (no model) |
+| meetings list | 2,000 ms | 150 ms | 50 ms | n/a |
+
+| Dependency | Cap | Floor | Reserve at caller |
+|---|---|---|---|
+| Tool call (orchestrator → tool-gateway) | 2,000 ms (plan) | 150 ms | min viable generation budget + post-generation reserve of the use case (UC1: 2,500 + 300 = 2,800 ms, so UC1 tool calls get `min(2,000, remaining − 2,800)`) |
+| System of record via facade (tool-gateway → APIM → SoR) | CRM 1,500; ODS 1,500; LOS 1,500; KYC 1,200; news 1,000; Graph 800 | 100 ms | 100 ms (masking + audit ack) |
+| AI Search query | 600 ms | 100 ms | 100 ms |
+| Embedding (query) | 300 ms | 100 ms | 100 ms |
+| Model generation (orchestrator → APIM AI gateway) | = remaining deadline (plan) | min viable generation budget | post-generation reserve |
+| Router / rewrite (`gen-small`) | 1,000 ms | 300 ms | min viable generation budget + post reserve |
+| Content Safety Prompt Shields | 500 ms | 100 ms | n/a (parallel) |
+| AI Language PII | 500 ms | 100 ms | n/a (parallel); regex fallback always runs |
+| Key Vault `sign` (approve) | 400 ms | 100 ms | 150 ms |
+| Cosmos point read / create | 300 ms | 50 ms | 50 ms |
+| Event Hubs send (audit, waits for ack) | 300 ms | 50 ms | n/a |
+
+Failover to the second model backend happens **only if ≥ 4,000 ms remain** (enforced in the APIM retry condition,
+§7.1); otherwise degraded mode (C3).
+
+UC3 commit budget (p95, ms; the plan gives only the 2,000 ms target) **[LLD decision]**:
+
+| Step | p95 |
+|---|---|
+| Edge + `web-bff` checks (Origin, CSRF, session, flags, `auth_time`) | 60 |
+| OBO for `Tools.Read Tools.Write` (usually a cache miss on approve) | 150 |
+| Schema validation, RFC 8785 canonicalisation, SHA-256 | 10 |
+| Key Vault `sign` | 100 |
+| `orchestrator` hop | 30 |
+| `tool-gateway` verify (entitlement cached, signature, claims, hash) | 30 |
+| Cosmos: `jti` create, `approvals` create, outbox batch | 90 |
+| CRM writes in parallel (timeout `min(1,000, remaining − 250)`, else queued) | 900 |
+| Responses back to the RM | 60 |
+| **Total** | **≈ 1,430 (target 2,000)** |
+
+### 1.7 Resilience defaults (all services) [LLD decision]
+
+| Setting | Default | Override |
+|---|---|---|
+| Circuit breaker scope | Per pod, per dependency | n/a |
+| Breaker opens when | ≥ 50% failures in a 30 s rolling window with ≥ 10 calls, or 5 consecutive failures. Failures = timeout, connection error, 5xx, 429 | CRM writes: 3 consecutive failures |
+| Open duration | 30 s, then half-open with 2 trial calls | CRM: 60 s; AI gateway: handled by APIM pool breaker (§7.1) plus a client breaker of 20 s |
+| Retries (reads) | At most 1, only on connection reset or 503 before any response bytes, only if `remaining ≥ 2 × p95(dep)` and breaker closed. **Never retry a timeout** (it amplifies load) | Model calls: no client retry (APIM owns failover) |
+| Retries (writes) | **None inline.** A write that times out or returns 5xx goes to the outbox (§5) | n/a |
+| Bulkhead (max in-flight per pod) | ODS 10, CRM 10, LOS 10, KYC 5, news 5, Graph 5, AI Search 10, AI gateway 20 | n/a |
+| Backoff | Exponential with full jitter (§5.3 for outbox) | n/a |
+
+---
+
+## 2. Services
+
+All services run in AKS namespace `rm-copilot`, Python 3.12 (FastAPI / uvicorn or equivalent), expose
+`GET /healthz/live`, `GET /healthz/ready` (ready = config loaded, keys cached, breakers initialised) and
+`GET /metrics` on a separate port `9090` (scraped by PodMonitor, not routed through ingress). All use pod topology
+spread across 3 zones (`maxSkew: 1`), a PodDisruptionBudget of `minAvailable: 2` for 3-replica services, read-only
+root filesystem, non-root user, no service account token automount except where workload identity needs it, and
+Cilium network policies with default deny (allowed edges listed per service).
+
+Common App Configuration conventions: key prefix `rmc:<service>:`, label = environment (`dev`, `test`,
+`preprod`, `prod`). Refresh via sentinel key `rmc:sentinel` polled every **15 s**, so a kill switch takes effect
+in ≤ 30 s **[LLD decision]**. Feature flags use the App Configuration feature-flag schema
+(`.appconfig.featureflag/<name>`). If App Configuration is unreachable at start, the pod is not ready; if it
+becomes unreachable later, the last loaded values stay in force, except that the **write kill switch fails
+closed**: if `writes` has not been refreshed for > 5 min, writes are treated as disabled.
+
+| Feature flag | Default (prod) | Checked by |
+|---|---|---|
+| `uc1`, `uc2`, `uc3` | on | `web-bff` (hide action), `orchestrator` (enforce) |
+| `writes` (global write kill switch) | on | `web-bff`, `tool-gateway` (enforce), `outbox-worker` (pause) |
+| `outbox_delivery` | on | `outbox-worker` |
+| `degraded_force` (per use case filter) | off | `orchestrator` |
+| `news` | on | `tool-gateway` |
+| `arabic` | off (pilot: evaluated only) | `orchestrator` |
+| `model_canary` (targeting filter by RM group) | off | `orchestrator` (§8.5) |
+| `online_eval` | off | `orchestrator`, `eval-runner` |
+| `cs_groundedness` (Content Safety groundedness, only if in-region) | off **[confirm]** | `orchestrator` |
+
+### 2.1 `web-bff`
+
+**Responsibilities.** Single backend for the CRM sidebar and the Teams personal tab (C1). Validates the RM token,
+creates the session, issues CSRF tokens, enforces Origin and CSRF, sets `x-request-id`, `traceparent` and the
+deadline, gets OBO tokens for `tool-gateway`, applies per-RM request rate limits, checks feature flags, enforces
+step-up on approve (`auth_time` ≤ 10 min), canonicalises and hashes the approved draft and mints the ES256 approval
+token with Key Vault `sign` (§4). Sets security headers: strict CSP (`default-src 'self'; img-src 'self';
+connect-src 'self'; frame-ancestors <CRM origin> https://teams.microsoft.com https://*.teams.microsoft.com
+https://*.cloud.microsoft` **[confirm current Teams frame-ancestors list]**), `X-Content-Type-Options: nosniff`,
+`Referrer-Policy: no-referrer`. Never renders model output as HTML or Markdown (C19): responses are plain text
+fields; the client renders them as text nodes.
+
+**Endpoints (RM-facing, through Application Gateway WAF).**
+
+`GET /v1/session`: creates or refreshes the session, returns the CSRF token and the flags the UI needs.
+
+```json
+// 200
+{
+  "session_id_hint": "s-7f3a",
+  "csrf_token": "b64url-32-bytes",
+  "rm": {"display_name": "Layla H.", "roles": ["RmCopilot.RM"]},
+  "features": {"uc1": true, "uc2": true, "uc3": true, "writes": true, "arabic": false},
+  "server_time": "2026-11-26T05:40:00Z",
+  "business_date_gst": "2026-11-26"
+}
+```
+
+Session cookie: `__Host-rmc-sid` (`Secure; HttpOnly; SameSite=None; Path=/`), because the app is framed by CRM and
+Teams; the CSRF token (stored hashed in the session document) is therefore mandatory on state changes.
+
+`GET /v1/meetings?days=2`: upcoming meetings to brief (via orchestrator, tool `get_upcoming_meetings`).
+
+```json
+// 200
+{"meetings": [{"meeting_id": "AAMk...hash", "start": "2026-11-26T06:00:00Z", "subject_masked": "Review with Harbourline", "customer_id": "harbourline", "match": "crm_contact_email"}]}
+```
+
+`POST /v1/briefs` (UC1)
+
+```json
+// request
+{"customer_id": "harbourline", "meeting_id": "AAMk...hash"}
+// 200
+{
+  "request_id": "01937a4e-8f7d-7c1a-9b2e-5d0c1f6a2b3c",
+  "use_case": "uc1",
+  "mode": "full",
+  "customer": {"customer_id": "harbourline", "name": "Harbourline Logistics LLC"},
+  "snapshot": {"text": "Customer since 2019 · turnover AED 48m · revenue to bank +12% YoY", "sources": ["CRM #4471"]},
+  "watch": [
+    {"text": "Working-capital line 92% utilised for 45 days (AED 4.6m of AED 5m)", "sources": ["LOS F-209"]},
+    {"text": "Trade licence expires 14 Dec 2026", "sources": ["KYC"]}
+  ],
+  "opportunities": [{"text": "Outbound FX payments up 38% this quarter", "sources": ["ODS signals"]}],
+  "talking_points": [
+    {"text": "Ask whether the extra need on the working-capital line is seasonal; it has been at 92% for 45 days.", "sources": ["LOS F-209"]}
+  ],
+  "verification": {"numeric_check": "pass", "policy_check": "pass", "lines_dropped": 0},
+  "warnings": [],
+  "generated_by": "AI-assisted from bank systems; figures inserted from source systems",
+  "audit_event_id": "01937a4e-9000-7b55-8c11-aa0000000001"
+}
+```
+
+`POST /v1/policy-questions` (UC2)
+
+```json
+// request
+{"question": "Can a company trading for 2 years get an unsecured working capital line?", "language": "en"}
+// 200 answered
+{
+  "request_id": "...", "use_case": "uc2", "status": "answered", "mode": "full",
+  "answer": "Unsecured SME working capital lines require a minimum of 3 years audited trading history and annual turnover of at least AED 5m [1]. Businesses with less than 3 years trading history may be offered secured facilities only [2].",
+  "citations": [
+    {"n": 1, "doc_title": "SME Credit Policy v4.2", "clause_ref": "§5.3.1", "chunk_id": "credit-5.3.1", "effective_from": "2026-01-01"},
+    {"n": 2, "doc_title": "SME Credit Policy v4.2", "clause_ref": "§5.3.4", "chunk_id": "credit-5.3.4", "effective_from": "2026-01-01"}
+  ],
+  "verification": {"groundedness": 1.0, "attempts": 1},
+  "warnings": []
+}
+// 200 declined
+{
+  "request_id": "...", "use_case": "uc2", "status": "declined", "mode": "full",
+  "decline_reason": "WEAK_RETRIEVAL",
+  "message": "I can't confirm this from approved documents. I can route it to the credit or product desk.",
+  "closest_sources": [{"doc_title": "Delegation of Authority matrix", "clause_ref": "row 14"}],
+  "route_to": ["credit_desk", "product_desk"]
+}
+```
+
+Decline reasons: `WEAK_RETRIEVAL`, `MODEL_INSUFFICIENT_EVIDENCE`, `FAILED_GROUNDEDNESS`, `NO_TIME_FOR_RETRY`.
+
+`POST /v1/followups/drafts` (UC3 draft)
+
+```json
+// request
+{"customer_id": "harbourline", "meeting_date": "2026-11-26", "notes": "Met Mr Haddad. Wants 2 more trucks next quarter ..."}
+// 201
+{
+  "draft_id": "01937a50-1111-7000-8000-000000000abc",
+  "etag": "\"3\"",
+  "schema": "followup/1",
+  "mode": "full",
+  "draft": {
+    "schema": "followup/1",
+    "customer_id": "harbourline",
+    "meeting_date": "2026-11-26",
+    "call_report": {"text": "Met Mr Haddad. Wants 2 more trucks next quarter ...", "opportunity_tags": ["vehicle_finance", "fx_hedging"]},
+    "tasks": [
+      {"item_id": "t1", "type": "send_document", "title": "Send limit-increase checklist", "due": "2026-11-27"},
+      {"item_id": "t2", "type": "internal_referral", "title": "Book intro with the FX desk", "due": "2026-12-03"}
+    ],
+    "email": {"contact_ref": "crm-contact-88213", "subject": "Follow-up from today's meeting", "body": "Dear Mr Haddad, ..."}
+  },
+  "notices": [
+    {"code": "QUOTE_QUARANTINED", "message": "A quoted instruction in the notes was removed."},
+    {"code": "DATE_MOVED", "item_id": "t2", "message": "Due date fell on a weekend; moved to Monday."}
+  ],
+  "pii_masked": ["national_id"]
+}
+```
+
+`PUT /v1/followups/drafts/{draft_id}` with `If-Match`: body = full `draft` object (RM edits). Returns the new
+`etag`. Re-runs schema and policy validation (no model call). A task failing the policy check returns
+`400 VALIDATION_FAILED/POLICY_VIOLATION` with `details.field = "/tasks/1/title"`.
+
+`POST /v1/followups/drafts/{draft_id}/approve` (approve + commit, one RM click) with `Idempotency-Key`,
+`x-csrf-token`, `If-Match`.
+
+```json
+// request
+{"etag": "\"4\""}
+// 200 (all items committed) or 202 (some items queued)
+{
+  "saga_id": "Xq3v9Kd2Q0yB5nT1ZsPq8w",
+  "status": "partially_queued",
+  "items": [
+    {"item_id": "cr", "kind": "call_report", "state": "committed", "crm_ref": "CR-77120", "external_ref": "Xq3v9Kd2Q0yB5nT1ZsPq8w:cr"},
+    {"item_id": "t1", "kind": "task", "state": "committed", "crm_ref": "TSK-55101", "external_ref": "Xq3v9Kd2Q0yB5nT1ZsPq8w:t1"},
+    {"item_id": "t2", "kind": "task", "state": "queued", "external_ref": "Xq3v9Kd2Q0yB5nT1ZsPq8w:t2", "next_attempt_at": "2026-11-26T05:52:10Z"}
+  ],
+  "email_link": {"kind": "outlook_compose", "url": "https://outlook.office.com/mail/deeplink/compose?to=...&subject=...&body=..."}
+}
+```
+
+Errors: `401 STEP_UP_REQUIRED`, `403 APPROVAL_INVALID`, `409 REPLAYED`, `412 DRAFT_CONFLICT`,
+`503 FEATURE_DISABLED` (`writes` off), `503 DEPENDENCY_UNAVAILABLE` (Key Vault or Cosmos down).
+
+`GET /v1/followups/commits/{saga_id}`: current per-item status (polled by the UI every 10 s while any item is
+`queued`, max 30 min, then on demand).
+
+**Approve algorithm in `web-bff`** (detail of `00-plan.md` §4.2 steps 5 and 6):
+
+1. Check `Origin`, CSRF, session, `If-Match`, flag `writes` and `uc3`.
+2. Read the RM token: require `auth_time` ≥ `now − 600 s` and `acrs` contains `c1` (Conditional Access
+   authentication context "approve customer write", MFA, sign-in frequency every time) **[confirm authentication
+   context id and Teams tab popup support]**. Else `401 STEP_UP_REQUIRED` with the claims challenge
+   `{"access_token":{"acrs":{"essential":true,"value":"c1"}}}`.
+3. Load the draft (Cosmos `drafts`, point read), check `rm_oid` = token `oid` and `etag`.
+4. Server-side schema validation of the draft (`followup/1`), then RFC 8785 canonicalisation and SHA-256 (§4.2).
+5. OBO for `api://rm-copilot-tool-gateway/Tools.Read Tools.Write` using the fresh RM token.
+6. Mint the approval token (§4.3) with Key Vault `sign` (timeout `min(400, remaining − 150)`); record
+   `approval.minted = {jti, kid, iat, draft_sha256}` in the draft document.
+7. Call `orchestrator POST /internal/v1/uc3/commit` with draft, token and `Idempotency-Key`.
+8. Return the saga status. Store the response under the idempotency key.
+
+**Auth.** Inbound: RM token, issuer `https://login.microsoftonline.com/{tid}/v2.0`, `aud=api://rm-copilot-web-bff`,
+`tid` = Bank tenant, `scp` contains `Copilot.Use`, app role `RmCopilot.RM` or `RmCopilot.TeamLead` (team lead:
+read-only UI, no UC3). Outbound: OBO (confidential client using its federated workload identity credential, no
+client secret **[confirm OBO with federated credential]**); workload token for `orchestrator`; Key Vault
+custom role with `keys/sign/action` and `keys/read` on key `approval-signing` only.
+
+**Dependencies.**
+
+| Dependency | Timeout | Retries | Breaker | On failure |
+|---|---|---|---|---|
+| Entra ID (OBO, JWKS) | 1,000 ms (OBO miss), JWKS cached 24 h, refreshed on unknown `kid` | 1 on connection error | default | `503 DEPENDENCY_UNAVAILABLE` |
+| `orchestrator` | `remaining − 150` | 0 | default | map error envelope through |
+| Key Vault `sign` | `min(400, remaining − 150)` | 1 on 429/503 if `remaining ≥ 800` | default | `503 DEPENDENCY_UNAVAILABLE`; no token minted |
+| Cosmos (`sessions`, `drafts`) | 300 ms | SDK retry on 429 within deadline | default | `503 DEPENDENCY_UNAVAILABLE` |
+| App Configuration | background refresh | n/a | n/a | last known values; writes fail closed after 5 min stale |
+
+**Scaling.** 3 replicas minimum (one per zone), HPA max 6 (pilot) / 12 (scale) on CPU 60% or KEDA Prometheus
+trigger `sum(rmc_http_server_inflight_requests{service="web-bff"}) / replicas > 20`. Illustrative resources:
+requests `250m` CPU / `512Mi`, limits `1` CPU / `1Gi`. Separate node pool `signer` (taint
+`rmc/role=signer:NoSchedule`) so the signing identity never shares a node with the verifier (C11).
+
+**Configuration keys.** `rmc:web-bff:allowed_origins`, `rmc:web-bff:deadline_ms:{uc1|uc2|uc3_draft|uc3_commit}`
+(8000/7000/10000/2000), `rmc:web-bff:reserve_ms` (150), `rmc:web-bff:step_up:max_auth_age_s` (600),
+`rmc:web-bff:step_up:auth_context` (`c1`), `rmc:web-bff:approval:ttl_s` (300), `rmc:web-bff:approval:key_name`
+(`approval-signing`), `rmc:web-bff:approval:active_kid` (pinned version, §4.7), `rmc:web-bff:rate_limit:per_rm_per_min`
+(30), `rmc:web-bff:session:idle_timeout_s` (28800).
+
+**Failure behaviour.** Orchestrator unreachable: `503 DEPENDENCY_UNAVAILABLE`, UI shows "use CRM screens".
+Key Vault down: approve fails closed (no unsigned path, ever). Session store down: new sessions cannot be created,
+`503`.
+
+### 2.2 `orchestrator`
+
+**Responsibilities.** Runs the three use-case workflows (fixed workflows, not open-ended agents): UC1 fan-out and
+placeholder fill; UC2 RAG with groundedness, retry once and decline; UC3 extraction and validation; deadline and
+budget enforcement (≤ 6 tool steps, ≤ 12k input and 1.5k output tokens per request); guardrails (§9); degraded
+mode (C3); calls `tool-gateway` with the RM token unchanged; emits use-case audit events through `tool-gateway`'s
+audit endpoint (it holds no Event Hubs or Key Vault rights) **[LLD decision, see §14]**. Holds no keys and no
+customer data beyond request scope (no cache of tool output across requests).
+
+**Endpoints (internal, ClusterIP only, callable only by `web-bff` per network policy).**
+
+| Method and path | Purpose |
+|---|---|
+| `POST /internal/v1/uc1/brief` | `{customer_id, meeting_id?}` → brief (same body as `web-bff` response) |
+| `POST /internal/v1/uc2/answer` | `{question, language}` → answer or decline |
+| `POST /internal/v1/uc3/draft` | `{customer_id, meeting_date, notes}` → draft (no persistence; `web-bff` stores it) |
+| `POST /internal/v1/uc3/commit` | `{draft_id, draft, approval_token}` + `Idempotency-Key` → saga status (pass-through to `tool-gateway`; the orchestrator cannot mint or change the token) |
+| `GET /internal/v1/meetings?days=2` | upcoming meetings |
+
+Example `POST /internal/v1/uc1/brief` internal trace of decisions returned in a debug-free form (only metadata):
+
+```json
+{
+  "...": "same as web-bff brief",
+  "internal": {"steps": [
+    {"step": "entitlement", "ms": 18, "cache": "hit"},
+    {"step": "get_brief_inputs", "ms": 1210, "tools": {"get_customer_profile": "ok", "get_facilities": "ok", "get_kyc_status": "ok", "get_transaction_signals": "ok", "get_news": "timeout"}},
+    {"step": "pii_and_shields", "ms": 240},
+    {"step": "generate", "deployment": "gen-large", "ms": 3120, "tokens_in": 1840, "tokens_out": 182},
+    {"step": "checks", "ms": 21, "dropped": 0}
+  ]}
+}
+```
+
+`web-bff` strips `internal` before responding to the client; it feeds the progress UI ("Fetching facilities ...")
+and metrics.
+
+**Auth.** Inbound: workload token `aud=api://rm-copilot-orchestrator`, role `Orchestrator.Invoke`, `azp` = `web-bff`
+identity; plus `x-rm-token` present and syntactically a JWT (the orchestrator does not need to trust it; it passes
+it on; it reads `oid` only for metric hashing). Outbound: its workload token to `tool-gateway` (role
+`Tools.Invoke`, `Audit.Append`) and to APIM AI gateway (role `AiGateway.Generate`); managed identity to Content
+Safety and AI Language (Cognitive Services User role scoped to those resources), App Configuration Data Reader.
+
+**Dependencies.**
+
+| Dependency | Timeout | Retries | Breaker | On failure |
+|---|---|---|---|---|
+| `tool-gateway` read tools | `get_brief_inputs` (UC1): `min(2,000, remaining − 2,800)`; other tools: `min(2,000, remaining − reserve − min_gen)` | per §1.7 | per tool | non-critical source (news, KYC, signals): section flagged, `mode=partial`; critical source (profile, facilities): `503`/`504` mapped |
+| `tool-gateway` `search_policies` | `min(1,000, remaining − 2,500)` | 0 | yes | UC2 `503 DEPENDENCY_UNAVAILABLE` (no answer without retrieval) |
+| APIM AI gateway `gen-large` | `remaining − post_reserve` (≥ min viable budget, else skip) | 0 in client; APIM retries to backend 2 only if ≥ 4 s remain | client breaker 20 s | degraded mode |
+| APIM AI gateway `gen-small` (router, rewrite, extract) | rewrite: `min(1,000, ...)`; extract: `remaining − 300` | 0 | yes | UC2 rewrite failure: use the raw masked question; UC3 extract failure: degraded (manual call report) |
+| Content Safety Prompt Shields | 500 ms | 0 | yes | local injection rules decide (C2 floor) and `rmc_guardrail_fallback_total{service="content-safety"}` increments. UC1 and UC2: continue. UC3: continue with quote quarantine and a visible notice "safety check unavailable, review quoted text" (every draft is reviewed by the RM before approval) **[LLD decision]** |
+| AI Language PII | 500 ms | 0 | yes | regex masking always runs; on AI Language failure, person names are masked by the CRM-known names list for the customer (contact names from profile) |
+| App Configuration | background | n/a | n/a | last known values |
+
+**Scaling.** 3 to 6 replicas (pilot), 3 to 12 (scale). HPA on CPU 60% and KEDA Prometheus trigger on
+`rmc_http_server_inflight_requests{service="orchestrator"}` > 15 per pod (requests are I/O bound and long).
+Illustrative resources: requests `500m` / `1Gi`, limits `2` / `2Gi`. Node pool `core`.
+
+**Configuration keys.** `rmc:orchestrator:model:{gen-large|gen-small|embed}:deployment` (deployment names,
+§8.2), `rmc:orchestrator:model:canary:deployment`, `rmc:orchestrator:prompt:{template_id}` (pinned version,
+§8.1), `rmc:orchestrator:budget:max_tool_steps` (6), `rmc:orchestrator:budget:max_input_tokens` (12000),
+`rmc:orchestrator:budget:max_output_tokens` (1500), `rmc:orchestrator:min_gen_ms:{uc1|uc2|uc3}`
+(2500/2000/3000), `rmc:orchestrator:post_reserve_ms:{uc1|uc2|uc3}` (300/500/300),
+`rmc:orchestrator:uc2:retry_min_remaining_ms` (4000), `rmc:orchestrator:uc2:min_reranker_score` (2.0),
+`rmc:orchestrator:uc2:relative_keep` (0.45), `rmc:orchestrator:guardrail:version` (e.g. `guardrails/2026.11.2`),
+`rmc:orchestrator:guardrail:pii_min_confidence` (0.8), `rmc:orchestrator:groundedness:min_support` (0.6).
+
+**Failure behaviour.** See §9 and §10. Summary: model problems → degraded mode (UC1 facts-only, UC2 ranked passages
+without a generated answer, UC3 manual call report form); entitlement denied → `403 NOT_ENTITLED` with no model
+call; budget exceeded → `429 BUDGET_EXCEEDED`; nothing unverified is ever returned (C18).
+
+### 2.3 `tool-gateway`
+
+**Responsibilities.** The security boundary (C4). Validates both tokens on every call; entitlement check first
+(cache ≤ 60 s); calls systems of record through the APIM system API facade; minimises and masks fields; returns
+facts with source references; policy search (query embedding via APIM AI gateway, AI Search hybrid query with
+mandatory filters); write API that verifies the approval token with the public key only; jti replay store;
+saga and outbox; audit producer (Event Hubs, waits for ack); consumes portfolio change events to invalidate the
+entitlement cache.
+
+**Endpoints.**
+
+| Method and path | Caller | Purpose |
+|---|---|---|
+| `POST /v1/tools/{tool_name}` | `orchestrator` | Invoke a read tool (§3). Body `{"contract_major": 1, "input": {...}}` |
+| `POST /internal/v1/commits` | `orchestrator` | Verify approval and run the write saga (§4, §5) |
+| `GET /internal/v1/commits/{saga_id}` | `orchestrator` | Saga status (RM must be the saga's `sub`) |
+| `POST /internal/v1/audit` | `orchestrator` | Append a use-case audit event (`brief_built`, `answer_released`, `declined`, `followup_drafted`, `degraded`). `tool-gateway` stamps actor from `x-rm-token`, validates schema, sends to Event Hubs |
+| `POST /internal/v1/outbox/deliver` | `outbox-worker` | Deliver one outbox item using the persisted verdict (§5.4) |
+| `GET /admin/v1/outbox?state=poison` | operator (role `Ops.Outbox`, PIM) | List poison items (metadata only) |
+| `POST /admin/v1/outbox/{item_id}/retry` | operator | Reset to `queued`, attempt now (audited) |
+| `POST /admin/v1/outbox/{item_id}/resolve` | operator + second operator approval | Mark `committed_manually` with a CRM reference (four-eyes, audited) |
+| `POST /admin/v1/outbox/{item_id}/cancel` | operator | Mark `cancelled`; RM notified in UI (audited) |
+
+Tool invocation example:
+
+```json
+// POST /v1/tools/get_facilities
+{"contract_major": 1, "input": {"customer_id": "harbourline"}}
+// 200
+{
+  "tool": "get_facilities",
+  "contract_version": "1.1.0",
+  "output": {"facilities": [
+    {"facility_id": "F-209", "type": "working_capital_line", "limit": {"amount": "5000000.00", "currency": "AED"},
+     "used": {"amount": "4600000.00", "currency": "AED"}, "utilisation_pct": 92, "days_above_90_pct": 45, "status": "active"}
+  ]},
+  "sources": [{"system": "LOS", "ref": "LOS F-209", "as_of": "2026-11-26T04:00:00Z"}],
+  "cache": "miss",
+  "entitlement": {"basis": "portfolio_owner", "cache": "hit"}
+}
+```
+
+Commit example (`POST /internal/v1/commits`):
+
+```json
+// request
+{
+  "draft_id": "01937a50-1111-7000-8000-000000000abc",
+  "draft": {"schema": "followup/1", "customer_id": "harbourline", "meeting_date": "2026-11-26", "call_report": {"...": "..."}, "tasks": ["..."], "email": {"...": "..."}},
+  "approval_token": "eyJhbGciOiJFUzI1NiIsImtpZCI6ImFwcHJvdmFsLXNpZ25pbmcvM2Y5YyIsInR5cCI6InJtLWFwcHJvdmFsK2p3dCJ9.eyJ...In0.MEUC..."
+}
+// 202: body as in web-bff approve response
+```
+
+**Auth.** Inbound: (1) workload token `aud=api://rm-copilot-tool-gateway`, `idtyp=app`, role `Tools.Invoke` (tools,
+commits, audit), `Outbox.Deliver` (deliver only); `azp` must match the expected identity for the route. (2)
+`x-rm-token`: `iss` = Bank tenant v2 issuer, `aud=api://rm-copilot-tool-gateway`, `tid` = Bank tenant, `exp`/`nbf` with
+60 s skew, `scp` contains `Tools.Read` (read tools, audit) or `Tools.Write` (commits). RM = `oid`. Admin routes:
+user token with role `Ops.Outbox` and `acrs` contains `c1`, reached only through the private admin ingress.
+Outbound: workload token to APIM facade (`SystemApi.Read`, `SystemApi.Write`, `SystemApi.DeferredWrite`) and AI
+gateway (`AiGateway.Embed`); OBO to Graph (`Calendars.ReadBasic`); AI Search `Search Index Data Reader` on the
+policy index; Cosmos data-plane RBAC (custom role, containers `entitlements`, `jti`, `approvals`, `outbox`,
+`idempotency`; no access to `drafts` or `sessions`); Event Hubs `Azure Event Hubs Data Sender` on `audit-events` and `audit-content`; Key
+Vault custom role with `keys/read` only on `approval-signing` (public key).
+
+**Entitlement check (first step of every customer-scoped tool and of commits).**
+
+```text
+entitled(rm_oid, customer_id, mode):          # mode = read | write
+  e = in_process_cache.get(rm_oid)            # TTL 10 s
+  if not e: e = cosmos.entitlements.read(rm_oid)       # TTL 50 s, deleted on portfolio change event
+  if not e: e = facade.crm.get_entitlements(rm_oid) -> cosmos upsert -> in-process put
+  basis = owner      if customer_id in e.portfolio
+        | delegate   if any d in e.delegations: d.customer_scope covers customer_id and d.from <= now < d.to
+        | team_lead  if role RmCopilot.TeamLead and customer_id in e.team_portfolio and mode == read
+  if no basis: audit(entitlement_denied); raise 403 NOT_ENTITLED
+```
+
+Maximum staleness: 50 s (Cosmos) + 10 s (in-process) = 60 s (plan C22). Portfolio change events: CRM publishes
+`portfolio.changed {rm_oid, customer_id, change}` and `delegation.changed` to Event Hub `crm-portfolio-events`
+(same namespace) **[LLD decision; confirm CRM can emit events]**; consumer group `tool-gateway` deletes the
+Cosmos document. If entitlements cannot be resolved (CRM down and no cache) the answer is **deny** with
+`503 DEPENDENCY_UNAVAILABLE` (never allow on failure).
+
+**Dependencies.**
+
+| Dependency | Timeout | Retries | Breaker | On failure |
+|---|---|---|---|---|
+| APIM facade → CRM (reads, entitlements) | `min(1,500, remaining − 100)` | 1 on 503/reset per §1.7 | yes, 60 s open | entitlement: deny (503); profile: 503 |
+| APIM facade → CRM (writes) | `min(1,000, remaining − 250)` | 0 | 3 consecutive | item → outbox `queued` |
+| APIM facade → ODS | `min(1,500, remaining − 100)` | per §1.7 | yes | signals section flagged |
+| APIM facade → LOS | `min(1,500, remaining − 100)` | per §1.7 | yes | facilities: critical → 503 |
+| APIM facade → KYC | `min(1,200, remaining − 100)` | per §1.7 | yes | KYC section flagged (partial) |
+| APIM facade → news feed | `min(1,000, remaining − 100)` | 0 | yes | news section flagged (partial) |
+| Graph (calendar) | `min(800, remaining − 100)` | 0 | yes | empty meeting list with warning |
+| APIM AI gateway `embed` | `min(300, remaining − 100)` | 0 | yes | UC2: keyword-only (BM25 + semantic ranker) search, flagged `retrieval_mode=keyword` |
+| AI Search | `min(600, remaining − 100)` | 0 | yes | 503 |
+| Cosmos | 300 ms point ops | SDK 429 retry within deadline | yes | reads: entitlement deny; commit: 503 before jti create, or saga recovery after (§5.5) |
+| Event Hubs (audit) | 300 ms, waits for ack | 1 within deadline | yes | **fail closed**: a tool result is not released without its audit event; `503 DEPENDENCY_UNAVAILABLE` **[confirm with Risk; see §14]** |
+| Key Vault (public key) | cached per `kid` for 10 min, refreshed on unknown `kid` | 1 | yes | known `kid`s keep verifying from cache; unknown `kid` → `APPROVAL_INVALID/UNKNOWN_KID` |
+
+**Scaling.** 3 to 6 replicas (pilot), 3 to 12 (scale), HPA CPU 60% plus KEDA Prometheus trigger on in-flight
+requests > 30 per pod. Illustrative resources: requests `500m` / `768Mi`, limits `2` / `1.5Gi`. Node pool
+`verifier` (taint `rmc/role=verifier:NoSchedule`), separate from `signer` (C11).
+
+**Configuration keys.** `rmc:tool-gateway:entitlements:cosmos_ttl_s` (50), `rmc:tool-gateway:entitlements:local_ttl_s`
+(10), `rmc:tool-gateway:timeouts:{crm|ods|los|kyc|news|graph|search|embed}_ms`,
+`rmc:tool-gateway:approval:allowed_kids` (list, §4.7), `rmc:tool-gateway:approval:clock_skew_s` (30),
+`rmc:tool-gateway:approval:max_ttl_s` (300), `rmc:tool-gateway:search:index_name` (e.g. `policies-v3`),
+`rmc:tool-gateway:search:top_k` (5), `rmc:tool-gateway:search:candidates` (50),
+`rmc:tool-gateway:contracts:{tool}` (active version), `rmc:tool-gateway:crm_write_timeout_ms` (1000).
+
+**Failure behaviour.** Fails closed on identity, entitlement, approval and audit. Fails partial on non-critical
+sources. Writes never fail silently: every item ends in `committed`, `queued`, `failed` or `cancelled` with an
+audit event.
+
+### 2.4 `outbox-worker`
+
+**Responsibilities.** Delivers queued CRM writes from the Cosmos `outbox` container. Picks up new items via the
+change feed processor (lease container `leases`) and due retries via a scheduler query every 15 s
+(`state IN ("queued","retry_wait") AND next_attempt_at <= now`), because the change feed fires only on writes
+**[LLD decision]**. For each item: read-before-retry by external reference, then deliver through
+`tool-gateway POST /internal/v1/outbox/deliver`. Applies the backoff schedule and poison rules (§5.3). Also runs
+the **saga recovery sweep** (§5.5) and the **unused-approval sweep** (minted tokens never presented: emits
+`approval_unused` via the audit endpoint after `exp`).
+
+**Endpoints.** None besides health and metrics. Deliver request it sends:
+
+```json
+// POST tool-gateway /internal/v1/outbox/deliver
+{"outbox_item_id": "Xq3v9Kd2Q0yB5nT1ZsPq8w:t2", "attempt": 3}
+// 200
+{"state": "committed", "crm_ref": "TSK-55102", "found_by_read_before_retry": false}
+```
+
+**Auth.** Workload token to `tool-gateway`, role `Outbox.Deliver`. Cosmos data-plane role on `outbox`,
+`leases`, `approvals` (read, conditional replace) and `jti` (read, state update for the sweeps). No access to Key Vault or Event Hubs (audit via
+`tool-gateway`).
+
+**Dependencies.** `tool-gateway` deliver: timeout 5,000 ms (no RM waiting; CRM cap inside `tool-gateway` 3,000 ms
+for deferred writes); breaker per CRM endpoint opens after 3 consecutive failures, 60 s. Cosmos: 1,000 ms.
+
+**Scaling.** 2 replicas (2 zones), no autoscale; change-feed leases spread work; the scheduler query uses a
+Cosmos lease document (`leases/scheduler`) with a 30 s lease so only one replica runs it at a time.
+Illustrative resources: `100m` / `256Mi`, limits `500m` / `512Mi`.
+
+**Configuration keys.** `rmc:outbox-worker:schedule` (`10s,30s,2m,10m,30m,2h,6h,12h`),
+`rmc:outbox-worker:max_attempts` (8), `rmc:outbox-worker:jitter` (`full`), `rmc:outbox-worker:poll_interval_s` (15),
+`rmc:outbox-worker:business_hours_only` (false), flags `writes`, `outbox_delivery`.
+
+**Failure behaviour.** Flag off: items stay `queued`, attempts are not consumed, `rmc_outbox_paused` = 1.
+`tool-gateway` down: attempt counted as `retryable_failure`. Poison: item `failed`, alert, operator action (§5.6).
+
+### 2.5 `ingestion-worker`
+
+**Responsibilities.** Policy pipeline (`00-plan.md` §3.2): document store → Document Intelligence (layout) → PII
+scan → injection scan (Prompt Shields document check, ingestion time) → clause chunking (§6.3) → embeddings via
+APIM AI gateway (`embed`) → AI Search; stores chunks and embeddings in Blob (`policy-chunks`) for index rebuild;
+marks superseded versions; deletes Document Intelligence results after processing.
+
+**Trigger.** The policy DMS export (through the facade) drops approved documents with a manifest
+(`doc_id`, `version`, `status`, `effective_from`, `effective_to`, `classification`, `owner`, `language`) into Blob
+container `policy-inbox`. KEDA `azure-blob` scaler on `policy-inbox` (blob count > 0) **[LLD decision]**.
+
+**Endpoints (admin, private admin ingress, role `Ops.Ingestion`).**
+
+| Method and path | Purpose |
+|---|---|
+| `POST /admin/v1/ingest` | `{"blob": "policy-inbox/credit-policy-v4.2.pdf"}` → `{"job_id": "...", "state": "queued"}` |
+| `GET /admin/v1/jobs/{job_id}` | `{"state": "indexed", "chunks": 214, "pii_findings": 0, "injection_findings": 0, "index": "policies-v3"}` |
+| `POST /admin/v1/reindex` | `{"target_index": "policies-v4", "embed_deployment": "embed-2026-12"}` rebuild from stored chunks (re-embed if the deployment changed) |
+| `POST /admin/v1/documents/{doc_id}/retire` | Set `status=retired` on all chunks of the document |
+
+**Auth.** Workload token to AI gateway (`AiGateway.Embed`); managed identity: Document Intelligence and AI
+Language (Cognitive Services User), Content Safety, AI Search `Search Index Data Contributor`, Storage Blob Data
+Contributor on `policy-inbox`, `policy-chunks`, `policy-quarantine`.
+
+**Dependencies.** Document Intelligence: async poll, 120 s per document, 2 retries with 10 s / 60 s backoff;
+AI Language: 10 s per batch, 2 retries; embeddings: 10 s per batch of 16 chunks, retry on 429 honouring
+`Retry-After`, max 5; AI Search upload: batch 100, retry 3. No deadline header (batch work); APIM use case
+`ingest` has its own token limit so ingestion never starves RM traffic (C10).
+
+**Scaling.** KEDA 0 to 3 replicas. Illustrative resources: `1` CPU / `2Gi`, limits `2` / `4Gi`.
+
+**Configuration keys.** `rmc:ingestion:chunk:max_tokens` (512), `rmc:ingestion:chunk:min_tokens` (64),
+`rmc:ingestion:chunk:split_overlap_pct` (15), `rmc:ingestion:target_index`, `rmc:ingestion:embed_dimensions` (3072),
+`rmc:ingestion:pii:action` (`quarantine`).
+
+**Failure behaviour.** Any PII finding above threshold or Prompt Shields document attack → document moved to
+`policy-quarantine`, not indexed, owner notified. Partial failures never leave a half-indexed document visible:
+chunks are uploaded with `status=staged` and flipped to `current` in one merge batch after all chunks succeed,
+together with `superseded` on the previous version.
+
+### 2.6 `audit-writer`
+
+**Responsibilities.** Consumes `audit-events` (metadata) and `audit-content` (envelope-encrypted content) from
+Event Hubs; validates schema; appends metadata to the per-partition **hash chain** in immutable Blob (WORM, GZRS);
+writes content to the content store encrypted with a per-customer key; sends metadata to the restricted Log
+Analytics table `RmCopilotAudit_CL` via the Logs Ingestion API (DCR); writes hourly signed chain anchors (§6.5).
+Serves auditor verification and the erasure (crypto-shred) operation.
+
+**Endpoints (admin, private admin ingress).**
+
+| Method and path | Role | Purpose |
+|---|---|---|
+| `POST /admin/v1/chain/verify` | `Audit.Verify` | `{"chain_id": "p2", "from": "2026-11-01T00:00:00Z", "to": "2026-11-26T00:00:00Z"}` → `{"verified": 18233, "breaks": [], "anchors_ok": true}` |
+| `POST /admin/v1/erasure` | `Audit.Erase` (PIM) + second approver | `{"customer_id": "crescent", "legal_basis_ref": "DPO-2026-114"}` → `{"state": "pending_second_approval"}`, then crypto-shred (§6.6) |
+| `GET /admin/v1/erasure/{id}` | `Audit.Erase` | status |
+
+**Auth.** Event Hubs Data Receiver (consumer group `audit-writer`); Storage: data-plane write to `audit-worm`
+(append only by immutability policy) and `audit-content`; Key Vault: `unwrapKey` on `audit-transport`, `wrapKey`
+/ `unwrapKey` / `create` on per-customer keys in vault `kv-rmc-cust-<env>`, `sign` on `audit-anchor`; Logs
+Ingestion `Monitoring Metrics Publisher` on the DCR.
+
+**Dependencies.** Event Hubs (checkpoint every 100 events or 10 s in Blob `eh-checkpoints`); Blob append 2 s,
+retry 5 with backoff; Key Vault 1 s, retry 3; Log Analytics ingestion 5 s, retry with backoff, buffered (the WORM
+append is the system of record for audit; Log Analytics lag does not block). Ordering: per partition, sequential.
+A failure to append to WORM stops the partition consumer (no skipping); alert `AuditConsumerLag`.
+
+**Scaling.** KEDA `azure-eventhub` scaler on lag (> 500 events), min 2, max 4 (= partitions). Illustrative
+resources: `250m` / `512Mi`, limits `1` / `1Gi`.
+
+**Configuration keys.** `rmc:audit-writer:chain:blob_container` (`audit-worm`),
+`rmc:audit-writer:chain:anchor_interval_min` (60), `rmc:audit-writer:content:retention_days` (365),
+`rmc:audit-writer:la:dcr_id`, `rmc:audit-writer:schema_version` (`audit/1`).
+
+**Failure behaviour.** Schema-invalid event: written to the chain as `invalid_event` with its hash (never dropped)
+and alerted. Event Hubs retention (3 days for `audit-events`, 1 day for `audit-content`) is the buffer during
+outages; lag alert at 5 min.
+
+### 2.7 `eval-runner`
+
+**Responsibilities.** CI job and nightly job (Kubernetes `CronJob` in the eval environment, plus a GitHub
+Actions/Azure DevOps job for the release gate). Runs the golden set (≥ 300 items: QA, brief, extraction, access,
+restricted, superseded, injection, Arabic, false-positive banking language) against a deployed stack or against
+a candidate model deployment; computes gates (`00-plan.md` §5); writes a signed report; publishes `rmc_eval_metric`.
+Online sampling (flag `online_eval`) judges a sample of production outputs with an in-region judge
+(`gen-large` in the same environment, use case `eval`) using only already-masked content from the audit content
+store, in prod only **[confirm with MRM; see §14]**.
+
+**Interface (CLI, no HTTP API).**
+
+```text
+eval-runner run --suite release|nightly|online-sample --target https://orchestrator.rm-copilot.svc \
+  --deployment-override gen-large=gen-large-2026-12 --golden golden/v3.jsonl --out report.json
+exit code 0 = all gates pass, 1 = a gate failed, 2 = run error
+```
+
+Report schema (excerpt):
+
+```json
+{
+  "run_id": "eval-2026-11-26-0142", "suite": "release", "golden_set": {"version": "v3", "items": 312, "sha256": "..."},
+  "lineage": {"gen-large": {"deployment": "gen-large-2026-08", "model_version": "[pinned]"}, "prompt_hashes": {"uc2.answer": "sha256:..."}, "guardrail_version": "guardrails/2026.11.2", "index_version": "policies-v3"},
+  "gates": [
+    {"metric": "groundedness", "observed": 0.981, "lower_bound_95": 0.958, "threshold": 0.95, "pass": true},
+    {"metric": "citation_accuracy", "observed": 0.977, "lower_bound_95": 0.953, "threshold": 0.95, "pass": true},
+    {"metric": "entitlement_leaks", "observed": 0, "threshold": 0, "pass": true},
+    {"metric": "injection_success", "observed": 0, "threshold": 0, "pass": true},
+    {"metric": "numeric_mismatches", "observed": 0, "threshold": 0, "pass": true},
+    {"metric": "false_positive_block_rate", "observed": 0.011, "threshold": 0.02, "pass": true}
+  ],
+  "pass": true
+}
+```
+
+Confidence bound: one-sided 95% Wilson lower bound (z = 1.645). With 300 items, groundedness needs ≥ 292 of 300
+passing (observed ≥ 97.3%) to clear 0.95 **[LLD decision; agree method with MRM]**.
+
+**Auth.** Workload identity `id-rmc-eval-runner` (federated to the CI OIDC subject or the CronJob service
+account): `AiGateway.Generate`, `AiGateway.Embed`, `AiGateway.Judge`; `Orchestrator.Invoke` in the eval
+environment only; synthetic RM identities (test tenant users) for entitlement tests. No access to prod customer
+data outside prod; online sampling reads only masked content.
+
+**Dependencies, scaling, configuration.** Concurrency 4 requests; per-item timeout = the use case deadline plus
+2 s; judge calls 20 s. Runs as a Job (`1` CPU / `2Gi`). Keys: `rmc:eval:golden_set_version`,
+`rmc:eval:gates:*` (thresholds above), `rmc:eval:online:sample_rate` (0.02), `rmc:eval:online:max_per_day` (200).
+
+**Failure behaviour.** A gate failure blocks the release pipeline and the model pin change (§8.5). A run error
+(not a gate failure) also blocks; it never passes by default.
+
+---
+
+## 3. Tool contracts (typed tool catalogue)
+
+### 3.1 Rules common to every tool
+
+- Tools are invoked only by `orchestrator` workflows (fixed code paths), never chosen freely by the model. The
+  model never sees tool names, arguments or raw tool output; it sees masked facts (UC1), masked passages (UC2) or
+  masked notes (UC3).
+- Request envelope: `POST /v1/tools/{tool}` with `{"contract_major": <int>, "input": {...}}`. Response envelope:
+  `{"tool", "contract_version", "output", "sources", "cache", "entitlement"}` (example in §2.3).
+- Inputs are schema-validated with `additionalProperties: false`. Any field naming a user (`rm_id`, `oid`,
+  `user`) is rejected. The RM is always the `oid` of `x-rm-token`.
+- `customer_id` pattern: `^[A-Za-z0-9_-]{1,64}$`. It is the CRM customer id (fictional in this repo).
+- Customer-scoped tools run the entitlement check (§2.3) **before** any downstream call. Denied: `403
+  NOT_ENTITLED`, no downstream call, audit `entitlement_denied`.
+- Every call emits one audit event `tool_called` (tool, contract version, outcome, source refs, latency, field
+  counts; no values) and waits for the Event Hubs ack (§2.3).
+- Masking vocabulary: **removed** = field never leaves `tool-gateway`; **masked** = transformed (for example last
+  4 characters); **aggregated** = only totals or bands leave.
+- Contract versioning: semver per tool. Major = breaking (removed field, changed meaning); minor = added optional
+  output field; patch = no schema change. `tool-gateway` serves the latest minor of each supported major and
+  rejects an unsupported major with `400 VALIDATION_FAILED/UNSUPPORTED_CONTRACT_VERSION`. Contract JSON Schemas live
+  in `contracts/tools/<tool>/<version>.json` and their SHA-256 is part of the guardrail and lineage record.
+
+### 3.2 Catalogue summary
+
+| Tool | Version | Kind | Source system (via APIM facade unless noted) | Entitlement rule | Used by |
+|---|---|---|---|---|---|
+| `get_brief_inputs` (composite) | 1.0.0 | read | fans out to the five UC1 read tools below, in parallel, inside `tool-gateway` | one entitlement check for the customer | UC1 |
+| `get_customer_profile` | 1.2.0 | read | CRM | owner, delegate, team lead (read) | UC1, UC3 |
+| `get_facilities` | 1.1.0 | read | LOS (limits), core banking ODS (balances) | owner, delegate, team lead | UC1 |
+| `get_transaction_signals` (transaction summary) | 1.0.0 | read | core banking ODS (aggregates) | owner, delegate, team lead | UC1 |
+| `get_kyc_status` | 1.0.0 | read | KYC/CDD | owner, delegate, team lead | UC1 |
+| `get_news` | 1.0.0 | read | licensed news feed and company registry (egress via Azure Firewall allow-list) | owner, delegate, team lead | UC1 |
+| `search_policies` | 2.0.0 | read | Azure AI Search (+ `embed` via APIM AI gateway) | none customer-scoped; clearance from app roles | UC2 |
+| `get_upcoming_meetings` **[added by LLD]** | 1.0.0 | read | Microsoft Graph (OBO, `Calendars.ReadBasic`) | own calendar only | UC1 entry |
+| `create_call_report` | 1.0.0 | write (saga only) | CRM | owner or delegate (not team lead) + valid approval verdict | UC3 commit |
+| `create_task` | 1.0.0 | write (saga only) | CRM | owner or delegate + valid approval verdict | UC3 commit |
+| `compose_email_link` | 1.0.0 | derive (no system-of-record write) | CRM (contact email lookup) | owner or delegate + committed or queued saga for the same RM | UC3 commit |
+
+**`get_brief_inputs` 1.0.0 (composite read, UC1).** Plan §4.1 steps 4 and 5 put the parallel fan-out to CRM,
+ODS, LOS, KYC and news inside `tool-gateway`. The orchestrator therefore makes **one** call (one tool step of the
+six allowed); `tool-gateway` runs the entitlement check once (denied: `403 NOT_ENTITLED` before any downstream
+call), then calls `get_customer_profile`, `get_facilities`, `get_transaction_signals`, `get_kyc_status` and
+`get_news` in parallel, each with `min(cap, remaining − 100)`, applies each tool's minimisation, and returns each
+tool's output envelope plus a per-source status. Input `{"customer_id": string}`. Output:
+
+```json
+{"tools": {
+   "get_customer_profile": {"status": "ok", "contract_version": "1.2.0", "output": {"...": "as 3.3"}, "sources": ["..."]},
+   "get_facilities": {"status": "ok", "contract_version": "1.1.0", "output": {"...": "as 3.4"}, "sources": ["..."]},
+   "get_transaction_signals": {"status": "ok", "contract_version": "1.0.0", "output": {"...": "as 3.5"}, "sources": ["..."]},
+   "get_kyc_status": {"status": "unavailable", "error_code": "DEPENDENCY_TIMEOUT"},
+   "get_news": {"status": "ok", "contract_version": "1.0.0", "output": {"...": "as 3.7"}, "sources": ["..."]}},
+ "critical_ok": true}
+```
+
+`status` per source: `ok`, `unavailable` (timeout, breaker open, 5xx), `disabled` (flag). `critical_ok` is false if
+the profile or facilities failed; the orchestrator then returns `503`/`504` instead of a brief. The prototype exposes
+this as `GET /tools/customers/{id}/brief-inputs` (§14.3).
+
+Write tools have **no** `POST /v1/tools/{tool}` route: they run only inside the commit saga (§5), so no code path
+lets the orchestrator or the model call them directly.
+
+### 3.3 `get_customer_profile` 1.2.0 (read, CRM)
+
+Input:
+
+```json
+{"type": "object", "additionalProperties": false, "required": ["customer_id"],
+ "properties": {"customer_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$"}}}
+```
+
+Output:
+
+```json
+{"type": "object", "additionalProperties": false,
+ "required": ["customer_id", "name", "crm_id", "sector", "customer_since_year", "turnover", "revenue_to_bank_yoy_pct", "contact"],
+ "properties": {
+   "customer_id": {"type": "string"},
+   "name": {"type": "string", "maxLength": 120},
+   "crm_id": {"type": "string"},
+   "sector": {"type": "string", "maxLength": 80},
+   "customer_since_year": {"type": "integer", "minimum": 1950},
+   "turnover": {"$ref": "#/$defs/money", "description": "Annual turnover, rounded to AED 100k"},
+   "revenue_to_bank_yoy_pct": {"type": "integer", "minimum": -100, "maximum": 1000},
+   "contact": {"type": "object", "additionalProperties": false, "required": ["contact_ref", "salutation"],
+     "properties": {"contact_ref": {"type": "string"}, "salutation": {"type": "string", "maxLength": 60, "description": "Title and family name only"}}}
+ },
+ "$defs": {"money": {"type": "object", "required": ["amount", "currency"], "properties": {"amount": {"type": "string", "pattern": "^-?\\d+\\.\\d{2}$"}, "currency": {"const": "AED"}}}}}
+```
+
+Minimised and masked: **removed** national id (Emirates ID), trade licence number, shareholder and UBO data,
+addresses, contact phone and email, internal risk grade, CRM free-text notes. **Masked**: contact reduced to
+`salutation` ("Mr Haddad"); the model sees `{contact}` only (§9). Example output:
+
+```json
+{"customer_id": "harbourline", "name": "Harbourline Logistics LLC", "crm_id": "4471", "sector": "Freight and logistics",
+ "customer_since_year": 2019, "turnover": {"amount": "48000000.00", "currency": "AED"}, "revenue_to_bank_yoy_pct": 12,
+ "contact": {"contact_ref": "crm-contact-88213", "salutation": "Mr Haddad"}}
+```
+
+Critical for UC1 and UC3: failure → `503`/`504` (no brief or draft without the profile).
+
+### 3.4 `get_facilities` 1.1.0 (read, LOS + ODS)
+
+Input: `{"customer_id": string}` (as 3.3).
+
+Output:
+
+```json
+{"type": "object", "additionalProperties": false, "required": ["facilities", "truncated"],
+ "properties": {
+   "truncated": {"type": "boolean"},
+   "facilities": {"type": "array", "maxItems": 5, "items": {"type": "object", "additionalProperties": false,
+     "required": ["facility_id", "type", "limit", "used", "utilisation_pct", "days_above_90_pct", "status"],
+     "properties": {
+       "facility_id": {"type": "string"},
+       "type": {"enum": ["working_capital_line", "vehicle_finance", "import_lc_line", "term_loan", "guarantee_line", "other"]},
+       "limit": {"$ref": "#/$defs/money"}, "used": {"$ref": "#/$defs/money"},
+       "utilisation_pct": {"type": "integer", "minimum": 0, "maximum": 999},
+       "days_above_90_pct": {"type": "integer", "minimum": 0},
+       "status": {"enum": ["active", "suspended", "expired"]},
+       "expiry_date": {"type": "string", "format": "date"}}}}}}
+```
+
+`utilisation_pct = round(used / limit × 100)` computed in `tool-gateway` (deterministic, half-up). Ordered by
+`utilisation_pct` descending; at most 5. **Removed**: account numbers, collateral details, pricing and margins
+(the model must never discuss pricing), covenant text, internal risk grade, limit approval history. Critical for
+UC1.
+
+### 3.5 `get_transaction_signals` 1.0.0 (read, core banking ODS; "transaction summary")
+
+Input: `{"customer_id": string, "months": integer 1..6 (default 3)}`.
+
+Output:
+
+```json
+{"type": "object", "additionalProperties": false, "required": ["period", "aggregates", "signals"],
+ "properties": {
+   "period": {"type": "object", "properties": {"from": {"format": "date"}, "to": {"format": "date"}}},
+   "aggregates": {"type": "object", "additionalProperties": false, "properties": {
+     "monthly_inflow": {"type": "array", "maxItems": 6, "items": {"type": "object", "properties": {"month": {"type": "string", "pattern": "^\\d{4}-\\d{2}$"}, "total": {"$ref": "#/$defs/money"}}}},
+     "monthly_outflow": {"type": "array", "maxItems": 6, "items": {"$ref": "#/properties/aggregates/properties/monthly_inflow/items"}},
+     "fx_outflow_change_pct": {"type": "integer"},
+     "payroll_to_other_bank": {"type": "boolean"},
+     "category_shares": {"type": "array", "maxItems": 5, "items": {"type": "object", "properties": {"category": {"enum": ["suppliers", "payroll", "fx", "tax_and_fees", "loan_repayment", "other"]}, "share_pct": {"type": "integer"}}}}}},
+   "signals": {"type": "array", "maxItems": 3, "items": {"type": "object", "additionalProperties": false,
+     "required": ["signal_id", "rule_id", "text", "nba"],
+     "properties": {"signal_id": {"type": "string"}, "rule_id": {"type": "string"}, "text": {"type": "string", "maxLength": 160}, "nba": {"type": "string", "maxLength": 80}}}}}}
+```
+
+Signals are produced by deterministic, versioned rules in `tool-gateway` (`rule_id` such as `fx_outflow_up_30`,
+`payroll_elsewhere`) over the aggregates, not by the model. Totals rounded to AED 10k. **Removed**: individual
+transactions, counterparty names, IBANs and account numbers, narrative fields. Non-critical: failure → section
+flagged.
+
+Example: `{"signals": [{"signal_id": "s1", "rule_id": "fx_outflow_up_30", "text": "Outbound FX payments up 38% this quarter", "nba": "Discuss FX forwards"}], ...}`
+
+### 3.6 `get_kyc_status` 1.0.0 (read, KYC/CDD)
+
+Input: `{"customer_id": string}`. Output:
+
+```json
+{"type": "object", "additionalProperties": false, "required": ["status", "risk_rating", "next_review_due", "documents"],
+ "properties": {
+   "status": {"enum": ["valid", "review_due", "expired", "under_review"]},
+   "risk_rating": {"enum": ["low", "medium", "high"]},
+   "next_review_due": {"type": "string", "format": "date"},
+   "documents": {"type": "array", "maxItems": 5, "items": {"type": "object", "additionalProperties": false,
+     "required": ["doc_type", "expires"], "properties": {"doc_type": {"enum": ["trade_licence", "moa", "passport_signatory", "ubo_declaration", "proof_of_address"]}, "expires": {"type": "string", "format": "date"}}}}}}
+```
+
+**Removed**: document numbers, scans, UBO identities, **all sanctions, PEP and adverse screening results**
+(tipping-off risk; not available to the copilot at all) **[confirm with Compliance]**. Non-critical: failure →
+`mode=partial`, KYC section flagged (§10.3).
+
+### 3.7 `get_news` 1.0.0 (read, licensed news feed and company registry)
+
+Input: `{"customer_id": string}`. The orchestrator cannot pass a free-text query: `tool-gateway` resolves the legal
+name from CRM, so the external call carries only the company's legal name (no personal data, no RM data).
+
+Output:
+
+```json
+{"type": "object", "additionalProperties": false, "required": ["items", "registry", "trust"],
+ "properties": {
+   "trust": {"const": "untrusted_external"},
+   "items": {"type": "array", "maxItems": 3, "items": {"type": "object", "additionalProperties": false,
+     "required": ["headline", "published", "source_name", "snippet"],
+     "properties": {"headline": {"type": "string", "maxLength": 200}, "published": {"type": "string", "format": "date"},
+       "source_name": {"type": "string", "maxLength": 60}, "snippet": {"type": "string", "maxLength": 600}}}},
+   "registry": {"type": "object", "properties": {"legal_status": {"enum": ["active", "suspended", "dissolved", "unknown"]}, "licence_expiry": {"type": "string", "format": "date"}}}}}
+```
+
+**Removed**: URLs, images, author names, HTML (stripped to plain text, control and zero-width characters
+removed). Every item is treated as an untrusted document for Prompt Shields (§9). Non-critical; behind flag
+`news`.
+
+### 3.8 `search_policies` 2.0.0 (read, AI Search)
+
+Input:
+
+```json
+{"type": "object", "additionalProperties": false, "required": ["query"],
+ "properties": {"query": {"type": "string", "minLength": 3, "maxLength": 500, "description": "Masked, rewritten question"},
+   "language": {"enum": ["en", "ar"], "default": "en"},
+   "top_k": {"type": "integer", "minimum": 1, "maximum": 5, "default": 5}}}
+```
+
+Server-side mandatory filter (never from input): `status eq 'current' and effective_from le <today GST> and
+(effective_to eq null or effective_to gt <today GST>) and clearance_rank le <RM clearance rank>`. RM clearance
+rank from the RM token's app roles: `Clearance.Internal` = 1, `Clearance.Restricted` = 2, none = 0 (public).
+
+Output:
+
+```json
+{"type": "object", "additionalProperties": false, "required": ["passages", "index_version", "retrieval_mode"],
+ "properties": {
+   "index_version": {"type": "string"},
+   "retrieval_mode": {"enum": ["hybrid", "keyword"]},
+   "passages": {"type": "array", "maxItems": 5, "items": {"type": "object", "additionalProperties": false,
+     "required": ["n", "chunk_id", "doc_id", "doc_title", "clause_ref", "text", "effective_from", "reranker_score"],
+     "properties": {"n": {"type": "integer"}, "chunk_id": {"type": "string"}, "doc_id": {"type": "string"},
+       "doc_title": {"type": "string"}, "clause_ref": {"type": "string"}, "heading_path": {"type": "array", "items": {"type": "string"}},
+       "text": {"type": "string", "maxLength": 4000}, "effective_from": {"format": "date"}, "language": {"enum": ["en", "ar"]},
+       "reranker_score": {"type": "number", "minimum": 0, "maximum": 4}}}}}}
+```
+
+Example: query "minimum trading history unsecured working capital line" returns `credit-5.3.1` (score 3.1) and
+`credit-5.3.4` (2.6); superseded `credit-5.3.1-v4.1` and restricted `cc-overrides` are excluded by the filter, not
+by ranking.
+
+### 3.9 `get_upcoming_meetings` 1.0.0 (read, Graph) [added by LLD]
+
+Needed for UC1 entry from the Teams tab; the plan names Graph `Calendars.ReadBasic` (C20) but no owning service.
+Input `{"days": 1..5}`. Output ≤ 20 items `{meeting_id (hashed Graph id), start, end, subject_masked,
+customer_id|null, match: "crm_contact_email"|"crm_customer_name"|"none"}`. Matching to CRM customers happens in
+`tool-gateway` against the RM's entitled portfolio only. **Removed**: body (not available with ReadBasic),
+attendee addresses (used only for matching, then dropped), location.
+
+### 3.10 `create_call_report` 1.0.0 (write, CRM; saga only)
+
+Input (built by `tool-gateway` from the verified draft, never from the orchestrator directly):
+
+```json
+{"type": "object", "additionalProperties": false,
+ "required": ["external_ref", "customer_id", "meeting_date", "text", "marking", "approved_by_oid", "approval_jti"],
+ "properties": {
+   "external_ref": {"type": "string", "pattern": "^[A-Za-z0-9_-]{22}:cr$"},
+   "customer_id": {"type": "string"}, "meeting_date": {"format": "date"},
+   "text": {"type": "string", "maxLength": 4000}, "opportunity_tags": {"type": "array", "maxItems": 5, "items": {"type": "string"}},
+   "marking": {"const": "AI-assisted, RM-approved"},
+   "approved_by_oid": {"type": "string", "format": "uuid"}, "approval_jti": {"type": "string"}}}
+```
+
+Output: `{"crm_ref": "CR-77120", "result": "created" | "found_existing"}`. Entitlement: write basis (owner or
+active delegate); team leads cannot write. Masking: text is the RM-approved text (PII masked at draft time
+unless the RM typed it back in; the RM is the author of record).
+
+### 3.11 `create_task` 1.0.0 (write, CRM; saga only)
+
+```json
+{"type": "object", "additionalProperties": false,
+ "required": ["external_ref", "customer_id", "type", "title", "due", "assignee_oid", "approval_jti"],
+ "properties": {
+   "external_ref": {"type": "string", "pattern": "^[A-Za-z0-9_-]{22}:t[1-9][0-9]?$"},
+   "customer_id": {"type": "string"},
+   "type": {"enum": ["send_document", "collect_document", "internal_referral", "call_back", "meeting", "other"]},
+   "title": {"type": "string", "maxLength": 120},
+   "due": {"type": "string", "format": "date", "description": "GST business date, Monday to Friday, >= today"},
+   "assignee_oid": {"type": "string", "format": "uuid", "description": "Always the approving RM (sub)"},
+   "approval_jti": {"type": "string"}}}
+```
+
+There is deliberately no task type for approving credit, changing a limit or committing pricing, and the policy
+check rejects such titles (`VALIDATION_FAILED/POLICY_VIOLATION`). Max 10 tasks per draft. Output as 3.10.
+
+### 3.12 `compose_email_link` 1.0.0 (derive, no system-of-record write)
+
+Input `{"saga_id": string}`. `tool-gateway` loads the **approved snapshot** for that saga (so only RM-approved text
+can become a link), checks the caller `oid` = saga `sub`, resolves the contact's email from CRM by `contact_ref`,
+and builds an Outlook compose deeplink (`https://outlook.office.com/mail/deeplink/compose?to=&subject=&body=`,
+URL-encoded) **[confirm deeplink format for the Bank's Outlook clients and the maximum URL length]**. If the URL
+would exceed 2,000 characters, the body is omitted from the link and returned as `copy_text` for the RM to paste.
+
+Output: `{"kind": "outlook_compose", "url": "https://outlook.office.com/mail/deeplink/compose?...", "copy_text": null}`.
+The copilot never sends mail and holds no mail scope (C20). The URL contains the customer's email address and the
+body: it is never logged, traced or audited in clear (audit stores its SHA-256).
+
+---
+
+## 4. Approval token (C6)
+
+### 4.1 Format
+
+JWS compact serialisation (RFC 7515), ES256 (ECDSA P-256 + SHA-256), signature in IEEE P1363 `R||S` form (64
+bytes). Size ≤ 1 KiB.
+
+Protected header (exact):
+
+```json
+{"alg": "ES256", "typ": "approval+jwt", "kid": "approval-signing/3f9c0d2a8b7e4f61a5d9c0b1e2f3a4b5"}
+```
+
+Payload (exact claim set from `00-plan.md` §4.2, no other claims allowed):
+
+| Claim | Type | Value |
+|---|---|---|
+| `iss` | string | `"web-bff"` |
+| `aud` | string | `"tool-gateway"` |
+| `sub` | string (GUID) | RM `oid` from the fresh RM token |
+| `customer_id` | string | `draft.customer_id` |
+| `op` | string | `"crm.commit_followup"` |
+| `draft_sha256` | string | lowercase hex SHA-256 of the canonical draft (§4.2), 64 characters |
+| `schema` | string | `"followup/1"` |
+| `iat` | integer | seconds since epoch (UTC) |
+| `exp` | integer | `iat + 300` |
+| `jti` | string | 16 random bytes, base64url (22 characters); also the `saga_id` |
+| `kid` | string | same value as the protected header `kid`; the verifier requires both to be equal |
+
+`kid` appears in both the protected header (RFC 7515 §4.1.4, used to select the key) and the payload (plan claim
+set); a mismatch is rejected, so the key-selection input is also covered by the signature.
+
+```json
+{"iss": "web-bff", "aud": "tool-gateway", "sub": "6b1f8a2e-3c4d-4e5f-9a0b-1c2d3e4f5a6b", "customer_id": "harbourline",
+ "op": "crm.commit_followup", "draft_sha256": "9f2c...e41a", "schema": "followup/1",
+ "iat": 1795665600, "exp": 1795665900, "jti": "Xq3v9Kd2Q0yB5nT1ZsPq8w", "kid": "approval-signing/3f9c0d2a8b7e4f61a5d9c0b1e2f3a4b5"}
+```
+
+### 4.2 Canonicalisation and hash
+
+1. Take the draft object exactly as stored and shown to the RM (schema `followup/1`, §6.1 `drafts`). The draft
+   schema allows only strings, integers, booleans, arrays and objects: **no floating-point numbers** (money and
+   percentages are strings or integers), which removes number-serialisation ambiguity in RFC 8785.
+2. Apply Unicode NFC to every string value and key (done when the draft is saved and again by the verifier; both
+   sides run the same library version, pinned in `contracts/canonical/VERSION`).
+3. Serialise with RFC 8785 (JSON Canonicalization Scheme): UTF-8, no insignificant whitespace, object members
+   sorted by UTF-16 code units of the key, minimal string escaping, ES6 number serialisation.
+4. `draft_sha256 = lowercase_hex(SHA-256(canonical_bytes))`.
+
+Test vectors (`contracts/canonical/vectors.json`): Arabic text, combining characters (NFC), emoji, escaped
+control characters, key order permutations, nested arrays. Both `web-bff` and `tool-gateway` CI run them.
+
+### 4.3 Signing (web-bff, Key Vault)
+
+```text
+header_b64  = b64url(JCS(header))
+payload_b64 = b64url(JCS(payload))
+signing_input = ASCII(header_b64 + "." + payload_b64)
+digest = SHA-256(signing_input)
+POST https://kv-rmc-sign-<env>.vault.azure.net/keys/approval-signing/<active_version>/sign?api-version=7.4
+     {"alg": "ES256", "value": b64url(digest)}          # [confirm api-version]
+signature = response.value                              # 64-byte R||S, base64url
+token = header_b64 + "." + payload_b64 + "." + signature
+```
+
+Key: `approval-signing`, type `EC-HSM`, curve `P-256`, Key Vault Premium `kv-rmc-sign-<env>`, `key_ops: [sign,
+verify]`, exportable false, purge protection on, Key Vault RBAC. `web-bff` identity: custom role with data actions
+`keys/sign/action` and `keys/read` on that key only. `tool-gateway` identity: custom role with `keys/read` only
+(public key). `orchestrator`: no role on this vault **[confirm custom data-action role names]**.
+
+### 4.4 Verification algorithm (tool-gateway `POST /internal/v1/commits`)
+
+```text
+ 1. Authenticate caller: workload token valid, idtyp=app, role Tools.Invoke, azp = orchestrator.
+       else 401 UNAUTHENTICATED/WORKLOAD_NOT_ALLOWED
+ 2. Authenticate RM: x-rm-token valid (iss, aud=api://rm-copilot-tool-gateway, tid, exp, nbf), scp contains Tools.Write.
+       rm_oid = token.oid                      else 401 UNAUTHENTICATED or 403 INSUFFICIENT_SCOPE
+ 3. Feature flags: writes and uc3 on (writes fresh within 5 min)   else 503 FEATURE_DISABLED
+ 4. Schema-validate the request body and the draft against followup/1 (NFC applied)
+       else 400 VALIDATION_FAILED (reason SCHEMA or POLICY_VIOLATION)
+ 5. Entitlement first (write mode): entitled(rm_oid, draft.customer_id, write)   else 403 NOT_ENTITLED
+ 6. Parse token: 3 base64url parts, no padding, total <= 2 KiB, header and payload are JSON objects
+       else APPROVAL_INVALID/MALFORMED
+ 7. Header: alg == "ES256" exactly                                      else ALG_NOT_ALLOWED
+            typ == "approval+jwt"                                     else WRONG_TYPE
+            no jku, x5u, jwk, x5c, crit members                          else MALFORMED
+            kid in config allowed_kids                                   else UNKNOWN_KID
+ 8. Signature: pub = public_key_cache[kid] (fetched by exact versioned key id from Key Vault, refreshed 10 min)
+            signature decodes to exactly 64 bytes; ECDSA-P256-SHA256 verify(pub, signing_input, R||S)
+                                                                         else BAD_SIGNATURE
+ 9. Claims: set(payload) == {iss,aud,sub,customer_id,op,draft_sha256,schema,iat,exp,jti,kid}
+            payload.kid == header.kid                                    else KID_MISMATCH
+            missing -> MISSING_CLAIM; extra -> UNEXPECTED_CLAIM; wrong JSON type -> MALFORMED
+10. iss == "web-bff"                                                     else WRONG_ISSUER
+    aud == "tool-gateway"                                                else WRONG_AUDIENCE
+11. Time (skew = 30 s): now <= exp + 30                                  else EXPIRED
+                        iat <= now + 30                                  else NOT_YET_VALID
+                        0 < exp - iat <= 300                             else TTL_TOO_LONG
+12. sub == rm_oid                                                        else SUB_MISMATCH
+13. customer_id == draft.customer_id                                     else CUSTOMER_MISMATCH
+    op == "crm.commit_followup" (the route's operation)                  else OP_MISMATCH
+    schema == draft.schema and schema in supported_schemas               else SCHEMA_MISMATCH
+14. h = hex(SHA-256(JCS(NFC(draft)))); constant_time_equal(h, draft_sha256)  else DRAFT_HASH_MISMATCH
+15. Idempotency-Key: if a stored response exists for (rm_oid, key): same body hash -> return it; else 409 IDEMPOTENCY_CONFLICT
+16. Atomic jti create (4.5)                                              else 409 REPLAYED (or idempotent return)
+17. Create the approval document (verdict + saga state, 4.6) and the outbox item documents (5.2, 5.5);
+    emit audit approval_issued + approval_verified
+18. Run the saga (5) and return 200/202 with per-item status
+Any failure in 6 to 14: emit audit approval_rejected {reason, kid, jti if parseable, token_sha256}; increment
+rmc_approval_tokens_rejected_total{reason}; respond 403 APPROVAL_INVALID with that reason.
+```
+
+Libraries: a maintained JOSE library configured with an explicit algorithm allow-list (`["ES256"]`), never
+"algorithm from header". Comparison of hashes in constant time.
+
+### 4.5 Atomic `jti` create
+
+Cosmos container `jti` (partition key `/id`). `CreateItem` (not upsert) is atomic per item id within its logical
+partition, so two concurrent commits with the same token cannot both succeed:
+
+```json
+{"id": "Xq3v9Kd2Q0yB5nT1ZsPq8w", "sub": "6b1f8a2e-...", "draft_id": "01937a50-...", "draft_sha256": "9f2c...e41a",
+ "idem_key_sha256": "c1d2...", "state": "reserved", "created_at": "2026-11-26T05:40:12.031Z", "ttl": 86400}
+```
+
+On `409 Conflict`: read the existing document. If `sub` and `draft_sha256` equal the current request's (a client
+or network retry of the same approval), return the existing saga's status with `200` and `"replay_of_same_request":
+true`, performing no new writes. Otherwise return `409 REPLAYED` with `details.saga_id` only if the caller is the
+same RM. After the saga is created, `state` becomes `bound`. TTL 1 day (> token life of 300 s + skew, plan §7).
+
+### 4.6 Verdict persistence
+
+Written as a new document in the `approvals` container (`id = jti`, `CreateItem`) before any CRM call, so that
+outbox retries after `exp` are authorised by the persisted verdict and never re-verify an expired token (C7). The
+document holds the verdict, the approved snapshot of the draft ("verdict persisted with the draft", plan §4.2) and
+the saga state. Only `tool-gateway` and `outbox-worker` can write `approvals`; `web-bff` (the signer) cannot write
+or alter a verdict **[LLD decision]**.
+
+```json
+{
+  "id": "Xq3v9Kd2Q0yB5nT1ZsPq8w", "type": "approval", "draft_id": "01937a50-1111-7000-8000-000000000abc", "customer_id": "harbourline",
+  "verdict": "valid", "jti": "Xq3v9Kd2Q0yB5nT1ZsPq8w", "kid": "approval-signing/3f9c...", "sub": "6b1f8a2e-...",
+  "op": "crm.commit_followup", "schema": "followup/1", "draft_sha256": "9f2c...e41a",
+  "iat": 1795665600, "exp": 1795665900, "verified_at": "2026-11-26T05:40:12.044Z", "verifier": "tool-gateway@sha256:ab12...",
+  "token_sha256": "77aa...", "approved_snapshot": {"...": "the canonical draft object"}, "auth_time": 1795665420,
+  "saga": {"state": "created", "items": []}, "ttl": 2592000
+}
+```
+
+`APPROVAL_INVALID` reason codes (HTTP 403 unless stated):
+
+| Reason | Cause |
+|---|---|
+| `MALFORMED` | Not a 3-part JWS, bad base64url, oversize, forbidden header member, wrong claim type |
+| `ALG_NOT_ALLOWED` | `alg` other than `ES256` (including `none`, `HS256`) |
+| `WRONG_TYPE` | `typ` not `approval+jwt` (stops a different JWT type being replayed here) |
+| `UNKNOWN_KID` | `kid` not in `allowed_kids` (rotated out or revoked) |
+| `BAD_SIGNATURE` | Signature does not verify |
+| `MISSING_CLAIM`, `UNEXPECTED_CLAIM` | Claim set not exact |
+| `KID_MISMATCH` | Payload `kid` differs from the header `kid` |
+| `WRONG_ISSUER`, `WRONG_AUDIENCE` | `iss` or `aud` wrong |
+| `EXPIRED`, `NOT_YET_VALID`, `TTL_TOO_LONG` | Time checks (30 s skew, 300 s max life) |
+| `SUB_MISMATCH` | Token's RM is not the RM on the call |
+| `CUSTOMER_MISMATCH`, `OP_MISMATCH`, `SCHEMA_MISMATCH` | Binding to the request |
+| `DRAFT_HASH_MISMATCH` | Submitted draft differs from the approved draft |
+| (separate code) `REPLAYED` (409) | `jti` already used by a different request |
+
+### 4.7 Key rotation (every 90 days, with overlap)
+
+| Day | Action | Who |
+|---|---|---|
+| D0 | Key Vault rotation policy (`lifetimeActions: rotate, timeAfterCreate P90D`; `expiryTime P120D`) creates version N+1. Event Grid `KeyNewVersionCreated` triggers the platform pipeline | Key Vault, pipeline |
+| D0 + 1 h | Pipeline adds N+1 to `rmc:tool-gateway:approval:allowed_kids` (now N, N+1); `tool-gateway` refreshes in ≤ 30 s and pre-fetches the public key | pipeline (audited App Configuration change) |
+| D0 + 24 h | Pipeline sets `rmc:web-bff:approval:active_kid` = N+1; `web-bff` signs with N+1 | pipeline |
+| D0 + 8 d | Pipeline removes N from `allowed_kids`; version N keeps its public key for forensic verification (exported to the audit store as a JWKS snapshot) and its `exp` attribute stops further signing | pipeline |
+
+The overlap (7 days) far exceeds the token life (300 s); persisted verdicts mean no in-flight saga depends on an old
+key. **Emergency revocation**: remove the `kid` from `allowed_kids` (effective ≤ 30 s), rotate immediately, and
+RMs re-approve; already-persisted verdicts stay valid (they were verified before revocation) unless the incident
+commander also sets `writes` off and reviews queued items.
+
+---
+
+## 5. Write saga and outbox (C7)
+
+### 5.1 Model
+
+One approval = one saga (`saga_id = jti`). Items: the call report (`item_id = "cr"`) and each task
+(`t1`..`t10`). Items are independent CRM records; the saga uses **forward recovery** (retry until committed or
+poison), never compensating deletes, because a partially written follow-up is still correct and every item is
+visible to the RM with its state **[LLD decision]**. External reference per item: `"<jti>:<item_id>"`, sent to
+CRM as the idempotency / external reference field **[confirm CRM support, plan §10.8]**.
+
+### 5.2 State machines
+
+Saga states:
+
+| State | Meaning | Next |
+|---|---|---|
+| `created` | Verdict persisted, saga document created | `executing` |
+| `executing` | Inline writes in progress (bounded by the commit deadline) | `completed`, `partially_queued`, `completed_with_failures` |
+| `partially_queued` | ≥ 1 item `queued` / `retry_wait` / `in_flight` in the outbox | `completed`, `completed_with_failures` |
+| `completed` | Every item `committed` or `committed_manually` | terminal |
+| `completed_with_failures` | All items terminal, ≥ 1 `failed` or `cancelled` | terminal (operator may still retry a failed item, which moves the saga back to `partially_queued`) |
+
+Item states (RM-visible mapping in brackets):
+
+```text
+pending [queued] --inline attempt--> in_flight [queued]
+in_flight --2xx--> committed [committed]
+in_flight --409 duplicate external_ref--> read-before-retry --found--> committed
+in_flight --timeout | 5xx | 429 | breaker open | deadline--> queued [queued]       (outbox, outcome may be unknown)
+in_flight --400 | 422 | 404--> failed [failed]                                     (poison immediately)
+queued --worker lease--> in_flight
+in_flight(worker) --read-before-retry finds external_ref--> committed (found_by_read_before_retry=true)
+in_flight(worker) --retryable failure, attempts < 8--> retry_wait [queued] --next_attempt_at--> queued
+in_flight(worker) --attempts == 8 or non-retryable--> failed [failed]
+failed --operator retry--> queued ; failed --operator resolve (four-eyes)--> committed_manually [committed]
+failed | retry_wait | queued --operator cancel--> cancelled [failed]
+```
+
+Inline path (inside the 2,000 ms commit deadline): all items written in parallel with timeout
+`min(1,000, remaining − 250)` each; any item not finished in time is set to `queued` with `outcome_unknown=true`.
+The commit response therefore always returns within the deadline.
+
+### 5.3 Retry and backoff schedule (outbox-worker)
+
+| Outbox attempt (overall attempt) | Base delay after previous failure |
+|---|---|
+| 1 (2) | 10 s |
+| 2 (3) | 30 s |
+| 3 (4) | 2 min |
+| 4 (5) | 10 min |
+| 5 (6) | 30 min |
+| 6 (7) | 2 h |
+| 7 (8) | 6 h |
+| 8 (9) | 12 h |
+
+Delay = equal jitter: `base/2 + random(0, base/2)`; a CRM `Retry-After` larger than the delay wins. Total span
+≈ 21 h, so an item is either delivered or poisoned by the next business morning. Classification of CRM responses:
+retryable = timeout, connection error, 408, 429, 500, 502, 503, 504, 401/403 (first 2 only, then poison and alert as
+a probable configuration fault); non-retryable = 400, 404, 422; 409 with "duplicate external reference" = success
+after read.
+
+**Read-before-retry.** Every outbox attempt starts with `GET` by external reference
+(`/crm/api/v1/call-reports?external_ref=...` or `/crm/api/v1/tasks?external_ref=...` through the facade). Found → mark
+`committed` with the found `crm_ref`, no write. Not found → write. This makes "timeout but actually created" safe.
+If the CRM cannot search by external reference, the item is marked poison after the first unknown outcome instead
+of retrying blind (no double posting, ever) **[confirm; see §14]**.
+
+### 5.4 Deliver contract (outbox-worker → tool-gateway)
+
+`tool-gateway` on `POST /internal/v1/outbox/deliver`: checks role `Outbox.Deliver`; loads the outbox item and the
+`approvals` document (verdict, approved snapshot, saga state); requires `verdict == "valid"`, saga not cancelled, flag `writes`; re-runs
+the entitlement check for `sub` in write mode (an RM who lost the customer since approval does not get the write;
+item → `failed`, reason `ENTITLEMENT_REVOKED`, RM notified) **[LLD decision]**; builds the CRM payload from
+`approved_snapshot`; calls the facade with `SystemApi.DeferredWrite` and header `x-rm-oid = sub` (APIM signs it
+with `mode=deferred`, §7.2); audits `write_committed` / `write_queued` / `write_failed` with `on_behalf_of = sub`,
+`actor = outbox-worker`.
+
+### 5.5 Crash recovery
+
+Each step is idempotent and ordered: (1) jti `reserved` → (2) approval document (verdict, snapshot, saga state
+`created`) created in `approvals` → (3) one item document per item created in state `pending` with a single
+`TransactionalBatch` in the `outbox` container (same partition key `saga_id`) → (4) jti `bound` → (5) inline
+writes. Outbox item documents are the source of truth for item state; `approvals.saga.items` is a denormalised
+summary updated after each transition. The
+worker selects only `queued` and due `retry_wait` items, so `pending` items are never double-sent. The
+`outbox-worker` recovery sweep runs every 60 s:
+
+- jti `reserved` > 60 s old, approval document present, item documents missing: create what is missing with every
+  item `queued` (writes still happen, via the outbox), set jti `bound`, audit `saga_recovered`.
+- items `pending` > 60 s old (the `tool-gateway` pod died before the inline write): set `queued` with
+  `outcome_unknown=true`.
+- jti `reserved` > 60 s old, no approval document: set jti `abandoned`, audit `approval_abandoned`; the RM sees "approval not
+  completed, approve again" (a new token, new `jti`).
+- items `in_flight` with `lease_until < now`: back to `queued` (read-before-retry protects against double posting).
+
+### 5.6 Poison handling and operator actions
+
+Poison = `failed`. Effects: alert `OutboxPoison` (ticket to RM operations, business hours), RM sees the item as
+`failed` with "Not saved to CRM. RM operations has been notified; you can also enter it in CRM directly", audit
+`write_failed`. Operator actions (admin ingress, role `Ops.Outbox` activated through PIM, auth context `c1`, every
+action audited with operator `oid` and a mandatory reason):
+
+| Action | Endpoint | Effect | Control |
+|---|---|---|---|
+| Retry now | `POST /admin/v1/outbox/{item_id}/retry` | `failed` → `queued`, attempts reset to 7 (one more try, then poison again) | single operator |
+| Resolve manually | `POST /admin/v1/outbox/{item_id}/resolve` `{"crm_ref": "...", "reason": "..."}` | → `committed_manually` | **four-eyes**: second operator confirms within 24 h |
+| Cancel | `POST /admin/v1/outbox/{item_id}/cancel` `{"reason": "..."}` | → `cancelled`; RM notified | single operator |
+| Pause all deliveries | flag `outbox_delivery` off | items stay `queued` | change audited in App Configuration |
+
+Operators see metadata only (item kind, state, attempts, last error code, external ref, timestamps); the payload
+is not shown in the admin API.
+
+### 5.7 Cosmos documents
+
+Saga state (the `saga` part of the `approvals` document, partition key `/id`, TTL 30 days):
+
+```json
+{"id": "Xq3v9Kd2Q0yB5nT1ZsPq8w", "type": "approval", "op": "crm.commit_followup", "sub": "6b1f8a2e-...",
+ "customer_id": "harbourline", "draft_id": "01937a50-...", "verdict": "valid", "...": "verdict fields as in §4.6",
+ "saga": {"state": "partially_queued", "items": [{"item_id": "cr", "kind": "call_report", "state": "committed", "crm_ref": "CR-77120"},
+           {"item_id": "t1", "kind": "task", "state": "committed", "crm_ref": "TSK-55101"},
+           {"item_id": "t2", "kind": "task", "state": "queued"}]},
+ "idempotency_key_sha256": "c1d2...", "created_at": "2026-11-26T05:40:12.050Z", "updated_at": "2026-11-26T05:40:13.310Z",
+ "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736", "ttl": 2592000}
+```
+
+Outbox item (`outbox`, partition key `/saga_id`; `ttl` set to 30 days only when terminal, `-1` while open):
+
+```json
+{"id": "Xq3v9Kd2Q0yB5nT1ZsPq8w:t2", "saga_id": "Xq3v9Kd2Q0yB5nT1ZsPq8w", "kind": "task", "external_ref": "Xq3v9Kd2Q0yB5nT1ZsPq8w:t2",
+ "state": "retry_wait", "attempts": 2, "next_attempt_at": "2026-11-26T05:41:05Z", "outcome_unknown": true,
+ "last_error": {"class": "timeout", "http_status": null, "at": "2026-11-26T05:40:35Z"},
+ "lease_owner": null, "lease_until": null, "crm_ref": null, "poison_reason": null,
+ "created_at": "2026-11-26T05:40:13.300Z", "_etag": "\"0000a1b2-0000-0d00-0000-674566aa0000\"", "ttl": -1}
+```
+
+All updates use `If-Match` on `_etag` (optimistic concurrency), so two workers can never both take the same item.
+
+---
+
+## 6. Data design
+
+### 6.1 Cosmos DB for NoSQL
+
+Account `cosmos-rmc-<env>` (UAE North, zone-redundant, single write region, Session consistency default,
+customer-managed key, `disableLocalAuth: true`, public network access disabled, continuous backup with
+point-in-time restore plus periodic backup copies to the BCP vault **[confirm backup redundancy options in UAE
+North]**). Database `rmcopilot`, shared autoscale throughput 1,000 RU/s max in pilot, dedicated 1,000 to 4,000 RU/s
+autoscale for `outbox` and `jti` at scale. Indexing policy per container excludes `/*` and includes only the
+queried paths, so content fields are never indexed.
+
+| Container | Partition key | Default TTL | Per-item TTL | Indexed paths | Writers | Readers |
+|---|---|---|---|---|---|---|
+| `sessions` | `/id` (SHA-256 of the session cookie) | 86,400 s (24 h, plan §7) | n/a | none | `web-bff` | `web-bff` |
+| `drafts` | `/id` (`draft_id`) | 2,592,000 s (30 days) | n/a | `/rm_oid/?` | `web-bff` | `web-bff` |
+| `jti` | `/id` (`jti`) | 86,400 s (1 day) | n/a | `/state/?`, `/created_at/?` | `tool-gateway`, `outbox-worker` (sweep) | same |
+| `idempotency` [LLD] | `/id` (SHA-256 of `rm_oid:key`) | 86,400 s | n/a | none | `web-bff`, `tool-gateway` | same |
+| `approvals` (verdicts, approved snapshot, saga state) | `/id` (`jti` = `saga_id`) | 2,592,000 s (30 days, plan §7) | n/a | `/sub/?`, `/saga/state/?` | `tool-gateway`, `outbox-worker` | `tool-gateway`, `outbox-worker` |
+| `outbox` | `/saga_id` | -1 (TTL on, no default) | 2,592,000 s once terminal (mock: 30-day default) | `/state/?`, `/next_attempt_at/?`, `/lease_until/?` | `tool-gateway`, `outbox-worker` | same |
+| `leases` | `/id` | none | n/a | default | `outbox-worker` (change feed + scheduler lease) | same |
+| `entitlements` | `/id` (`rm_oid`) | 50 s (+ 10 s in-process = 60 s, plan §7) | n/a | none | `tool-gateway` | `tool-gateway` |
+| `audit-chain-heads` [LLD] | `/id` (`chain_id`) | none | n/a | none | `audit-writer` (ETag-guarded) | `audit-writer` |
+
+Example `sessions`:
+
+```json
+{"id": "3e1a...sha256", "rm_oid": "6b1f8a2e-...", "tid": "0000-bank-tenant", "surface": "teams_tab",
+ "csrf_sha256": "a9b8...", "created_at": "2026-11-26T05:39:58Z", "last_seen": "2026-11-26T05:41:09Z",
+ "auth_time": 1795665420, "ttl": 86400}
+```
+
+No access or refresh tokens are stored in Cosmos; OBO results are cached in-process (MSAL in-memory cache keyed by
+the hash of the incoming assertion) and re-acquired on a pod miss (within the 150 ms edge budget).
+
+Example `drafts` (before approval; `approval` added by `tool-gateway`, §4.6):
+
+```json
+{"id": "01937a50-1111-7000-8000-000000000abc", "rm_oid": "6b1f8a2e-...", "customer_id": "harbourline", "etag_n": 4,
+ "draft": {"schema": "followup/1", "customer_id": "harbourline", "meeting_date": "2026-11-26",
+   "call_report": {"text": "Met Mr Haddad. Wants 2 more trucks next quarter ...", "opportunity_tags": ["vehicle_finance"]},
+   "tasks": [{"item_id": "t1", "type": "send_document", "title": "Send limit-increase checklist", "due": "2026-11-27"}],
+   "email": {"contact_ref": "crm-contact-88213", "subject": "Follow-up from today's meeting", "body": "Dear Mr Haddad, ..."}},
+ "lineage": {"prompt": "uc3.extract@4", "prompt_sha256": "5d1e...", "deployment": "gen-small", "model_version": "[pinned]", "guardrail_version": "guardrails/2026.11.2"},
+ "notices": ["QUOTE_QUARANTINED"], "approval": {"minted": {"jti": "Xq3v9Kd2Q0yB5nT1ZsPq8w", "kid": "approval-signing/3f9c...", "iat": 1795665600}},
+ "created_at": "2026-11-26T05:38:40Z", "ttl": 2592000}
+```
+
+Example `entitlements`:
+
+```json
+{"id": "6b1f8a2e-...", "portfolio": ["harbourline", "crescent"], "team_portfolio_ref": "team-sme-north",
+ "delegations": [{"delegator_oid": "9c0d...", "customer_scope": "portfolio", "from": "2026-11-20T00:00:00Z", "to": "2026-12-04T00:00:00Z", "source_ref": "CRM-DLG-311"}],
+ "fetched_at": "2026-11-26T05:39:59Z", "source": "crm", "ttl": 50}
+```
+
+Example `jti`, `approvals` and `outbox`: §4.5, §4.6 and §5.7. The plan's "saga state" container is realised
+as the `saga` part of the `approvals` document, which removes one crash window (verdict and saga state are written
+atomically) **[LLD decision; matches the prototype's container set]**.
+
+### 6.2 Azure AI Search index (`policies-v{n}`)
+
+Service `srch-rmc-<env>` (Standard, 2 replicas pilot / 3 production, private endpoint, `disableLocalAuth`, RBAC
+only, semantic ranker enabled **[confirm semantic ranker and Arabic support in UAE North]**). Index versions are
+immutable names (`policies-v3`); the active one is pinned in `rmc:tool-gateway:search:index_name` and recorded as
+`index_version` in lineage. A rebuild creates `policies-v4` from stored chunks, runs the eval gate, then flips the
+pin (no in-place schema changes).
+
+Index definition (illustrative, REST shape **[confirm api-version and property names]**):
+
+```json
+{
+  "name": "policies-v3",
+  "fields": [
+    {"name": "chunk_id", "type": "Edm.String", "key": true, "filterable": true},
+    {"name": "doc_id", "type": "Edm.String", "filterable": true, "facetable": false},
+    {"name": "doc_version", "type": "Edm.String", "filterable": true},
+    {"name": "doc_title", "type": "Edm.String", "searchable": true, "analyzer": "en.microsoft"},
+    {"name": "doc_title_ar", "type": "Edm.String", "searchable": true, "analyzer": "ar.microsoft"},
+    {"name": "doc_type", "type": "Edm.String", "filterable": true},
+    {"name": "clause_ref", "type": "Edm.String", "searchable": true, "filterable": true, "analyzer": "keyword"},
+    {"name": "heading_path", "type": "Collection(Edm.String)", "searchable": true, "analyzer": "en.microsoft"},
+    {"name": "heading_path_ar", "type": "Collection(Edm.String)", "searchable": true, "analyzer": "ar.microsoft"},
+    {"name": "language", "type": "Edm.String", "filterable": true},
+    {"name": "content_en", "type": "Edm.String", "searchable": true, "analyzer": "en.microsoft"},
+    {"name": "content_ar", "type": "Edm.String", "searchable": true, "analyzer": "ar.microsoft"},
+    {"name": "content_vector", "type": "Collection(Edm.Single)", "searchable": true, "retrievable": false,
+     "dimensions": 3072, "vectorSearchProfile": "vp-hnsw-cosine"},
+    {"name": "status", "type": "Edm.String", "filterable": true},
+    {"name": "effective_from", "type": "Edm.DateTimeOffset", "filterable": true, "sortable": true},
+    {"name": "effective_to", "type": "Edm.DateTimeOffset", "filterable": true},
+    {"name": "classification", "type": "Edm.String", "filterable": true},
+    {"name": "clearance_rank", "type": "Edm.Int32", "filterable": true},
+    {"name": "owner", "type": "Edm.String", "filterable": true},
+    {"name": "page", "type": "Edm.Int32", "retrievable": true},
+    {"name": "chunk_sha256", "type": "Edm.String", "retrievable": true},
+    {"name": "ingestion_run_id", "type": "Edm.String", "filterable": true}
+  ],
+  "vectorSearch": {
+    "algorithms": [{"name": "hnsw-1", "kind": "hnsw", "hnswParameters": {"m": 4, "efConstruction": 400, "efSearch": 500, "metric": "cosine"}}],
+    "profiles": [{"name": "vp-hnsw-cosine", "algorithm": "hnsw-1"}]
+  },
+  "semantic": {"configurations": [{"name": "sem-policies", "prioritizedFields": {
+    "titleField": {"fieldName": "doc_title"},
+    "prioritizedContentFields": [{"fieldName": "content_en"}, {"fieldName": "content_ar"}],
+    "prioritizedKeywordsFields": [{"fieldName": "heading_path"}, {"fieldName": "clause_ref"}]}}]}
+}
+```
+
+No integrated vectorizer: query vectors are computed by `tool-gateway` through the APIM AI gateway so every model
+call (including embeddings) passes the gateway's identity, quota and metric policies **[LLD decision]**.
+
+`status` values: `staged` (being ingested, never returned), `current`, `superseded`, `retired`.
+`clearance_rank`: public 0, internal 1, restricted 2.
+
+Query issued by `search_policies` (illustrative):
+
+```json
+{
+  "search": "minimum trading history unsecured working capital line",
+  "queryType": "semantic", "semanticConfiguration": "sem-policies",
+  "searchFields": "content_en,heading_path,doc_title,clause_ref",
+  "vectorQueries": [{"kind": "vector", "vector": [0.0123, "..."], "fields": "content_vector", "k": 50}],
+  "filter": "status eq 'current' and effective_from le 2026-11-26T00:00:00+04:00 and (effective_to eq null or effective_to gt 2026-11-26T00:00:00+04:00) and clearance_rank le 1",
+  "top": 20,
+  "select": "chunk_id,doc_id,doc_title,clause_ref,heading_path,content_en,effective_from,language"
+}
+```
+
+`tool-gateway` keeps results with `@search.rerankerScore ≥ 2.0` and `≥ top − 1.0`, at most 5 (returned in
+rank order with `n` = 1..k); the orchestrator declines when none remain (`WEAK_RETRIEVAL`). Thresholds are tuned
+on the golden set and stored in App Configuration. Arabic questions (`language=ar`) use `searchFields` with the
+`_ar` fields. If the semantic ranker is unavailable, keyword + vector with RRF is used and a separate threshold
+on `@search.score` applies (`retrieval_mode=keyword` only when embeddings are down).
+
+### 6.3 Ingestion chunking rules
+
+1. **Parse** with Document Intelligence `prebuilt-layout` (Markdown output): headings, paragraphs, tables, page
+   numbers, reading order, Arabic right-to-left text **[confirm Arabic layout quality on the Bank's documents]**.
+   The raw result is deleted after chunking (plan §3.3).
+2. **Clause boundaries**: a chunk starts at each numbered clause heading (`^\d+(\.\d+){0,4}\s`, Arabic-Indic
+   digits normalised first), at each lettered sub-clause in procedure documents, at each DoA matrix row, and at
+   each product sheet section. A clause is the atomic unit: chunks never span two clauses.
+3. **Heading path**: each chunk carries the full path (`["SME Credit Policy v4.2", "5 Unsecured lending", "5.3
+   Eligibility", "5.3.1"]`). The text embedded is `"<doc_title> > <heading path> :: <clause text>"`; the text
+   indexed in `content_*` is the clause text only.
+4. **Size**: target ≤ 512 tokens, minimum 64 tokens. A clause > 512 tokens is split at sentence boundaries with
+   15% overlap; parts share `clause_ref` and get suffixes (`§5.3.1 (part 2)`). A clause < 64 tokens is merged with
+   its following sibling clause only if both share the parent heading, and both `clause_ref`s are kept.
+5. **Tables**: kept whole when ≤ 512 tokens; otherwise split by rows with the header row repeated in every part;
+   each DoA row is its own chunk.
+6. **Language**: detected per chunk; Arabic text goes to `content_ar` / `heading_path_ar`, English to `_en`.
+   Bilingual documents yield one chunk per language per clause, linked by `doc_id` + `clause_ref`.
+7. **Metadata from the DMS manifest only** (never inferred by a model): `doc_id`, `doc_version`, `doc_type`,
+   `status`, `effective_from`, `effective_to`, `classification` → `clearance_rank`, `owner`.
+8. **Scans**: PII scan (AI Language + regex) and Prompt Shields document check on every chunk; any finding
+   quarantines the whole document (§2.5).
+9. **Supersession**: when version N+1 becomes `current`, all chunks of version N are merged to `superseded` in
+   the same batch.
+10. **Storage for rebuild**: `policy-chunks/<doc_id>/<doc_version>/chunks.jsonl` (text, metadata, embedding,
+    embedding deployment and model version, `chunk_sha256`) in Blob (GZRS, CMK).
+
+### 6.4 Audit event schema (`audit/1`)
+
+Producers: `tool-gateway` (all events, including those posted by `orchestrator` via `POST /internal/v1/audit`).
+Metadata goes to Event Hub `audit-events` (partition key = `request_id`, so a request's events stay ordered);
+content (masked prompts, model outputs, drafts) goes to Event Hub `audit-content`, envelope-encrypted by the
+producer (§6.6).
+
+Event types: `tool_called`, `entitlement_denied`, `guardrail_triggered`, `brief_built`, `answer_released`,
+`declined`, `degraded`, `followup_drafted`, `approval_issued`, `approval_verified`, `approval_rejected`,
+`approval_unused`, `approval_abandoned`, `write_committed`, `write_queued`, `write_failed`, `saga_recovered`,
+`outbox_operator_action`, `kill_switch_changed`, `model_pin_changed`, `erasure_executed`, `invalid_event`,
+`chain_anchor`.
+
+```json
+{
+  "schema": "audit/1",
+  "event_id": "01937a4e-9000-7b55-8c11-aa0000000001",
+  "event_type": "brief_built",
+  "occurred_at": "2026-11-26T05:40:06.512Z",
+  "request_id": "01937a4e-8f7d-7c1a-9b2e-5d0c1f6a2b3c",
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "span_id": "00f067aa0ba902b7",
+  "environment": "prod",
+  "producer": {"service": "tool-gateway", "image_digest": "sha256:ab12...", "posted_by": "orchestrator"},
+  "actor": {"type": "rm", "oid": "6b1f8a2e-...", "tid": "0000-bank-tenant", "surface": "teams_tab", "on_behalf_of": null, "auth_time": 1795665420},
+  "subject": {"customer_ref": "hmac:7d0e...", "customer_key_id": "cust-7d0e.../v1"},
+  "use_case": "uc1",
+  "outcome": {"status": "ok", "mode": "partial", "error_code": null, "reason": null, "warnings": ["SOURCE_UNAVAILABLE:kyc"]},
+  "lineage": {
+    "model": {"alias": "gen-large", "deployment": "gen-large-2026-08", "model_name": "[pinned GPT-class model]", "model_version": "[pinned]", "backend": "aoai-uaen-01"},
+    "prompt": {"template_id": "uc1.brief", "template_version": 3, "template_sha256": "5d1e9c..."},
+    "tool_catalogue_version": "tools/1.2",
+    "tool_contracts": {"get_brief_inputs": "1.0.0", "get_customer_profile": "1.2.0", "get_facilities": "1.1.0", "get_transaction_signals": "1.0.0", "get_kyc_status": "1.0.0", "get_news": "1.0.0"},
+    "guardrail_version": "guardrails/2026.11.2",
+    "index_version": null,
+    "orchestrator_version": "sha256:cd34...",
+    "eval_gate_run_id": "eval-2026-11-20-0907"
+  },
+  "metrics": {"latency_ms": 6214, "tokens_in": 1840, "tokens_out": 182, "tool_steps": 5, "lines_dropped": 0},
+  "guardrails": [{"check": "prompt_shields_documents", "result": "pass"}, {"check": "numeric", "result": "pass"}, {"check": "policy", "result": "pass"}],
+  "sources": [{"system": "CRM", "ref": "CRM #4471"}, {"system": "LOS", "ref": "LOS F-209"}],
+  "approval": null,
+  "content_ref": {"store": "audit-content", "blob": "c/7d0e.../2026/11/26/01937a4e-9000-....bin", "plaintext_sha256": "e3b0...", "key_id": "cust-7d0e.../v1"},
+  "chain": {"chain_id": "p2", "seq": 18233, "prev_hash": "9a7c...", "hash": "41fe..."}
+}
+```
+
+`chain` is added by `audit-writer`. For writes, `approval = {"jti", "kid", "draft_sha256", "token_sha256",
+"verdict", "reason"}` and `items = [{"item_id", "external_ref", "state", "crm_ref"}]`. `customer_ref` is
+`HMAC-SHA256(audit_pepper, customer_id)` so the immutable record holds no direct customer identifier; auditors
+query by computing the HMAC through the audit admin API. `actor.oid` is the RM (an employee identifier, needed
+for accountability; kept in the restricted table and WORM store).
+
+### 6.5 Hash-chain format
+
+- One chain per Event Hubs partition (`chain_id = "p<partition>"`, 4 chains), because the writer processes
+  partitions in parallel and a single global chain would serialise them.
+- `hash_n = SHA-256( prev_hash_n || 0x0A || JCS(event_without_chain.hash) )`, hex. `prev_hash_0` for a new chain is
+  the SHA-256 of the chain's genesis record (`{"chain_id","created_at","environment","schema"}`).
+- Storage: append blobs in container `audit-worm` (immutable, time-based retention 7 years, `allowProtectedAppendWrites`
+  enabled, GZRS) **[confirm protected append writes with version-level immutability]**, path
+  `<env>/<chain_id>/<yyyy>/<mm>/<dd>/<hh>.jsonl`, one JSON line per event.
+- Chain head (`seq`, `hash`, blob path) in Cosmos `audit-chain-heads`, updated with `If-Match`; a second writer for the
+  same partition fails the ETag check and stops (no forks).
+- **Anchors**: every 60 minutes per chain, `audit-writer` appends a `chain_anchor` event containing the head hash
+  and signs it with Key Vault key `audit-anchor` (ES256); the anchor is also written to the restricted Log
+  Analytics table, giving an independent witness. Verification (`POST /admin/v1/chain/verify`) recomputes hashes
+  and checks anchor signatures.
+- Erasure never edits the chain (C21): only the content key is destroyed.
+
+### 6.6 Audit content store and per-customer keys (C21)
+
+- **Transport** [LLD decision]: producers encrypt content before it enters Event Hubs, because Event Hubs
+  customer-managed keys need Premium or Dedicated and the plan sizes Event Hubs Standard **[confirm]**. Producer:
+  random AES-256-GCM DEK → encrypt content → wrap DEK with the RSA-OAEP-256 public key of Key Vault key
+  `audit-transport` (public key distributed through App Configuration; producers never call Key Vault).
+- **At rest**: `audit-writer` unwraps the DEK (`unwrapKey` on `audit-transport`), re-wraps it with the customer's
+  key `cust-<customer_ref>` (RSA-HSM 3072 in vault `kv-rmc-cust-<env>`, created on first use), and stores
+  `{header: {key_id, wrapped_dek, alg: "A256GCM", iv}, ciphertext, tag}` in container `audit-content`
+  (`c/<customer_ref>/<yyyy>/<mm>/<dd>/<event_id>.bin`), CMK on the account as a second layer. Lifecycle policy
+  deletes after 365 days (plan §7). Content without a customer (UC2 policy questions) uses key `cust-none-<yyyy-mm>`
+  rotated monthly.
+- **Crypto-shred on erasure**: `POST /admin/v1/erasure` (role `Audit.Erase`, PIM, four-eyes) → audit
+  `erasure_executed` → delete key `cust-<customer_ref>` (all versions) → purge after the vault's soft-delete
+  retention. `kv-rmc-cust-<env>` uses the **minimum soft-delete retention (7 days)** so erasure completes within 7
+  days; purge protection is on for this vault, which means the key cannot be purged earlier **[confirm erasure
+  deadline with Records/Legal and per-vault key-count and throughput limits; consider Managed HSM at scale]**.
+  WORM metadata and the chain remain intact and verifiable; content becomes unreadable.
+- Masking is imperfect, so the content store is treated as containing personal data: access through the audit admin
+  API only, PIM, every read audited.
+
+---
+
+## 7. APIM policies (illustrative)
+
+APIM Premium, internal VNet mode, UAE North (pilot 1 unit, production ≥ 2 units across zones **[confirm]**). Two
+APIs groups: the **AI gateway** (`/ai/...`, Azure OpenAI chat completions and embeddings) and the **system API
+facade** (`/crm/api/...`, `/ods/api/...`, `/los/api/...`, `/kyc/api/...`, `/news/api/...`). All XML below is
+**illustrative**: element and attribute names, expression support and limits must be checked against current APIM
+documentation **[confirm]**. Named values in `{{...}}` are Key Vault-backed where secret.
+
+### 7.1 AI gateway API (`rmc-ai-gateway`)
+
+Backends (Bicep, illustrative **[confirm resource API version and property names]**): two Foundry / Azure OpenAI
+resources, **both in UAE North** (separate quota; no cross-border failover, plan §3.1), combined in priority
+pools per alias.
+
+```bicep
+resource aoai01GenLarge 'Microsoft.ApiManagement/service/backends@2024-06-01-preview' = {
+  parent: apim
+  name: 'aoai-uaen-01'
+  properties: {
+    url: 'https://aoai-rmc-uaen-01.openai.azure.com/openai'
+    protocol: 'http'
+    circuitBreaker: {
+      rules: [
+        { name: 'throttled', failureCondition: { count: 1, interval: 'PT10S', statusCodeRanges: [ { min: 429, max: 429 } ] }, tripDuration: 'PT20S', acceptRetryAfter: true }
+        { name: 'server-errors', failureCondition: { count: 3, interval: 'PT30S', statusCodeRanges: [ { min: 500, max: 599 } ] }, tripDuration: 'PT30S' }
+      ]
+    }
+  }
+}
+// aoai-uaen-02 identical, url https://aoai-rmc-uaen-02.openai.azure.com/openai
+resource poolAoai 'Microsoft.ApiManagement/service/backends@2024-06-01-preview' = {
+  parent: apim
+  name: 'pool-aoai'
+  properties: {
+    type: 'Pool'
+    pool: { services: [ { id: aoai01GenLarge.id, priority: 1 }, { id: aoai02GenLarge.id, priority: 2 } ] }
+  }
+}
+```
+
+API-scope policy:
+
+```xml
+<!-- ILLUSTRATIVE: rmc-ai-gateway, API scope. [confirm] syntax and limits against current APIM docs -->
+<policies>
+  <inbound>
+    <base />
+    <!-- 1. Strip headers a caller must never set -->
+    <set-header name="x-rm-assertion" exists-action="delete" />
+    <set-header name="api-key" exists-action="delete" />
+
+    <!-- 2. Caller = workload identity (orchestrator, tool-gateway, ingestion-worker, eval-runner) -->
+    <validate-jwt header-name="Authorization" require-scheme="Bearer" failed-validation-httpcode="401"
+                  failed-validation-error-message="UNAUTHENTICATED" output-token-variable-name="caller">
+      <openid-config url="https://login.microsoftonline.com/{{tenant-id}}/v2.0/.well-known/openid-configuration" />
+      <audiences><audience>api://rm-copilot-ai-gateway</audience></audiences>
+      <issuers><issuer>https://login.microsoftonline.com/{{tenant-id}}/v2.0</issuer></issuers>
+      <required-claims>
+        <claim name="tid" match="all"><value>{{tenant-id}}</value></claim>
+        <claim name="idtyp" match="all"><value>app</value></claim>
+        <claim name="roles" match="any">
+          <value>AiGateway.Generate</value><value>AiGateway.Embed</value><value>AiGateway.Judge</value>
+        </claim>
+      </required-claims>
+    </validate-jwt>
+
+    <!-- 3. Use case allow-list (drives per-use-case limits and metric dimensions) -->
+    <set-variable name="useCase" value="@(context.Request.Headers.GetValueOrDefault("x-use-case", "unknown"))" />
+    <set-variable name="requestId" value="@(context.Request.Headers.GetValueOrDefault("x-request-id", ""))" />
+    <choose>
+      <when condition="@(!new[] { "uc1", "uc2", "uc3_draft", "eval", "ingest" }.Contains((string)context.Variables["useCase"]))">
+        <return-response>
+          <set-status code="400" reason="Bad Request" />
+          <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+          <set-body>@("{\"error\":{\"code\":\"VALIDATION_FAILED\",\"reason\":\"USE_CASE\",\"message\":\"Unknown use case\",\"request_id\":\"" + (string)context.Variables["requestId"] + "\",\"retryable\":false}}")</set-body>
+        </return-response>
+      </when>
+    </choose>
+
+    <!-- 4. RM identity for per-RM quota: validated, never trusted from a plain header -->
+    <choose>
+      <when condition="@(context.Request.Headers.ContainsKey("x-rm-token"))">
+        <validate-jwt header-name="x-rm-token" failed-validation-httpcode="401" output-token-variable-name="rm">
+          <openid-config url="https://login.microsoftonline.com/{{tenant-id}}/v2.0/.well-known/openid-configuration" />
+          <audiences><audience>api://rm-copilot-tool-gateway</audience></audiences>
+          <issuers><issuer>https://login.microsoftonline.com/{{tenant-id}}/v2.0</issuer></issuers>
+        </validate-jwt>
+        <set-variable name="quotaKey" value="@("rm:" + ((Jwt)context.Variables["rm"]).Claims.GetValueOrDefault("oid", "none"))" />
+      </when>
+      <when condition="@(new[] { "uc1", "uc2", "uc3_draft" }.Contains((string)context.Variables["useCase"]))">
+        <!-- RM use cases must carry the RM token -->
+        <return-response><set-status code="401" reason="Unauthorized" /></return-response>
+      </when>
+      <otherwise>
+        <set-variable name="quotaKey" value="@("svc:" + ((Jwt)context.Variables["caller"]).Claims.GetValueOrDefault("azp", "none"))" />
+      </otherwise>
+    </choose>
+
+    <!-- 5. Deadline: relative header -> absolute time inside this gateway -->
+    <set-variable name="deadlineAt" value="@(DateTime.UtcNow.AddMilliseconds(double.Parse(context.Request.Headers.GetValueOrDefault("x-deadline-ms", "30000"))))" />
+
+    <!-- 6. Body guard: store=false always; output cap 1,500 tokens (plan §5) -->
+    <set-body>@{
+        var body = context.Request.Body.As<JObject>(preserveContent: true);
+        body["store"] = false;
+        var cap = body["max_completion_tokens"] ?? body["max_tokens"];
+        if (cap != null && (int)cap > 1500) { body["max_completion_tokens"] = 1500; body.Remove("max_tokens"); }
+        return body.ToString(Newtonsoft.Json.Formatting.None);
+    }</set-body>
+
+    <!-- 7. Token limits: per RM per day (RM traffic only; service callers such as ingest are bounded by their use-case TPM),
+         and per use case per minute [confirm two llm-token-limit policies in one scope; else move one to product scope] -->
+    <choose>
+      <when condition="@(((string)context.Variables["quotaKey"]).StartsWith("rm:"))">
+        <llm-token-limit counter-key="@((string)context.Variables["quotaKey"])"
+                         token-quota="400000" token-quota-period="Daily"
+                         estimate-prompt-tokens="true"
+                         remaining-quota-tokens-header-name="x-rm-remaining-tokens" />
+      </when>
+    </choose>
+    <choose>
+      <when condition="@((string)context.Variables["useCase"] == "uc1")">
+        <llm-token-limit counter-key="uc:uc1" tokens-per-minute="60000" estimate-prompt-tokens="true" />
+      </when>
+      <when condition="@((string)context.Variables["useCase"] == "uc2")">
+        <llm-token-limit counter-key="uc:uc2" tokens-per-minute="40000" estimate-prompt-tokens="true" />
+      </when>
+      <when condition="@((string)context.Variables["useCase"] == "uc3_draft")">
+        <llm-token-limit counter-key="uc:uc3" tokens-per-minute="40000" estimate-prompt-tokens="true" />
+      </when>
+      <otherwise>
+        <llm-token-limit counter-key="@("uc:" + (string)context.Variables["useCase"])" tokens-per-minute="30000" estimate-prompt-tokens="true" />
+      </otherwise>
+    </choose>
+
+    <!-- 8. Token metrics (no RM dimension: cardinality and privacy; per-RM analytics use the audit table) -->
+    <llm-emit-token-metric namespace="rmc-ai-gateway">
+      <dimension name="API ID" />
+      <dimension name="Operation ID" />
+      <dimension name="use_case" value="@((string)context.Variables["useCase"])" />
+      <dimension name="deployment" value="@(context.Request.MatchedParameters.GetValueOrDefault("deployment-id", "none"))" />
+      <dimension name="caller" value="@(((Jwt)context.Variables["caller"]).Claims.GetValueOrDefault("azp", "none"))" />
+      <dimension name="environment" value="{{environment}}" />
+    </llm-emit-token-metric>
+
+    <!-- 9. Route to the regional pool and authenticate with APIM's managed identity -->
+    <set-backend-service backend-id="pool-aoai" />
+    <set-header name="x-rm-token" exists-action="delete" />
+    <authentication-managed-identity resource="https://cognitiveservices.azure.com" />
+    <!-- traceparent and x-request-id pass through unchanged (default); never add body or token headers -->
+  </inbound>
+
+  <backend>
+    <!-- Failover to the priority-2 backend only if >= 4 s of the request deadline remain (plan §5) -->
+    <retry condition="@((context.Response.StatusCode == 429 || context.Response.StatusCode >= 500)
+                        &amp;&amp; (((DateTime)context.Variables["deadlineAt"]) - DateTime.UtcNow).TotalMilliseconds >= 4000)"
+           count="1" interval="0" first-fast-retry="true">
+      <forward-request buffer-request-body="true"
+                       timeout="@(Math.Max(1, (int)((((DateTime)context.Variables["deadlineAt"]) - DateTime.UtcNow).TotalSeconds)))" />
+    </retry>
+  </backend>
+
+  <outbound>
+    <base />
+    <set-header name="x-served-by" exists-action="override"><value>@(context.Request.Url.Host)</value></set-header>
+  </outbound>
+
+  <on-error>
+    <base />
+    <!-- Tell the orchestrator whether a 429/403 is OUR budget (BUDGET_EXCEEDED) or the model being throttled (degraded) -->
+    <choose>
+      <when condition="@(context.LastError.Source == "llm-token-limit")">
+        <set-header name="x-rmc-limit" exists-action="override">
+          <value>@(context.Response.StatusCode == 403 ? "rm_daily" : "use_case")</value>
+        </set-header>
+      </when>
+    </choose>
+  </on-error>
+</policies>
+```
+
+Notes:
+
+- `llm-token-limit` with `token-quota` returns **403** when the quota is spent and **429** when tokens per minute
+  are exceeded **[confirm]**; the `x-rmc-limit` header lets the orchestrator map them to `BUDGET_EXCEEDED`
+  (`RM_DAILY` / `USE_CASE`). A 429 **without** `x-rmc-limit` means the model backends are throttled after the
+  allowed retry, and the orchestrator enters degraded mode (§10.6). Whether the daily quota window is UTC or
+  configurable and how counters behave across units is plan §10.6 **[confirm]**.
+- Retry and pool interplay: the `throttled` breaker trips on the first 429, so the single retry is routed to
+  priority 2. If less than 4 s remain, no retry happens and the 429 returns at once (fast degraded mode).
+- **Body logging off.** Diagnostic settings for Application Insights and Azure Monitor on this API:
+  `frontend.request.body.bytes = 0`, `frontend.response.body.bytes = 0`, `backend.request.body.bytes = 0`,
+  `backend.response.body.bytes = 0`, `headers = []`, `logClientIp = false`, sampling 100% for errors; LLM message
+  logging (prompt and completion logging) **disabled** **[confirm setting name]**. No
+  `azure-openai-semantic-cache-lookup` / `llm-semantic-cache-lookup` anywhere (C8); an Azure Policy plus CI lint
+  of exported APIM policies fails the build if those elements or body bytes > 0 appear.
+- Request size limit at APIM: 256 KiB; responses are buffered (no streaming to the client of APIM is required,
+  but internal streaming to the orchestrator is allowed for TTFT measurement; C18 is enforced in the
+  orchestrator).
+
+### 7.2 System API facade (`rmc-system-api`)
+
+Product `rmc-copilot` with one subscription-less API per system of record. Global policy for the facade APIs:
+
+```xml
+<!-- ILLUSTRATIVE: rmc-system-api, product scope. [confirm] -->
+<policies>
+  <inbound>
+    <base />
+    <!-- 1. Never accept a caller-supplied assertion -->
+    <set-header name="x-rm-assertion" exists-action="delete" />
+
+    <!-- 2. Only tool-gateway's workload identity may call -->
+    <validate-jwt header-name="Authorization" require-scheme="Bearer" failed-validation-httpcode="401" output-token-variable-name="caller">
+      <openid-config url="https://login.microsoftonline.com/{{tenant-id}}/v2.0/.well-known/openid-configuration" />
+      <audiences><audience>api://rm-copilot-system-api</audience></audiences>
+      <issuers><issuer>https://login.microsoftonline.com/{{tenant-id}}/v2.0</issuer></issuers>
+      <required-claims>
+        <claim name="idtyp" match="all"><value>app</value></claim>
+        <claim name="azp" match="all"><value>{{tool-gateway-client-id}}</value></claim>
+        <claim name="roles" match="any"><value>SystemApi.Read</value><value>SystemApi.Write</value><value>SystemApi.DeferredWrite</value></claim>
+      </required-claims>
+    </validate-jwt>
+    <set-variable name="roles" value="@(((Jwt)context.Variables["caller"]).Claims.GetValueOrDefault("roles", ""))" />
+
+    <!-- 3. Method vs role -->
+    <choose>
+      <when condition="@(context.Request.Method == "GET" &amp;&amp; !((string)context.Variables["roles"]).Contains("SystemApi.Read"))">
+        <return-response><set-status code="403" reason="Forbidden" /></return-response>
+      </when>
+      <when condition="@(context.Request.Method != "GET" &amp;&amp; !((string)context.Variables["roles"]).Contains("SystemApi.Write") &amp;&amp; !((string)context.Variables["roles"]).Contains("SystemApi.DeferredWrite"))">
+        <return-response><set-status code="403" reason="Forbidden" /></return-response>
+      </when>
+    </choose>
+
+    <!-- 4. RM identity: interactive = validated RM token; deferred (outbox) = oid header, writes only, DeferredWrite role only -->
+    <choose>
+      <when condition="@(context.Request.Headers.ContainsKey("x-rm-token"))">
+        <validate-jwt header-name="x-rm-token" failed-validation-httpcode="401" output-token-variable-name="rm">
+          <openid-config url="https://login.microsoftonline.com/{{tenant-id}}/v2.0/.well-known/openid-configuration" />
+          <audiences><audience>api://rm-copilot-tool-gateway</audience></audiences>
+          <issuers><issuer>https://login.microsoftonline.com/{{tenant-id}}/v2.0</issuer></issuers>
+        </validate-jwt>
+        <set-variable name="rmOid" value="@(((Jwt)context.Variables["rm"]).Claims.GetValueOrDefault("oid", ""))" />
+        <set-variable name="mode" value="interactive" />
+      </when>
+      <when condition="@(context.Request.Method == "POST" &amp;&amp; ((string)context.Variables["roles"]).Contains("SystemApi.DeferredWrite") &amp;&amp; context.Request.Headers.ContainsKey("x-rm-oid"))">
+        <set-variable name="rmOid" value="@(context.Request.Headers.GetValueOrDefault("x-rm-oid", ""))" />
+        <set-variable name="mode" value="deferred" />
+      </when>
+      <otherwise>
+        <return-response><set-status code="401" reason="Unauthorized" /></return-response>
+      </otherwise>
+    </choose>
+
+    <!-- 5. Signed RM header for legacy systems (HMAC-SHA256, per-backend key from Key Vault named value, 60 s life) -->
+    <set-header name="x-rm-assertion" exists-action="override">
+      <value>@{
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var payload = new JObject(
+          new JProperty("oid", (string)context.Variables["rmOid"]),
+          new JProperty("mode", (string)context.Variables["mode"]),
+          new JProperty("rid", context.Request.Headers.GetValueOrDefault("x-request-id", "")),
+          new JProperty("aud", context.Api.Name),
+          new JProperty("iat", now), new JProperty("exp", now + 60)).ToString(Newtonsoft.Json.Formatting.None);
+        var p64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(payload)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        using (var h = new System.Security.Cryptography.HMACSHA256(Convert.FromBase64String("{{rm-assertion-key}}")))
+        {
+          var sig = Convert.ToBase64String(h.ComputeHash(Encoding.UTF8.GetBytes(p64))).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+          return p64 + "." + sig;
+        }
+      }</value>
+    </set-header>
+    <set-header name="x-rm-token" exists-action="delete" />
+    <set-header name="x-rm-oid" exists-action="delete" />
+    <!-- Entra-capable systems: tool-gateway sends the system's OBO token in x-sor-token; move it to Authorization -->
+    <choose>
+      <when condition="@(context.Request.Headers.ContainsKey("x-sor-token"))">
+        <set-header name="Authorization" exists-action="override"><value>@("Bearer " + context.Request.Headers.GetValueOrDefault("x-sor-token", ""))</value></set-header>
+        <set-header name="x-sor-token" exists-action="delete" />
+      </when>
+      <otherwise>
+        <set-header name="Authorization" exists-action="delete" />
+      </otherwise>
+    </choose>
+  </inbound>
+  <backend><base /></backend>
+  <outbound><base /></outbound>
+  <on-error><base /></on-error>
+</policies>
+```
+
+Per-backend API-scope policy (example: core banking ODS, protecting it from copilot load, C14):
+
+```xml
+<!-- ILLUSTRATIVE: /ods/api API scope -->
+<policies>
+  <inbound>
+    <base />
+    <rate-limit-by-key calls="{{ods-calls-per-second}}" renewal-period="1" counter-key="ods" />
+    <quota-by-key calls="{{ods-calls-per-day}}" renewal-period="86400" counter-key="ods-rm-copilot" />
+    <set-backend-service backend-id="ods-read-replica" />
+  </inbound>
+  <backend>
+    <limit-concurrency key="ods" max-count="20">
+      <forward-request timeout="2" />
+    </limit-concurrency>
+  </backend>
+  <outbound><base /></outbound>
+</policies>
+```
+
+Illustrative per-backend limits: CRM 20 calls/s, ODS 20 calls/s, LOS 10 calls/s, KYC 10 calls/s, news 5 calls/s
+(and the licensed feed's own quota), to be agreed in `04-interfaces-and-slas.md`. The facade's `forward-request`
+timeout (2 s) is a ceiling; `tool-gateway`'s deadline-derived timeout is always shorter. Body logging is off on
+the facade too. `HMACSHA256` in policy expressions and the per-backend key distribution are **[confirm]**; the
+HMAC key is shared only between APIM and one legacy backend (it is not an approval mechanism; approvals use ES256,
+§4).
+
+---
+
+## 8. Prompt and model management
+
+### 8.1 Prompt template registry
+
+- Templates live in the repo under `prompts/<template_id>/v<n>.yaml`, reviewed like code (two approvers, one
+  from MRM for templates used in production). Fields: `id`, `version`, `purpose`, `alias` (deployment alias),
+  `parameters`, `system`, `user_template`, `response_schema` (path), `input_token_cap`, `owner`,
+  `mrm_approval_ref`, `eval_run_id`.
+- **Hash**: `template_sha256 = SHA-256(JCS(parsed YAML as JSON))`, so formatting changes do not change the hash but
+  any content change does. CI generates `prompts/registry.json` (`id`, `version`, `sha256`, `eval_run_id`) and the
+  orchestrator image packages both. At start-up the orchestrator recomputes every hash and refuses to become ready
+  on any mismatch.
+- **Pins**: `rmc:orchestrator:prompt:<template_id>` = version number. A pin may only point to a version in the
+  packaged registry whose `eval_run_id` is a passing release gate; the orchestrator rejects other values and keeps
+  the previous pin (alert `PromptPinRejected`). Templates are versioned, never edited in place.
+
+| Template id | Alias | Temperature | Max output tokens | Response format | Input token cap | Notes |
+|---|---|---|---|---|---|---|
+| `router.intent` | `gen-small` | 0 | 50 | structured output `{intent, customer_mention}` | 1,000 | Only for free-text entry in the Teams tab; skipped when launched from a CRM record (plan §4.1) |
+| `uc1.brief` | `gen-large` | 0.2 | 400 | structured output `{talking_points: string[≤ 4]}` with placeholders | 6,000 | System prompt from `code/rm_copilot/llm.py` `BRIEF_SYSTEM`, extended with "no links, no Markdown" |
+| `uc2.rewrite` | `gen-small` | 0 | 120 | structured output `{query, language}` | 1,000 | |
+| `uc2.answer` | `gen-large` | 0 | 350 | plain text with `[n]` citations or exactly `INSUFFICIENT_EVIDENCE` | 5,000 | `POLICY_QA_SYSTEM` |
+| `uc2.answer.strict` | `gen-large` | 0 | 350 | as above | 5,000 | adds `STRICT_SUFFIX` |
+| `uc3.extract` | `gen-small` | 0 | 900 | **structured outputs, strict JSON Schema** `followup_extract` | 4,000 | `EXTRACT_SYSTEM` |
+| `eval.judge.groundedness` | `gen-large` (eval use case) | 0 | 300 | structured output | 8,000 | eval-runner only |
+
+Per-request totals stay inside the plan's budget (≤ 12k input, ≤ 1.5k output): UC1 ≤ 7k / 450, UC2 ≤ 11k / 820
+(rewrite + answer + one strict retry), UC3 ≤ 4k / 900.
+
+### 8.2 Deployment aliases
+
+| Alias | Model | Deployment name pattern | SKU | Notes |
+|---|---|---|---|---|
+| `gen-large` | latest GA frontier GPT-class model offered as Regional Standard in UAE North **[confirm]** | `gen-large-<yyyy-mm>` | Standard (Regional) | UC1 wording, UC2 answers, judge (eval env and online sampling) |
+| `gen-small` | small GPT-class model, Regional Standard **[confirm]** | `gen-small-<yyyy-mm>` | Standard (Regional) | router, rewrite, extraction |
+| `embed` | `text-embedding-3-large`, 3,072 dimensions | `embed-<yyyy-mm>` | Standard (Regional) | query and ingestion embeddings |
+
+Each deployment: model version pinned, version upgrade option "no auto upgrade" **[confirm property name]**,
+content filter configuration `cf-rmc-v<n>` attached (harm categories block at medium on input and output; Prompt
+Shields jailbreak and indirect attack on, block), same deployment names on both backend resources (`aoai-uaen-01`,
+`aoai-uaen-02`). The alias → deployment map is `rmc:orchestrator:model:<alias>:deployment`; the API version is
+pinned in `rmc:orchestrator:model:api_version` **[confirm]**.
+
+### 8.3 Call parameters (every call)
+
+`store: false` (also forced by APIM), `n: 1`, `top_p: 1`, `seed` fixed per template (best-effort reproducibility),
+no `tools` / function calling (fixed workflows), no `logprobs`, no `user` field (data minimisation) **[LLD
+decision]**, `max_completion_tokens` per template, `response_format` = `json_schema` with `strict: true` for UC3 and
+the structured UC1/UC2 helper outputs **[confirm structured outputs support for the pinned model and API
+version]**. Untrusted text (news snippets, policy passages, notes) is placed in clearly delimited data blocks and
+marked as documents where the API supports document marking for indirect-attack detection **[confirm]**. No
+Assistants, Threads, Responses-with-storage or files features.
+
+### 8.4 Token budgets
+
+| Level | Limit | Enforced in |
+|---|---|---|
+| Per call | template `input_token_cap`, `max_completion_tokens` | orchestrator (pre-count with the model's tokenizer; reject before calling) |
+| Per request | ≤ 6 tool steps, ≤ 12k input, ≤ 1.5k output tokens | orchestrator budget object (`BUDGET_EXCEEDED/REQUEST_*`); APIM output cap 1,500 |
+| Per RM per day | 400k tokens | APIM `llm-token-limit` (`BUDGET_EXCEEDED/RM_DAILY`) |
+| Per use case | TPM limits (§7.1) | APIM |
+| Per environment | Azure budget with alerts at 80% and 100% (C10) | Cost Management |
+
+### 8.5 Model upgrade through the eval gate (C12, C23)
+
+1. Model inventory (part of the MRM inventory, `05-nfr-scenarios-and-dr.md`) tracks each deployment's model
+   version and retirement date; an alert fires 120 days before retirement (90-day runbook starts at T−90).
+2. Platform creates a side-by-side deployment (`gen-large-2026-12`) on both backends with the same content filter
+   configuration and quota.
+3. `eval-runner run --suite release --deployment-override gen-large=gen-large-2026-12` in pre-prod (synthetic data).
+   All gates must pass (§2.7); prompt templates may get a new version tuned for the new model, each with its own
+   eval run.
+4. MRM independent validation reviews the report and signs off (`mrm_approval_ref`).
+5. Canary in prod: `rmc:orchestrator:model:canary:deployment = gen-large-2026-12` with feature flag
+   `model_canary` targeting 10% of RMs for 5 business days; compare decline rate, lines dropped, guardrail hits,
+   latency and online-sample groundedness against the incumbent (no regression beyond agreed tolerances).
+6. Flip the pin (`rmc:orchestrator:model:gen-large:deployment`), audited as `model_pin_changed`; keep the old
+   deployment 14 days for rollback (rollback = pin flip, ≤ 30 s), then delete it.
+7. Embedding changes additionally require a full re-embed into a new index version (`policies-v4`), a release gate
+   run against that index, and a single coordinated pin flip of `embed` and `index_name`.
+
+---
+
+## 9. Guardrail pipeline
+
+The guardrail bundle is versioned as a whole (`guardrail_version`, for example `guardrails/2026.11.2`) and recorded in
+every audit event: regex sets (injection, PII, URLs), number-word lexicons (English and Arabic), policy phrase
+lists, thresholds, the content filter configuration id, the Prompt Shields settings and the tool contract schema
+hashes. Thresholds are tuned on the golden set; the false-positive block rate (≤ 2%) is a release gate (C13).
+
+### 9.1 Checks and thresholds
+
+| Check | Where | Threshold / rule |
+|---|---|---|
+| Azure OpenAI content filter (harm categories) | Azure OpenAI deployment | block at **medium** severity, input and output |
+| Prompt Shields, user prompt (jailbreak) | Content Safety `shieldPrompt` called by `orchestrator` (plus the content filter) | `userPromptAnalysis.attackDetected = true` |
+| Prompt Shields, documents (indirect attack) | Content Safety `shieldPrompt` with `documents` (orchestrator at runtime for news and free text; ingestion-worker for policy chunks) | `documentsAnalysis[i].attackDetected = true` |
+| Local injection rules | orchestrator (always on, floor when Content Safety is unavailable, C2) | regex set from `guardrails.py` `INJECTION`, extended (Arabic variants) |
+| Quote quarantine | orchestrator (UC3) | quoted span (`"..."`, `“...”`, `«...»`) matching the injection rules is replaced by `[quoted customer text removed]` |
+| PII masking | orchestrator (AI Language PII + regex, before any model call) | AI Language confidence ≥ 0.8; regex always: Emirates ID `784-?\d{4}-?\d{7}-?\d`, IBAN `AE\d{2}...`, card (Luhn-checked), UAE phone (`+971` / `05x`), email, trade licence pattern **[confirm formats]** |
+| Placeholder check | orchestrator (UC1) | every `{key}` exists in FACTS |
+| Numeric check | orchestrator (UC1 lines, UC3 drafts) | zero numbers outside placeholders (UC1); zero numbers in the draft absent from the notes or the date resolver (UC3). Detects ASCII digits, Arabic-Indic (`٠`..`٩`) and Extended Arabic-Indic (`۰`..`۹`) digits, English number words (zero to ninety-nine, hundred, thousand, million, billion, half, quarter, double, triple, twice, percent, per cent, dozen) and Arabic number words (واحد، اثنان، ثلاثة ... عشرة، عشرون، مئة، ألف، مليون، مليار، نصف، ربع، بالمئة), plus ordinals |
+| Policy check | orchestrator (UC1 lines, UC3 tasks and call report), tool-gateway (UC3 tasks at commit) | phrase and pattern list for Bank commitments: approval promises ("approved", "will approve", "pre-approved", "guarantee"), pricing ("rate of", "margin", "pricing", "discount", "fee waiver"), limits ("increase your limit", "new limit"); Arabic equivalents. Requests by the customer ("asked about a limit increase") are allowed by pattern design and measured in the false-positive gate |
+| Output rendering check | orchestrator | no URLs, no Markdown link or image syntax, no HTML tags, no zero-width or bidi control characters (C19) |
+| Structured output validation | orchestrator | JSON Schema validation of every structured output |
+| Retrieval threshold | orchestrator (UC2) | top `rerankerScore ≥ 2.0`, keep passages `≥ top − 1.0` |
+| Groundedness (local, always) | orchestrator (UC2) | every sentence cites a valid passage; content-word support ≥ 0.6; no number (digits or number words) absent from the cited passages; answer passes only if **all** sentences pass |
+| Groundedness (Content Safety) | Content Safety, only if offered in-region and flag on **[confirm]** | `ungroundedDetected = false` |
+
+### 9.2 UC1 pre-meeting brief
+
+| # | Step | Runs in | On failure |
+|---|---|---|---|
+| 1 | Token validation, entitlement (read) | tool-gateway | `403 NOT_ENTITLED`, nothing fetched |
+| 2 | Field minimisation and masking per tool contract | tool-gateway | n/a (structural) |
+| 3 | Build FACTS: every displayable value keyed and formatted by code; customer and contact names replaced by `{customer_name}`, `{contact}` | orchestrator | n/a |
+| 4 | PII masking of free-text facts (signal text, news snippets) | orchestrator, parallel with slow tool calls | AI Language down: regex + known-names masking; continue |
+| 5 | Prompt Shields documents on news snippets and free text | orchestrator, parallel | attack: **drop that item** (`warnings: NEWS_ITEM_DROPPED`), audit `guardrail_triggered`; Content Safety down: local rules only |
+| 6 | Content filter on input and output | Azure OpenAI | input or output filtered: **degrade** (facts-only brief, `DEGRADED/CONTENT_FILTER`) |
+| 7 | Structured output validation | orchestrator | invalid: **degrade** (facts-only) |
+| 8 | Placeholder check | orchestrator | unknown key: **drop line** |
+| 9 | Numeric check (digits and number words, EN and AR) | orchestrator | **drop line** |
+| 10 | Policy check | orchestrator | **drop line** |
+| 11 | Rendering check | orchestrator | **drop line** |
+| 12 | Placeholder fill from FACTS | orchestrator | n/a |
+| 13 | All lines dropped | orchestrator | **degrade**: facts-only brief (`DEGRADED/ALL_LINES_DROPPED`) |
+
+Facts (snapshot, watch list, opportunities) are always rendered by code from tool output, so they are never at the
+mercy of the model.
+
+### 9.3 UC2 policy question
+
+| # | Step | Runs in | On failure |
+|---|---|---|---|
+| 1 | Schema, length ≤ 1,000 chars | web-bff, orchestrator | `400 VALIDATION_FAILED` |
+| 2 | Prompt Shields user prompt + local injection rules | orchestrator | attack: **block** `422 GUARDRAIL_BLOCKED/PROMPT_ATTACK`; Content Safety down: local rules decide |
+| 3 | PII masking of the question | orchestrator | regex fallback |
+| 4 | Rewrite (`gen-small`, structured) | orchestrator | failure or timeout: use the masked question as the query |
+| 5 | `search_policies` with mandatory filters | tool-gateway | `503` (no answer without retrieval); embeddings down: keyword mode |
+| 6 | Retrieval threshold | orchestrator | **decline** `WEAK_RETRIEVAL` |
+| 7 | Answer (`gen-large`) with content filter | orchestrator, Azure OpenAI | model unavailable or filtered: **degrade** to ranked passages without a generated answer |
+| 8 | `INSUFFICIENT_EVIDENCE` sentinel | orchestrator | **decline** `MODEL_INSUFFICIENT_EVIDENCE` |
+| 9 | Groundedness (local always; Content Safety if enabled) incl. numeric check | orchestrator | fail: **retry once** with `uc2.answer.strict` only if ≥ 4,000 ms remain; otherwise **decline** `NO_TIME_FOR_RETRY`; second failure: **decline** `FAILED_GROUNDEDNESS` |
+| 10 | Rendering check | orchestrator | treat as groundedness failure (retry or decline) |
+| 11 | Release | orchestrator | answer released only after passing (C18) |
+
+### 9.4 UC3 follow-up draft and commit
+
+| # | Step | Runs in | On failure |
+|---|---|---|---|
+| 1 | Schema, notes ≤ 8,000 chars, entitlement (via `get_customer_profile`) | orchestrator, tool-gateway | `400` / `403 NOT_ENTITLED` |
+| 2 | Quote quarantine (local) | orchestrator | quarantined spans removed, notice `QUOTE_QUARANTINED` |
+| 3 | Prompt Shields user prompt on the quarantined notes | orchestrator | attack still detected: **block** `422 GUARDRAIL_BLOCKED/PROMPT_ATTACK` ("remove pasted instructions"); Content Safety down: continue with a visible notice and local rules (draft is reviewed by the RM anyway) |
+| 4 | PII masking: identifiers irreversibly (`[EMIRATES_ID]`, `[IBAN]`, `[CARD]`, `[PHONE]`, `[EMAIL]`); person names reversibly (`[PERSON_1]`, map kept in request memory only) | orchestrator | regex fallback |
+| 5 | Deterministic date resolution in GST, weekend → Monday | orchestrator | unresolvable phrase: left as text, no due date proposed |
+| 6 | Extraction (`gen-small`, strict structured outputs) with content filter | orchestrator | model unavailable or invalid: **degrade** to the manual call-report form (`DEGRADED/MODEL_UNAVAILABLE`) |
+| 7 | Schema validation (`followup/1`) | orchestrator | invalid: degrade (manual form) |
+| 8 | Policy check on tasks | orchestrator | **drop task** with notice `TASK_REMOVED_POLICY` |
+| 9 | Policy check on call report sentences | orchestrator | sentence **highlighted**; approve stays disabled until the RM edits it (re-checked on `PUT`) |
+| 10 | Numeric check against the notes | orchestrator | **drop task** / highlight sentence |
+| 11 | Re-substitute person-name pseudonyms; email body built by template from tasks and CRM salutation (not by the model) | orchestrator | n/a |
+| 12 | Commit: schema + policy check on tasks again, approval verification (§4.4) | tool-gateway | `400 VALIDATION_FAILED/POLICY_VIOLATION`, `403 APPROVAL_INVALID` |
+
+---
+
+## 10. Sequence diagrams
+
+Conventions: times are p95 budget values from `00-plan.md` §5; `x-deadline-ms` values are the remaining budget
+sent on that hop (§1.6). Audit events always go `tool-gateway` → Event Hubs and wait for the ack.
+
+### 10.1 UC1 happy path with deadlines
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant RM as RM (CRM sidebar or Teams tab)
+    participant WAF as App Gateway WAF
+    participant BFF as web-bff
+    participant ORC as orchestrator
+    participant TG as tool-gateway
+    participant FAC as APIM system API facade
+    participant SOR as CRM / ODS / LOS / KYC / news
+    participant SAFE as Content Safety and AI Language
+    participant AIG as APIM AI gateway
+    participant LLM as Azure OpenAI gen-large
+    participant EH as Event Hubs audit
+    RM->>WAF: POST /v1/briefs with Entra token
+    WAF->>BFF: forward (internal)
+    Note over BFF: validate token, OBO for tool-gateway (cached), request id, traceparent, deadline 8000 ms
+    BFF->>ORC: uc1 brief, x-deadline-ms 7850
+    ORC->>TG: get_brief_inputs, x-deadline-ms 2000
+    Note over TG: validate RM token and workload token, entitlement check first (cache hit, 20 ms)
+    par parallel fan-out, each timeout min(cap, remaining minus 100)
+        TG->>FAC: CRM profile
+        FAC->>SOR: CRM
+    and
+        TG->>FAC: LOS facilities and ODS balances
+        FAC->>SOR: LOS and ODS
+    and
+        TG->>FAC: ODS aggregates, KYC status, news
+        FAC->>SOR: ODS, KYC, news
+    end
+    SOR-->>FAC: data
+    FAC-->>TG: data (p95 1500 ms)
+    Note over TG: minimise and mask fields, build facts with source refs
+    TG->>EH: tool_called events (wait for ack)
+    TG-->>ORC: facts and per-source status
+    par in parallel with the slowest tool calls
+        ORC->>SAFE: PII masking and Prompt Shields on free text (300 ms)
+    end
+    Note over ORC: remaining about 6000 ms, above the 2500 ms minimum, generation timeout = remaining minus 300
+    ORC->>AIG: chat gen-large, x-rm-token, x-use-case uc1, x-deadline-ms 5700
+    Note over AIG: validate-jwt, llm-token-limit per RM and per use case, emit token metric, store false
+    AIG->>LLM: masked facts, placeholders only
+    LLM-->>AIG: talking points with placeholders (about 4300 ms)
+    AIG-->>ORC: response, token usage
+    Note over ORC: placeholder check, numeric check, policy check, rendering check, fill from facts (100 ms)
+    ORC->>TG: POST audit brief_built with lineage
+    TG->>EH: brief_built (wait for ack)
+    ORC-->>BFF: verified brief, mode full
+    BFF-->>RM: plain text brief with sources (about 6500 ms p95)
+```
+
+### 10.2 UC1 entitlement denied
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant RM as RM
+    participant BFF as web-bff
+    participant ORC as orchestrator
+    participant TG as tool-gateway
+    participant COS as Cosmos entitlements
+    participant FAC as APIM system API facade
+    participant CRM as CRM
+    participant EH as Event Hubs audit
+    RM->>BFF: POST /v1/briefs customer gulfstar
+    BFF->>ORC: uc1 brief, x-deadline-ms 7850
+    ORC->>TG: get_brief_inputs gulfstar
+    TG->>COS: read entitlements for RM oid
+    COS-->>TG: not found (expired or invalidated)
+    TG->>FAC: CRM portfolio and delegations for RM oid
+    FAC->>CRM: GET entitlements
+    CRM-->>FAC: portfolio without gulfstar, no active delegation
+    FAC-->>TG: entitlements
+    TG->>COS: upsert entitlements, ttl 50 s
+    Note over TG: no basis (not owner, not delegate, not team lead read)
+    TG->>EH: entitlement_denied (wait for ack)
+    TG-->>ORC: 403 NOT_ENTITLED
+    Note over TG,ORC: no system of record was called for customer data, no model call
+    ORC-->>BFF: 403 NOT_ENTITLED
+    BFF-->>RM: You do not have access to this customer
+    Note over EH: Sentinel analytics count repeated NOT_ENTITLED per RM (C15)
+```
+
+### 10.3 UC1 partial brief (KYC down)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant BFF as web-bff
+    participant ORC as orchestrator
+    participant TG as tool-gateway
+    participant FAC as APIM system API facade
+    participant KYC as KYC system
+    participant OTH as CRM / ODS / LOS / news
+    participant AIG as APIM AI gateway
+    BFF->>ORC: uc1 brief, x-deadline-ms 7850
+    ORC->>TG: get_brief_inputs, x-deadline-ms 2000
+    par fan-out
+        TG->>FAC: KYC status, timeout 1200 ms
+        FAC->>KYC: GET status
+        KYC-->>FAC: no answer
+        FAC-->>TG: timeout after 1200 ms
+    and
+        TG->>FAC: profile, facilities, signals, news
+        FAC->>OTH: GET
+        OTH-->>FAC: data
+        FAC-->>TG: data
+    end
+    Note over TG: KYC breaker records failure (opens after 5 consecutive or 50 percent of 10 calls in 30 s)
+    TG-->>ORC: facts, get_kyc_status unavailable DEPENDENCY_TIMEOUT, critical_ok true
+    Note over ORC: KYC facts absent, KYC section flagged, mode partial
+    ORC->>AIG: chat gen-large with the facts that exist
+    AIG-->>ORC: talking points
+    Note over ORC: checks pass, a line that needs a KYC key cannot exist (unknown key, dropped)
+    ORC-->>BFF: 200 mode partial, warning SOURCE_UNAVAILABLE kyc
+    Note over BFF: UI shows KYC section as unavailable, counted as available for the SLO
+```
+
+### 10.4 UC2 with retry and decline
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant RM as RM
+    participant BFF as web-bff
+    participant ORC as orchestrator
+    participant SAFE as Content Safety and AI Language
+    participant AIG as APIM AI gateway
+    participant TG as tool-gateway
+    participant SRCH as AI Search
+    RM->>BFF: POST /v1/policy-questions
+    BFF->>ORC: uc2 answer, x-deadline-ms 6850
+    ORC->>SAFE: Prompt Shields user prompt and PII masking (400 ms)
+    SAFE-->>ORC: no attack, masked question
+    ORC->>AIG: gen-small rewrite (600 ms)
+    AIG-->>ORC: query and language
+    ORC->>TG: search_policies
+    TG->>AIG: embed query (via APIM)
+    AIG-->>TG: vector
+    TG->>SRCH: hybrid query, filter status current, effective date, clearance
+    SRCH-->>TG: passages with reranker scores
+    TG-->>ORC: top passages (700 ms total), above threshold
+    ORC->>AIG: gen-large answer from passages only
+    AIG-->>ORC: answer with citations
+    Note over ORC: local groundedness check, one sentence has a number not in its passage, fail
+    alt at least 4000 ms of the deadline remain
+        ORC->>AIG: gen-large answer with the strict prompt
+        AIG-->>ORC: second answer
+        Note over ORC: groundedness check fails again
+        ORC->>TG: POST audit declined FAILED_GROUNDEDNESS
+        ORC-->>BFF: 200 status declined, closest sources, route to credit or product desk
+    else less than 4000 ms remain
+        ORC->>TG: POST audit declined NO_TIME_FOR_RETRY
+        ORC-->>BFF: 200 status declined, closest sources, route to credit or product desk
+    end
+    BFF-->>RM: I can not confirm this from approved documents, offer routing
+```
+
+### 10.5 UC3 draft, approve with step-up, commit with saga (one task to the outbox)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant RM as RM
+    participant ENTRA as Entra ID
+    participant BFF as web-bff
+    participant KV as Key Vault (approval-signing)
+    participant ORC as orchestrator
+    participant TG as tool-gateway
+    participant COS as Cosmos DB
+    participant FAC as APIM system API facade
+    participant CRM as CRM
+    participant OBW as outbox-worker
+    participant EH as Event Hubs audit
+    RM->>BFF: POST /v1/followups/drafts with notes
+    BFF->>ORC: uc3 draft, x-deadline-ms 9850
+    ORC->>TG: get_customer_profile (entitlement check)
+    TG-->>ORC: profile
+    Note over ORC: quote quarantine, Prompt Shields user prompt, PII masking, GST date resolution
+    ORC-->>BFF: draft JSON (gen-small extraction via APIM AI gateway, schema and policy validated)
+    BFF->>COS: create drafts document
+    BFF-->>RM: draft with notices
+    RM->>BFF: PUT draft with edits, If-Match
+    BFF->>COS: replace draft
+    RM->>BFF: POST approve, Idempotency-Key, CSRF token
+    Note over BFF: Origin and CSRF ok, auth_time older than 10 minutes
+    BFF-->>RM: 401 STEP_UP_REQUIRED with claims challenge
+    RM->>ENTRA: MSAL interactive sign-in with MFA (auth context c1)
+    ENTRA-->>RM: fresh token
+    RM->>BFF: POST approve again, same Idempotency-Key
+    Note over BFF: canonicalise draft (RFC 8785), SHA-256, OBO with Tools.Write
+    BFF->>KV: sign ES256 digest (timeout 400 ms)
+    KV-->>BFF: signature
+    BFF->>COS: record minted jti in the draft
+    BFF->>ORC: uc3 commit, draft and approval token, x-deadline-ms 1700
+    ORC->>TG: POST commits (cannot mint or alter the token)
+    Note over TG: entitlement (write), verify signature with cached public key, claims, draft hash
+    TG->>COS: create jti document (atomic, 201)
+    TG->>COS: create approvals document (verdict, snapshot, saga created)
+    TG->>COS: transactional batch, outbox items cr, t1, t2 pending
+    TG->>EH: approval_issued and approval_verified
+    par inline writes, each timeout min(1000, remaining minus 250)
+        TG->>FAC: create call report, external ref jti cr
+        FAC->>CRM: POST
+        CRM-->>FAC: 201 CR-77120
+        FAC-->>TG: committed
+    and
+        TG->>FAC: create task t1, external ref jti t1
+        FAC->>CRM: POST
+        CRM-->>FAC: 201 TSK-55101
+        FAC-->>TG: committed
+    and
+        TG->>FAC: create task t2, external ref jti t2
+        FAC->>CRM: POST
+        Note over FAC,CRM: no answer within the timeout, outcome unknown
+        FAC-->>TG: timeout
+    end
+    TG->>COS: cr and t1 committed, t2 queued (outcome unknown), saga partially_queued
+    TG->>EH: write_committed cr and t1, write_queued t2
+    TG-->>ORC: 202 items committed, committed, queued, email link
+    ORC-->>BFF: saga status
+    BFF-->>RM: statuses and Open in Outlook link (about 1400 ms p95)
+    Note over OBW: change feed picks t2, first outbox attempt after about 10 s
+    OBW->>TG: POST outbox deliver t2
+    Note over TG: verdict valid in approvals document, writes flag on, entitlement still valid
+    TG->>FAC: GET task by external ref jti t2 (read-before-retry)
+    FAC->>CRM: GET
+    CRM-->>FAC: not found
+    TG->>FAC: create task t2 (deferred mode, signed RM header)
+    FAC->>CRM: POST
+    CRM-->>FAC: 201 TSK-55102
+    FAC-->>TG: committed
+    TG->>COS: t2 committed, saga completed
+    TG->>EH: write_committed t2 (actor outbox-worker on behalf of RM)
+    TG-->>OBW: committed
+    RM->>BFF: GET commit status (poll)
+    BFF-->>RM: all items committed
+```
+
+If the first CRM call for `t2` had actually succeeded, the read-before-retry `GET` would find the record by its
+external reference and mark it `committed` without a second `POST` (C7).
+
+### 10.6 Model throttled, then degraded mode
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant BFF as web-bff
+    participant ORC as orchestrator
+    participant TG as tool-gateway
+    participant AIG as APIM AI gateway
+    participant B1 as aoai-uaen-01 (priority 1)
+    participant B2 as aoai-uaen-02 (priority 2)
+    BFF->>ORC: uc1 brief, x-deadline-ms 7850
+    ORC->>TG: get_brief_inputs
+    TG-->>ORC: facts (1500 ms)
+    ORC->>AIG: chat gen-large, x-deadline-ms 5700
+    AIG->>B1: forward
+    B1-->>AIG: 429 Retry-After 20
+    Note over AIG: breaker on B1 trips on first 429
+    alt at least 4000 ms remain
+        AIG->>B2: retry once to priority 2
+        B2-->>AIG: 429
+        AIG-->>ORC: 429 without x-rmc-limit header
+    else less than 4000 ms remain
+        AIG-->>ORC: 429 at once, no failover
+    end
+    Note over ORC: model throttled (not our budget), client breaker opens 20 s
+    Note over ORC: degraded mode, facts-only brief rendered by code from tool output
+    ORC->>TG: POST audit degraded MODEL_UNAVAILABLE
+    ORC-->>BFF: 200 mode degraded, warning DEGRADED MODEL_UNAVAILABLE
+    Note over BFF,ORC: next requests within 20 s skip the model call and degrade in milliseconds
+    Note over AIG: B1 breaker half-opens after 20 s, traffic returns to priority 1
+```
+
+### 10.7 Kill switch on
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant SEN as Sentinel playbook or operator
+    participant AC as App Configuration
+    participant BFF as web-bff
+    participant ORC as orchestrator
+    participant TG as tool-gateway
+    participant OBW as outbox-worker
+    participant EH as Event Hubs audit
+    participant RM as RM
+    SEN->>AC: set feature flag writes to off (audited change)
+    Note over BFF,OBW: each service polls the sentinel key every 15 s, effective in 30 s or less
+    AC-->>BFF: writes off
+    AC-->>TG: writes off
+    AC-->>OBW: writes off
+    TG->>EH: kill_switch_changed writes off (first observer)
+    RM->>BFF: GET /v1/session
+    BFF-->>RM: features writes false (Approve hidden, banner shown)
+    RM->>BFF: POST approve (stale page)
+    BFF-->>RM: 503 FEATURE_DISABLED flag writes, no token minted
+    Note over ORC,TG: race case, a commit already past web-bff
+    ORC->>TG: POST commits
+    TG-->>ORC: 503 FEATURE_DISABLED (checked before jti create)
+    Note over OBW: deliveries paused, queued items keep their attempt count
+    RM->>BFF: POST /v1/briefs
+    BFF-->>RM: brief as normal (reads unaffected unless uc1 is also off)
+    Note over SEN,AC: setting uc1, uc2 or uc3 off returns 503 FEATURE_DISABLED for that use case the same way
+```
+
+---
+
+## 11. Observability specification
+
+### 11.1 Pipeline and principles (C5)
+
+- Traces and logs: OpenTelemetry SDK (Azure Monitor OpenTelemetry Distro) → Application Insights / Log Analytics
+  through AMPLS. Metrics: Prometheus `/metrics` on port 9090 → PodMonitor → Azure Monitor managed Prometheus →
+  Managed Grafana. APIM token metrics → Application Insights custom metrics → Grafana (Azure Monitor data source).
+- **Metadata only.** Every service installs an attribute **allow-list** processor for spans and log records
+  (unknown keys dropped, strings truncated to 80 characters; the prototype's `services/common/telemetry.py`
+  `SAFE_KEYS` is the reference). GenAI content capture is off (`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=false`,
+  Foundry / Azure AI tracing content recording off **[confirm variable names for the SDK versions in use]**),
+  APIM body bytes 0, exception messages replaced by the exception type. Enforced by Azure Policy (diagnostic
+  settings), a CI test that runs every flow with canary values (`784-1985-1234567-1`, `AE07 0331 2345 6789 0123 456`,
+  a canary customer name) and fails if any appears in exported telemetry, and a Log Analytics DCR transformation
+  that drops columns outside the schema.
+- Identifiers: `rmc.rm_hash` = HMAC-SHA256(telemetry key, `oid`) truncated to 16 hex characters, key rotated
+  quarterly; `rmc.customer_hash` likewise. Raw `oid` and `customer_id` appear only in the audit store (§6.4).
+- Sampling: 100% for errors and for spans with `rmc.outcome` ≠ `answered`; 20% head sampling otherwise (pilot:
+  100%).
+
+### 11.2 Span names
+
+| Service | Span names (kind) |
+|---|---|
+| `web-bff` | `HTTP {method} {route}` (server); `bff.session.validate`; `bff.obo.acquire` (client, Entra); `bff.flags.check`; `bff.approve.step_up_check`; `bff.approve.canonicalise`; `bff.approve.sign` (client, Key Vault); `HTTP POST orchestrator` (client) |
+| `orchestrator` | `uc1.brief`, `uc2.answer`, `uc3.draft`, `uc3.commit` (internal, one per request); `tool.invoke {tool}` (client); `guardrail.prompt_shields`, `guardrail.pii`, `guardrail.quarantine`, `guardrail.placeholder`, `guardrail.numeric`, `guardrail.policy`, `guardrail.rendering`, `guardrail.groundedness`; `uc2.rewrite`; `chat {deployment}` and `embeddings {deployment}` (client, OTel GenAI convention `{gen_ai.operation.name} {gen_ai.request.model}`); `degraded.render` |
+| `tool-gateway` | `HTTP POST /v1/tools/{tool}` (server); `entitlement.check`; `sor.{system}.{operation}` (client, via APIM); `search.query`; `approval.verify`; `jti.create`; `approval.persist`; `saga.execute`; `saga.item.write`; `outbox.deliver`; `audit.publish` (producer, Event Hubs) |
+| `outbox-worker` | `outbox.poll`; `outbox.deliver` (with a span **link** to the originating commit trace, stored as `trace_id` on the item); `outbox.read_before_retry`; `outbox.sweep` |
+| `ingestion-worker` | `ingest.document`; `ingest.layout`; `ingest.pii_scan`; `ingest.shield_scan`; `ingest.chunk`; `ingest.embed`; `ingest.index` |
+| `audit-writer` | `audit.consume` (consumer); `audit.chain.append`; `audit.content.seal`; `audit.anchor`; `audit.la.ingest` |
+| `eval-runner` | `eval.run`; `eval.item`; `eval.judge` |
+
+### 11.3 Span and log attributes
+
+Allowed (all values scalar; no free text):
+
+| Group | Attributes |
+|---|---|
+| Request | `rmc.request_id`, `rmc.use_case`, `rmc.surface`, `rmc.mode`, `rmc.outcome`, `rmc.error_code`, `rmc.reason`, `rmc.deadline_ms`, `rmc.remaining_ms`, `rmc.attempt`, `rmc.rm_hash`, `rmc.customer_hash` |
+| Tools | `rmc.tool`, `rmc.tool_contract_version`, `rmc.source_system`, `rmc.source_status`, `rmc.cache`, `rmc.entitlement_result`, `rmc.entitlement_basis`, `rmc.breaker_state`, `rmc.field_count` |
+| Guardrails | `rmc.guardrail.check`, `rmc.guardrail.action`, `rmc.guardrail_version`, `rmc.lines_dropped`, `rmc.groundedness_score`, `rmc.retrieval_mode`, `rmc.passages`, `rmc.top_reranker_score`, `rmc.decline_reason` |
+| Model | `gen_ai.operation.name`, `gen_ai.system` / `gen_ai.provider.name` **[confirm current semconv]**, `gen_ai.request.model` (deployment), `gen_ai.response.model`, `gen_ai.request.max_tokens`, `gen_ai.request.temperature`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.response.finish_reasons`, `rmc.prompt_template_id`, `rmc.prompt_template_sha256`, `rmc.backend` |
+| Writes | `rmc.saga_state`, `rmc.item_kind`, `rmc.item_state`, `rmc.outbox_attempt`, `rmc.outcome_unknown`, `rmc.approval.kid`, `rmc.approval.result`, `rmc.approval.reason`, `rmc.jti_hash` |
+| HTTP | `http.request.method`, `http.route` (template only), `http.response.status_code`, `server.address`, `error.type` |
+
+**Forbidden** (dropped by the processor; CI fails if seen): `gen_ai.input.messages`, `gen_ai.output.messages`,
+`gen_ai.system_instructions`, `gen_ai.prompt`, `gen_ai.completion`, `gen_ai.tool.call.arguments`,
+`gen_ai.tool.call.result`; any request or response body; `url.full`, `url.query`, `http.target` (may carry ids or the
+compose link); `http.request.header.authorization`, `http.request.header.cookie`, any `x-rm-token`, `x-rm-assertion`,
+`x-csrf-token`, `Idempotency-Key` header attribute; `db.query.text` with literals and `db.query.parameter.*`;
+`messaging.message.body`; `enduser.id`, `user.id`, `user.email`, `user.name`, raw `oid`, raw `customer_id`, customer
+or contact names; `exception.message`, `exception.stacktrace` (only `exception.type` is kept); the approval token,
+draft text, notes, passages, news text, email body or the compose URL.
+
+Log record fields (JSON to stdout): `ts` (UTC), `level`, `service`, `version` (image digest short), `event` (constant
+code, for example `tool.call.completed`), `request_id`, `trace_id`, `span_id`, `use_case`, `rm_hash`, `customer_hash`,
+`outcome`, `error_code`, `reason`, `latency_ms`, `dependency`, `attempt`. Log messages are constants; no
+interpolated values.
+
+### 11.4 Metrics (Prometheus)
+
+Names carry the `rmc_` prefix in production; the prototype emits the same names without the prefix (added by a
+`metric_relabel_configs` rule or kept as is in the mock).
+
+| Metric | Type | Labels | Unit / notes |
+|---|---|---|---|
+| `rmc_http_requests_total` | counter | `service`, `method`, `route`, `status` | requests |
+| `rmc_http_request_duration_seconds` | histogram | `service`, `route` | seconds; buckets 0.05 to 20 |
+| `rmc_http_server_inflight_requests` | gauge | `service` | used by KEDA |
+| `rmc_usecase_requests_total` | counter | `use_case`, `outcome` (`answered`, `partial`, `degraded`, `declined`, `client_error`, `server_error`, `disabled`) | SLI source |
+| `rmc_usecase_duration_seconds` | histogram | `use_case`, `outcome` | end-to-end at `web-bff`; buckets 0.5, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 15, 20 |
+| `rmc_degraded_total` | counter | `use_case`, `reason` | |
+| `rmc_declines_total` | counter | `reason` | UC2 |
+| `rmc_http_client_requests_total` | counter | `service`, `peer`, `status` | outbound calls |
+| `rmc_dependency_duration_seconds` | histogram | `service`, `peer` | seconds |
+| `rmc_deadline_exceeded_total` | counter | `service`, `peer` | fail-fast skips and timeouts |
+| `rmc_circuit_breaker_state` | gauge | `service`, `peer` (or `backend` at APIM) | 0 closed, 1 open, 2 half-open (prototype encoding) |
+| `rmc_source_calls_total` | counter | `system`, `outcome` | systems of record via facade |
+| `rmc_entitlement_cache_total` | counter | `result` (`hit_local`, `hit_cosmos`, `miss`) | |
+| `rmc_entitlement_denials_total` | counter | (none) | per-RM view only in Sentinel |
+| `rmc_llm_tokens_total` | counter | `deployment`, `use_case`, `type` (`input`, `output`) | tokens |
+| `rmc_llm_request_duration_seconds` | histogram | `deployment`, `use_case`, `phase` (`ttft`, `total`) | seconds |
+| `rmc_llm_cost_aed_total` | counter | `deployment`, `use_case` | AED from the price table in App Configuration |
+| `rmc_apim_backend_requests_total` | counter | `backend`, `status` | from the APIM mock / App Insights |
+| `rmc_apim_policy_rejections_total` | counter | `policy` | `llm-token-limit-quota`, `llm-token-limit-tpm`, `validate-jwt`, `rate-limit` |
+| `rmc_guardrail_events_total` | counter | `use_case`, `check`, `action` (`pass`, `block`, `drop_line`, `drop_item`, `decline`, `degrade`, `quarantine`, `mask`) | |
+| `rmc_guardrail_fallback_total` | counter | `service` (`content-safety`, `language`) | local rules decided |
+| `rmc_groundedness_score` | histogram | `attempt` | 0 to 1 |
+| `rmc_approval_tokens_verified_total` | counter | (none) | |
+| `rmc_approval_tokens_rejected_total` | counter | `reason` | §4.6 reasons and `REPLAYED` |
+| `rmc_crm_write_items_total` | counter | `outcome` (`committed`, `queued`, `failed`) | first attempt |
+| `rmc_outbox_deliveries_total` | counter | `outcome` (`committed`, `found_existing`, `retry`, `poison`) | |
+| `rmc_outbox_pending_items` | gauge | `state` | |
+| `rmc_outbox_oldest_item_age_seconds` | gauge | (none) | |
+| `rmc_outbox_paused` | gauge | (none) | 1 when the flag pauses delivery |
+| `rmc_audit_events_published_total` | counter | `event_type`, `outcome` | producer side |
+| `rmc_audit_records_total` | counter | `event` | appended to the chain |
+| `rmc_audit_consumer_lag_events` | gauge | `partition` | |
+| `rmc_audit_content_sealed_total` | counter | (none) | |
+| `rmc_audit_chain_verify_failures_total` | counter | `chain_id` | |
+| `rmc_feature_flag_state` | gauge | `flag` | 1 on, 0 off |
+| `rmc_config_refresh_age_seconds` | gauge | `service` | |
+| `rmc_approval_key_age_days` | gauge | `kid` | rotation hygiene |
+| `rmc_ingestion_documents_total` | counter | `outcome` (`indexed`, `quarantined`, `failed`) | |
+| `rmc_eval_metric` | gauge | `suite`, `metric`, `deployment` | from eval-runner (pushed via a job exporter) |
+
+No metric has an RM, customer or free-text label (cardinality and privacy).
+
+### 11.5 Dashboards (Managed Grafana)
+
+| Dashboard | Panels |
+|---|---|
+| **Service overview (SLO)** | availability SLI per use case (business hours), error-budget remaining (28 days), burn-rate 1 h and 6 h, p50/p95 end-to-end per use case against 8 / 7 / 10 / 2 s lines, outcome mix (answered, partial, degraded, declined), requests per minute by surface |
+| **Latency budget** | stacked p95 per step (edge + OBO, entitlement, fan-out or retrieval, PII and shields, router, generation TTFT and total, checks) matching `00-plan.md` §5; deadline-exceeded counts per hop |
+| **AI usage and cost** | tokens per minute by deployment and use case, AED per day vs budget (80% line), per-use-case TPM vs APIM limit, `llm-token-limit` rejections, backend share (priority 1 vs 2), model latency, finish reasons |
+| **Guardrails and quality** | guardrail actions by check and use case, lines dropped per brief, UC2 decline rate by reason, groundedness score distribution, fallback-to-local count, nightly eval metrics vs gates, false-positive review queue size |
+| **Dependencies and breakers** | per system of record: rate, error %, p95, breaker state timeline, bulkhead saturation, facade rate-limit hits |
+| **Writes and outbox** | approvals verified vs rejected by reason, replays, commit p95, first-attempt outcome, outbox pending by state, oldest age, deliveries by outcome, poison count, paused flag |
+| **Audit pipeline** | events published vs appended, consumer lag per partition, chain anchors per hour, verify failures, content sealed, Log Analytics ingestion lag |
+| **Security signals** | entitlement denials, approval rejections, injection blocks, kill-switch states, config staleness, key age |
+
+### 11.6 Alert rules (PromQL-style, illustrative)
+
+Business-hours window helper (07:00 to 20:00 GST = 03:00 to 16:00 UTC, Monday to Friday):
+
+```yaml
+- record: rmc:business_hours
+  expr: (hour() >= 3 and hour() < 16) and (day_of_week() >= 1 and day_of_week() <= 5)
+- record: rmc:sli_errors:ratio_rate1h
+  expr: |
+    sum(rate(rmc_usecase_requests_total{outcome="server_error"}[1h]))
+    / clamp_min(sum(rate(rmc_usecase_requests_total{outcome!~"client_error|disabled"}[1h])), 1e-9)
+- record: rmc:sli_errors:ratio_rate5m
+  expr: |
+    sum(rate(rmc_usecase_requests_total{outcome="server_error"}[5m]))
+    / clamp_min(sum(rate(rmc_usecase_requests_total{outcome!~"client_error|disabled"}[5m])), 1e-9)
+```
+
+SLI: "available" = `answered`, `partial`, `degraded` or `declined` (plan §5 counts flagged degraded answers as
+available; a decline is the correct behaviour); `client_error` (for example `NOT_ENTITLED`) and operator-set
+`disabled` are excluded from the denominator. Pilot SLO 99.0% (error budget 1%), scale 99.5% (0.5%).
+
+| Alert | Expression (illustrative) | For | Severity | Tied to |
+|---|---|---|---|---|
+| `RmcAvailabilityFastBurn` | `rmc:sli_errors:ratio_rate1h > (14.4 * 0.01) and rmc:sli_errors:ratio_rate5m > (14.4 * 0.01) and on() rmc:business_hours and on() sum(increase(rmc_usecase_requests_total[1h])) > 20` | 2m | page | 2% of the 30-day budget in 1 h; minimum volume guard for pilot traffic |
+| `RmcAvailabilitySlowBurn` | `sum(rate(rmc_usecase_requests_total{outcome="server_error"}[6h])) / clamp_min(sum(rate(rmc_usecase_requests_total{outcome!~"client_error\|disabled"}[6h])),1e-9) > (6 * 0.01) and on() rmc:business_hours` | 15m | ticket | 5% of budget in 6 h |
+| `RmcUC1LatencyP95` | `histogram_quantile(0.95, sum by (le) (rate(rmc_usecase_duration_seconds_bucket{use_case="uc1"}[30m]))) > 8 and on() rmc:business_hours` | 30m | ticket | UC1 ≤ 8 s |
+| `RmcUC2LatencyP95` | same with `use_case="uc2"` and `> 7` | 30m | ticket | UC2 ≤ 7 s |
+| `RmcUC3DraftLatencyP95` | same with `use_case="uc3_draft"` and `> 10` | 30m | ticket | UC3 ≤ 10 s |
+| `RmcCommitLatencyP95` | same with `use_case="uc3_commit"` and `> 2` | 30m | ticket | commit ≤ 2 s |
+| `RmcDegradedRatioHigh` | `sum(rate(rmc_usecase_requests_total{outcome="degraded"}[15m])) / clamp_min(sum(rate(rmc_usecase_requests_total[15m])),1e-9) > 0.2 and on() rmc:business_hours` | 15m | ticket (page if > 0.5) | C3; model or quota trouble |
+| `RmcModelBackendsOpen` | `min(rmc_circuit_breaker_state{backend=~"aoai-.*"}) == 1` | 5m | page | both regional backends open |
+| `RmcBreakerOpen` | `max by (service, peer) (rmc_circuit_breaker_state) == 1` | 5m | ticket | dependency SLAs (`04`) |
+| `RmcDeclineRateHigh` | `sum(rate(rmc_declines_total[1h])) / clamp_min(sum(rate(rmc_usecase_requests_total{use_case="uc2"}[1h])),1e-9) > 0.3` | 1h | ticket | quality drift, index problem |
+| `RmcOutboxPoison` | `sum(rmc_outbox_pending_items{state="failed"}) > 0` | 0m | ticket (RM operations) | C7 |
+| `RmcOutboxStale` | `max(rmc_outbox_oldest_item_age_seconds) > 3600 and on() rmc:business_hours and on() (max(rmc_outbox_paused) == 0)` | 10m | ticket | C7 |
+| `RmcAuditLag` | `max(rmc_audit_consumer_lag_events) > 1000` | 5m | page | audit RPO 0 |
+| `RmcAuditPublishFailing` | `sum(rate(rmc_audit_events_published_total{outcome="error"}[5m])) > 0` | 5m | page | fail-closed reads and writes |
+| `RmcAuditChainBreak` | `sum(increase(rmc_audit_chain_verify_failures_total[1h])) > 0` | 0m | page (security) | tamper evidence |
+| `RmcApprovalForgery` | `sum(increase(rmc_approval_tokens_rejected_total{reason=~"BAD_SIGNATURE\|ALG_NOT_ALLOWED\|UNKNOWN_KID\|WRONG_TYPE"}[15m])) > 0` | 0m | page (security) | C6 |
+| `RmcApprovalReplay` | `sum(increase(rmc_approval_tokens_rejected_total{reason="REPLAYED"}[15m])) > 0` | 0m | ticket (security) | C6 |
+| `RmcEntitlementDenialsSpike` | `sum(increase(rmc_entitlement_denials_total[15m])) > 10` | 0m | ticket (security) | C15 (per-RM detail in Sentinel) |
+| `RmcConfigStale` | `max(rmc_config_refresh_age_seconds) > 300` | 2m | page | writes fail closed after 5 min |
+| `RmcWritesKillSwitchOn` | `max(rmc_feature_flag_state{flag="writes"}) == 0` | 0m | info (notify RM ops) | C15 playbook |
+| `RmcTokenSpend80` | `sum(increase(rmc_llm_cost_aed_total[1d])) > 0.8 * <daily AED budget>` | 0m | ticket | C10 (Azure budgets alert too) |
+| `RmcNightlyEvalGate` | `min(rmc_eval_metric{suite="nightly", metric=~"groundedness_lb\|citation_accuracy_lb"}) < 0.95 or max(rmc_eval_metric{suite="nightly", metric=~"entitlement_leaks\|injection_success\|numeric_mismatches"}) > 0` | 0m | ticket (MRM) | C23 |
+| `RmcApprovalKeyAge` | `max(rmc_approval_key_age_days) > 95` | 1h | ticket | 90-day rotation |
+
+### 11.7 Sentinel analytics (C15, illustrative KQL on `RmCopilotAudit_CL`)
+
+```kusto
+// Briefs per RM per hour above normal, or after-hours bulk use (GST = UTC+4)
+RmCopilotAudit_CL
+| where event_type_s == "brief_built"
+| extend gst = datetime_add('hour', 4, occurred_at_t)
+| summarize briefs = count(), after_hours = countif(hourofday(gst) < 7 or hourofday(gst) >= 20 or dayofweek(gst) >= 5d)
+    by actor_oid_g, bin(occurred_at_t, 1h)
+| where briefs > 20 or after_hours > 10
+
+// Repeated NOT_ENTITLED per RM
+RmCopilotAudit_CL
+| where event_type_s == "entitlement_denied"
+| summarize denials = count(), customers = dcount(subject_customer_ref_s) by actor_oid_g, bin(occurred_at_t, 1h)
+| where denials >= 5
+```
+
+Thresholds are starting points tuned in the pilot. The playbook can set `writes` (or a use-case flag) off in App
+Configuration and opens an incident; turning it back on is a human action.
+
+---
+
+## 12. Security controls mapping
+
+Test names are generic where the code does not exist yet; existing tests in `code/tests/test_controls.py` are
+named exactly.
+
+| # | Control | Implemented in | How tested |
+|---|---|---|---|
+| 1 | RM authentication (Entra SSO, MFA, Conditional Access, correct tenant and audience) | Entra ID; `web-bff` token validation | `test_bff_rejects_wrong_audience`, `test_bff_rejects_other_tenant`, `test_bff_rejects_expired_token` |
+| 2 | Step-up on approve (`auth_time` ≤ 10 min, auth context `c1`) | `web-bff` approve | `test_approve_requires_fresh_auth` (11-minute-old token → `401 STEP_UP_REQUIRED` with claims challenge) |
+| 3 | Origin and CSRF checks; framed only by CRM and Teams | `web-bff` | `test_csrf_missing_rejected`, `test_foreign_origin_rejected`, `test_csp_frame_ancestors` |
+| 4 | Identity chain: OBO + workload identity; RM only from the token's `oid` | `web-bff`, `orchestrator`, `tool-gateway` (§1.5) | `test_tool_gateway_ignores_rm_id_in_body`, `test_user_token_rejected_as_workload_token`, `test_tool_call_without_rm_token_rejected` |
+| 5 | Entitlement first; deny on failure; delegation expiry; team lead read-only | `tool-gateway` entitlement module | `test_entitlement_enforced_in_tool_layer` (existing), `test_entitlement_denied_makes_no_downstream_call`, `test_entitlement_source_down_denies`, `test_delegation_expiry`, `test_team_lead_cannot_write`, `test_entitlement_cache_max_staleness_60s` |
+| 6 | Field minimisation and masking per contract | `tool-gateway` contracts (§3) | `test_profile_never_returns_national_id` (existing), `test_contract_outputs_validate_against_schema`, `test_kyc_returns_no_screening_fields` |
+| 7 | Retrieval filters on status, effective date, clearance (server-side) | `tool-gateway` `search_policies`, AI Search filter | `test_superseded_and_restricted_passages_are_not_retrievable` (existing), `test_search_filter_not_overridable_by_input`, eval access cases |
+| 8 | Prompt injection defence (Prompt Shields user and documents, content filter, local rules, quote quarantine, ingestion scan) | `orchestrator`, `ingestion-worker`, Azure OpenAI content filter | `test_injected_instruction_is_quarantined` (existing), `test_shields_unavailable_local_rules_apply`, `test_news_item_with_attack_dropped`, eval gate `injection_success = 0` |
+| 9 | PII masking before any model call (AI Language + regex, Arabic digits) | `orchestrator` | `test_pii_is_masked` (existing), `test_arabic_indic_emirates_id_masked`, `test_language_down_regex_still_masks` |
+| 10 | Figures only from tools (placeholders) and numeric check with number words | `orchestrator` UC1 / UC3 | `test_brief_figures_come_from_tools` (existing), `test_number_words_dropped_en_ar`, eval gate `numeric_mismatches = 0` |
+| 11 | Policy check (no approval, pricing, limit commitments) | `orchestrator`; `tool-gateway` at commit | `test_policy_commitment_line_dropped`, `test_task_policy_violation_rejected_at_commit` |
+| 12 | Groundedness, retry rule, decline | `orchestrator` UC2 | `test_hallucinated_answer_is_declined`, `test_unanswerable_question_is_declined` (existing), `test_retry_only_if_4s_remain`, eval gates groundedness and citation accuracy ≥ 0.95 (lower bound) |
+| 13 | Buffer, verify, release; plain-text rendering; strict CSP; no links or images | `orchestrator`, `web-bff`, client | `test_no_unverified_text_released`, `test_markdown_link_and_image_dropped`, `test_csp_header_present` |
+| 14 | Approval token ES256 with full binding | `web-bff` (sign), `tool-gateway` (verify) | `test_write_requires_matching_approval` (existing), `test_approval_rejects_<reason>` for every reason in §4.6, `test_jcs_vectors` (shared vectors in both services) |
+| 15 | Signer and verifier separation | Key Vault RBAC, node pools `signer` / `verifier`, Cilium policy | IaC policy tests `test_iac_tool_gateway_has_no_sign_permission`, `test_iac_orchestrator_has_no_key_vault_role`; mock RBAC test `test_tool_gateway_cannot_sign` |
+| 16 | Replay protection (atomic `jti`) | `tool-gateway`, Cosmos `jti` | `test_jti_replay_returns_409`, `test_concurrent_commits_same_token_one_wins`, `test_same_request_retry_is_idempotent` |
+| 17 | No double posting (external reference, read-before-retry, verdict persisted) | `tool-gateway`, `outbox-worker` | `test_timeout_then_success_no_double_post` (mock `slow_ms` fault), `test_outbox_retry_after_exp_uses_verdict`, `test_outbox_poison_after_max_attempts` |
+| 18 | Kill switches (per use case, all writes), fail closed when stale | App Configuration; `web-bff`, `orchestrator`, `tool-gateway`, `outbox-worker` | `test_writes_kill_switch_blocks_commit_and_pauses_outbox`, `test_uc_flag_off_returns_feature_disabled`, `test_stale_config_fails_writes_closed` |
+| 19 | Token and cost budgets | `orchestrator` budget; APIM `llm-token-limit`; Azure budgets | `test_rm_daily_quota_returns_budget_exceeded`, `test_step_budget_enforced`, `test_backend_429_degrades_not_budget` |
+| 20 | Telemetry metadata only | allow-list processors; APIM diagnostics; Azure Policy; DCR | `test_telemetry_contains_no_content` (canary values), `test_apim_diagnostics_body_bytes_zero` (IaC lint) |
+| 21 | Audit completeness (fail closed) and tamper evidence | `tool-gateway` producer; `audit-writer` chain and anchors | `test_audit_unavailable_fails_closed`, `test_chain_verify_detects_modification`, `test_chain_anchor_signature_valid` |
+| 22 | Crypto-shredding of audit content | `audit-writer`, Key Vault `kv-rmc-cust` | `test_erasure_makes_content_unreadable_chain_intact` |
+| 23 | Semantic cache off; `store=false` | APIM policy; orchestrator call parameters | `test_apim_policy_lint_no_semantic_cache`, `test_store_false_forced` |
+| 24 | Network isolation (private endpoints, default-deny Cilium, egress allow-list) | AKS, Azure Firewall, Azure Policy | policy-as-code tests `test_netpol_orchestrator_cannot_reach_key_vault`, Azure Policy compliance scan |
+| 25 | Supply chain (signed images, admission policy, ACR Premium) | CI/CD, Notation, Azure Policy for AKS | pipeline gate: unsigned image rejected by admission in test cluster |
+| 26 | Privileged operations (PIM, four-eyes, audited) | `tool-gateway` admin, `audit-writer` admin, `ingestion-worker` admin | `test_outbox_resolve_requires_second_operator`, `test_erasure_requires_second_approval`, `test_admin_route_requires_auth_context` |
+| 27 | Rate limits per RM and per backend | `web-bff`; APIM facade | `test_rate_limit_per_rm`, `test_facade_rate_limit_per_backend` |
+| 28 | Graph least privilege; no mail scope | Entra app permissions; `compose_email_link` | `test_graph_scopes_calendars_readbasic_only` (IaC), `test_email_is_compose_link_only` |
+| 29 | Signed RM header to legacy systems; caller-supplied assertion stripped | APIM facade | `test_facade_strips_client_assertion`, `test_deferred_mode_only_for_post_with_role` |
+| 30 | Data residency (UAE North only, no cross-border failover) | Bicep (allowed locations policy), APIM pools in-region | Azure Policy `allowed-locations` test, `test_backend_pool_regions_uae_only` (IaC) |
+
+---
+
+## 13. Traceability matrix (plan C1 to C23)
+
+| # | Issue (short) | LLD sections | Tests (generic names where code does not exist yet) |
+|---|---|---|---|
+| C1 | Teams bot residency | §2.1 (Teams tab, SSO, `frame-ancestors`), §1.5 | `test_no_bot_endpoint_in_phase1_manifests`, `test_teams_tab_token_audience` |
+| C2 | Regional feature gaps | §9.1 (local rules always), §2.2 (Content Safety fallback), flag `cs_groundedness`, §8.2 | `test_shields_unavailable_local_rules_apply`, `test_groundedness_local_without_content_safety` |
+| C3 | No in-country model DR, degraded mode | §1.4 (`DEGRADED`), §2.2, §9.2 to §9.4, §10.6, §7.1 (`x-rmc-limit`) | `test_model_429_returns_degraded_facts_only`, `test_uc2_degraded_ranked_passages`, `test_uc3_degraded_manual_form` |
+| C4 | Tool-gateway knows the RM | §1.5, §2.3, §7.1, §7.2 | `test_tool_gateway_ignores_rm_id_in_body`, `test_user_token_rejected_as_workload_token`, `test_tool_call_without_rm_token_rejected` |
+| C5 | Customer data in telemetry | §11.1, §11.3, §7.1 (diagnostics) | `test_telemetry_contains_no_content`, `test_apim_diagnostics_body_bytes_zero` |
+| C6 | Forgeable / under-bound approvals | §4 (all), §2.1 approve algorithm | `test_approval_rejects_<reason>`, `test_jcs_vectors`, `test_jti_replay_returns_409`, `test_approve_requires_fresh_auth` |
+| C7 | Double posting, non-atomic writes | §5, §4.6, §10.5 | `test_timeout_then_success_no_double_post`, `test_outbox_retry_after_exp_uses_verdict`, `test_saga_recovery_sweep` |
+| C8 | Semantic cache leak | §7.1 | `test_apim_policy_lint_no_semantic_cache` |
+| C9 | Prefetch without RM | not in v1: no system-identity route exists (§2.2 endpoints); Phase 2 design to add `actor.type = system` with `on_behalf_of` (§6.4 already has the field) | `test_no_system_identity_brief_route` |
+| C10 | Token and cost runaway | §8.4, §7.1, §11.6 `RmcTokenSpend80` | `test_rm_daily_quota_returns_budget_exceeded`, `test_step_budget_enforced` |
+| C11 | Compute platform | §2 (AKS, node pools, PodMonitor, KEDA, workload identity) | IaC tests: node pool taints, workload identity federation, PodMonitor present |
+| C12 | Model retirement | §8.2, §8.5 | `test_prompt_pin_requires_passing_eval`, release-gate run with `--deployment-override` |
+| C13 | Content filter false positives | §9.1, §2.7 | eval gate `false_positive_block_rate ≤ 0.02` |
+| C14 | Core banking load | §7.2 (rate limit, quota, concurrency), §1.7 (bulkheads), §3.4/3.5 (ODS replica, aggregates) | load test `load_uc1_peak_ods_within_quota`, `test_facade_rate_limit_per_backend` |
+| C15 | Insider misuse | §11.7 (Sentinel KQL), §10.7 (kill switch), §11.6 security alerts | analytics replay on synthetic audit data; `test_writes_kill_switch_blocks_commit_and_pauses_outbox` |
+| C16 | Dates and weekends | §1.2, §9.4 step 5, §3.11 (`due` rule) | `test_today_is_computed_in_gst`, `test_due_date_weekend_moves_to_monday` |
+| C17 | Abuse monitoring storage | §7.1 (`store=false` forced), §8.3 | `test_store_false_forced`; go-live checklist item (modified abuse monitoring approval) |
+| C18 | Streaming unverified text | §9 (release only after checks), §2.2 | `test_no_unverified_text_released` |
+| C19 | Output exfiltration, number words | §9.1 (rendering, numeric), §2.1 (CSP, plain text) | `test_markdown_link_and_image_dropped`, `test_number_words_dropped_en_ar`, `test_csp_header_present` |
+| C20 | Graph scopes | §3.9, §3.12, §1.5 | `test_graph_scopes_calendars_readbasic_only`, `test_email_is_compose_link_only` |
+| C21 | Audit immutability vs erasure | §6.4 (`customer_ref` HMAC), §6.5, §6.6 | `test_erasure_makes_content_unreadable_chain_intact`, `test_chain_verify_detects_modification` |
+| C22 | Entitlement staleness, delegation | §2.3 (50 s + 10 s, events, delegation, team lead) | `test_entitlement_cache_max_staleness_60s`, `test_delegation_expiry`, `test_team_lead_cannot_write` |
+| C23 | Model risk management | §6.4 (lineage in every event), §8.1 (prompt hashes), §8.5, §2.7 | `test_every_audit_event_has_lineage`, eval report schema check |
+
+---
+
+## 14. Open items, [confirm] list and plan inconsistencies
+
+### 14.1 [confirm] items introduced or detailed by this LLD
+
+1. `idtyp` optional claim configuration for app and user tokens; OBO with a federated workload identity credential.
+2. Conditional Access authentication context id for approve and interactive step-up inside the Teams tab.
+3. Current Teams `frame-ancestors` list.
+4. Key Vault REST api-version, ES256 signature format (`R||S`), custom data-action role names, rotation policy schema.
+5. Event Hubs Standard does not support customer-managed keys (drives producer-side envelope encryption, §6.6).
+6. Blob immutability with protected append writes for the hash-chain append blobs.
+7. Key Vault soft-delete minimum (7 days) and purge-protection behaviour for crypto-shred deadlines; key-count and
+   throughput limits for per-customer keys (Managed HSM at scale).
+8. APIM: two `llm-token-limit` policies in one scope, 403 vs 429 semantics, daily window, expression support in
+   `forward-request timeout`, `HMACSHA256` in policy expressions, backend pool and circuit-breaker property names,
+   LLM message logging setting name.
+9. Structured outputs, document marking for indirect-attack detection, and API version for the pinned models.
+10. AI Search semantic ranker availability and Arabic support in UAE North; index definition api-version.
+11. AI Language PII coverage for Arabic and UAE identifier formats; Document Intelligence Arabic layout quality.
+12. Outlook compose deeplink format and maximum URL length for the Bank's Outlook clients.
+13. CRM: external reference search, idempotency on create, ability to emit portfolio and delegation change events.
+14. Compliance: exclusion of sanctions and PEP screening results from the copilot (tipping-off).
+15. Risk: audit fail-closed on reads (no tool result released without an audit ack) versus availability.
+16. MRM: one-sided Wilson lower bound method for gates; online sampling of masked audit content by the judge.
+17. OpenTelemetry GenAI attribute names and content-capture switches for the SDK versions in use.
+
+### 14.2 Inconsistencies and gaps found in `00-plan.md`
+
+| # | Plan text | Issue | LLD resolution (proposed plan change) |
+|---|---|---|---|
+| 1 | §4.3 "retry once with a stricter prompt only if ≥ 4 s of the deadline remains" with a 7 s UC2 deadline and ≈ 5.9 s p95 first pass (§5 table) | After the first answer and checks, remaining time is ≈ 1.1 s at p95 and ≈ 3 to 4 s at the median, so the retry almost never runs; most groundedness failures become declines | Kept as written (safe: decline). Plan owner to choose: accept, lower the threshold to ≈ 3.5 s (one `gen-large` 150-token answer at p95), or raise the UC2 deadline. Metric `rmc_declines_total{reason="NO_TIME_FOR_RETRY"}` will show the effect |
+| 2 | §3.2 `orchestrator` "Talks to" has no Event Hubs, yet §4.1 step 10 has the orchestrator-level `brief_built` event with model lineage; `web-bff` emits `approval_issued` (§4.2 step 10) but has no Event Hubs edge | Unowned audit producers | All audit events are produced by `tool-gateway`; the orchestrator posts use-case events to `POST /internal/v1/audit` (actor stamped from the RM token); `approval_issued` is emitted by `tool-gateway` from the verified token, plus `approval_unused` from a sweep |
+| 3 | §3.3 / C20 Graph `Calendars.ReadBasic` via OBO | No service owns the Graph call | `tool-gateway` tool `get_upcoming_meetings` (chained OBO), §3.9 |
+| 4 | §3.4 step 5 "systems that accept Entra tokens get an OBO token" | Outbox deliveries happen without the RM present, so no user token exists for deferred CRM writes | Deferred writes use `tool-gateway`'s identity with role `SystemApi.DeferredWrite` and the APIM-signed RM header (`mode=deferred`), authorised by the persisted verdict; CRM must accept this (§14.1 item 13) |
+| 5 | §4.1 step 4 "invalidated on portfolio change events" | No transport for the events (no Service Bus in Phase 1) | Event Hub `crm-portfolio-events` in the existing namespace; CRM capability to confirm |
+| 6 | §7 entitlement cache "≤ 60 s" in "Cosmos DB / in-process" | Two stacked caches could exceed 60 s | 50 s (Cosmos) + 10 s (in-process) = 60 s maximum |
+| 7 | §3.3 Audit: content to a per-customer-key store; §3.3 Event Hubs Standard | Content would transit Event Hubs under Microsoft-managed keys only (CMK needs Premium) | Producer-side envelope encryption with the `audit-transport` public key (§6.6) |
+| 8 | §7 retention table | No rows for the outbox, the approvals/saga document or idempotency records | Outbox items: 30 days after terminal; `approvals` (verdict + saga state): 30 days; idempotency: 1 day. Add to §7 |
+| 9 | §4.2 step 6 lists `kid` among the claims | JOSE selects the key from the protected header | `kid` in both header and payload, must match (§4.1), which keeps the plan claim set and standard key selection |
+| 10 | §3.1 "zone-redundant" with §3.3 "APIM Pilot 1 unit" | A single APIM unit is not zone-redundant **[confirm]**; it is a single-zone point of failure for both gateways in the pilot | Accept for the pilot (record in `05`) or start with 2 units; the composite availability maths must include it |
+| 11 | §5 SLO "available = correct answer or degraded answer" | Declines, partial briefs and kill-switch states are not classified | Declines and partial briefs count as available; operator kill-switch time and client errors are excluded from the denominator (§11.6) |
+| 12 | §5 commit ≤ 2 s | Does not say whether interactive step-up is included | Commit latency is measured from the approve request that passes the step-up check; step-up user time is excluded |
+| 13 | §4.1 step 5 vs step 4 | Unclear whether the orchestrator calls each tool or `tool-gateway` fans out | `tool-gateway` fans out (composite `get_brief_inputs`, one tool step, one entitlement check), matching step 5 and the prototype |
+| 14 | §3.2 `tool-gateway` "Talks to" omits Key Vault | It needs `keys/read` for the approval public key (§3.3 Key Vault row) | Read-only Key Vault edge added |
+| 15 | §2 Phase 1 "Regional Standard models (no PTU)" vs prototype backend names `aoai-ptu` / `aoai-paygo` | Naming suggests a PTU primary in the pilot | LLD names the pilot backends `aoai-uaen-01` / `aoai-uaen-02` (both Standard, both UAE North); the PTU-plus-spillover pool is the Phase 2 variant of the same policy |
+
+### 14.3 Prototype alignment (workstream C, `code/azmock/`, `code/services/`)
+
+The mock stack was partially present while this LLD was written. Names this LLD adopted from it: feature flag ids
+`uc1`, `uc2`, `uc3`, `writes`; Cosmos database `rmcopilot` with containers `sessions`, `drafts`, `jti`, `approvals`,
+`outbox`, `leases`; facade path shape `/{system}/api/...`; AI gateway path
+`/openai/deployments/{deployment}/chat/completions`; breaker gauge encoding (0 closed, 1 open, 2 half-open); metric
+names (with `rmc_` prefix here); guardrail version `guardrails/2026.11.2`; tool catalogue version `tools/1.2`;
+`typ` `approval+jwt`; `kid` in header and payload. Remaining differences, for workstream C to align or document as
+mock simplifications (the plan and this LLD win):
+
+| Area | Prototype (at time of writing) | LLD |
+|---|---|---|
+| App ID URIs | `api://rm-copilot-apim` for all of APIM | separate `api://rm-copilot-ai-gateway` and `api://rm-copilot-system-api` (different callers and roles) |
+| `iss` / `aud` claim values | app ID URIs (`api://rm-copilot-web-bff`, `api://rm-copilot-tool-gateway`) | literal `web-bff` / `tool-gateway` as in plan §4.2 (either is safe if the verifier compares exactly; pick one in the contract library) |
+| Draft hash scope | `followup_payload` = call report text + task title and due only | whole `followup/1` draft incl. customer, meeting date, task type and item ids, and the email (so the compose link carries only approved text) |
+| Per-RM quota key at APIM | `x-rm-oid` header set by the orchestrator | `oid` from the RM token validated at APIM (`x-rm-token`) |
+| Signed RM header | `x-apim-rm-sig` over (oid, method, path, ts) | `x-rm-assertion` (oid, mode, request id, audience, iat, exp), HMAC per backend |
+| Audit stream | one hub `audit`, content inline | `audit-events` (metadata) and `audit-content` (envelope-encrypted) |
+| Error envelope | `{"error": {"code", "message"}}`, codes such as `AUDIT_UNAVAILABLE` | adds mandatory `request_id`, `retryable`, `reason`; `AUDIT_UNAVAILABLE` maps to `503 DEPENDENCY_UNAVAILABLE/AUDIT` |
+| Tool routes | resource style (`/tools/customers/{id}/profile`, `/tools/customers/{id}/brief-inputs`, `/tools/policies/search`, `/tools/writes/{jti}`) | `/v1/tools/{tool}`, `/internal/v1/commits` (either shape is acceptable if versioned under `/v1`; contracts and schemas are what must match) |
+| Index name | `policies-2026-11-26` (date) | `policies-v{n}` (version); either works if pinned in config and recorded as `index_version` |
+| Containers | no `entitlements`, `idempotency`, `audit-chain-heads` | present (plan §3.3 lists the entitlement cache) |
+| AOAI backends | `aoai-ptu` (1), `aoai-paygo` (2) | `aoai-uaen-01` (1), `aoai-uaen-02` (2), both Regional Standard in the pilot |
+

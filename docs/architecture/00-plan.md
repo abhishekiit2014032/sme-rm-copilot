@@ -1,6 +1,6 @@
 # SME RM Copilot on Azure: delivery plan and architecture baseline
 
-Status: **v2.2 baseline (after ARB pre-review, ADR and SLA feedback)** · Owner: solution architecture · Date: 26 Nov 2026 · Presentation: Fri 27 Nov 2026
+Status: **v2.3 baseline (after ARB pre-review, ADR, SLA and LLD feedback)** · Owner: solution architecture · Date: 26 Nov 2026 · Presentation: Fri 27 Nov 2026
 
 This file is the single source of truth for every workstream. Docs, deck, prototype and code must use the
 names, numbers and decisions below. If a workstream needs to change one, it changes it here first and logs it in
@@ -54,7 +54,7 @@ Out of scope now: deploying to a real subscription, real bank data, vendor contr
 |---|---|---|
 | `web-bff` | Backend-for-frontend for the CRM sidebar and the Teams tab (Teams SSO). Validates the Entra ID token, gets an **OBO token for the `tool-gateway` audience**, holds the session, enforces Origin/CSRF checks, requires a **fresh authentication** (authentication context `approve-write`, 10 min, step-up otherwise; §3.4) to approve, **mints approval tokens** with Key Vault `sign` | orchestrator, Key Vault, Cosmos DB, Entra ID |
 | `orchestrator` | Intent routing, UC1/UC2/UC3 workflows, deadlines and budgets, guardrails, placeholder fill, numeric and policy checks, groundedness check, degraded mode. Forwards the RM's OBO token unchanged and adds its own **workload identity token** | APIM AI gateway, tool-gateway, Content Safety, AI Language, App Configuration |
-| `tool-gateway` | The tool layer and security boundary. Validates the RM token (`iss`, `aud`, `tid`, `scp`; RM = `oid`) and the caller's workload token; **entitlement check first**; field minimisation and masking; policy search; **write API that verifies the approval token** (public key only); jti replay store; outbox and saga; audit events | APIM system API facade, APIM AI gateway (query embeddings), AI Search, Cosmos DB, Event Hubs |
+| `tool-gateway` | The tool layer and security boundary. Validates the RM token (`iss`, `aud`, `tid`, `scp`; RM = `oid`) and the caller's workload token; **entitlement check first**; field minimisation and masking; policy search; **write API that verifies the approval token** (public key only); jti replay store; outbox and saga; audit events | APIM system API facade, APIM AI gateway (query embeddings), AI Search, Cosmos DB, Event Hubs (the **only audit producer**: orchestrator and web-bff send audit events through its internal audit endpoint), Key Vault (public key read), Microsoft Graph (`Calendars.ReadBasic`) |
 | `outbox-worker` | Delivers queued CRM writes from the Cosmos outbox (change feed), read-before-retry using the external reference | tool-gateway write adapters, Cosmos DB |
 | `ingestion-worker` | Policy pipeline: document store → Document Intelligence (layout) → PII scan → clause chunking → embeddings → AI Search; keeps chunks and embeddings for index rebuild | Document Intelligence, AI Language, APIM AI gateway, AI Search, Blob |
 | `audit-writer` | Consumes the audit stream; hash-chains metadata into immutable Blob (WORM); content to a separate per-customer-key encrypted store; metadata to a restricted Log Analytics table | Event Hubs, Storage, Key Vault, Log Analytics |
@@ -78,7 +78,7 @@ Out of scope now: deploying to a real subscription, real bank data, vendor contr
 | State | Azure Cosmos DB for NoSQL | Sessions, drafts, jti replay store (atomic create), outbox, entitlement cache, saga state | Zone-redundant; TTLs in §7; CMK; `disableLocalAuth`; periodic backup with geo-redundant backup storage (continuous backup does not survive region loss) **[confirm]**; containers per ADR-019 incl. `approvals` (jti, verdict, saga, outbox) and `audit-spool` (buffer if Event Hubs is unavailable) |
 | Config | Azure App Configuration | Feature flags and **kill switches** per use case and for all writes; prompt and model version pins | Changes audited; Sentinel playbook can flip a kill switch; turning off is one person, turning on is four-eyes; **writes are treated as disabled if App Configuration has been unreachable for 15 min** |
 | Audit stream | Azure Event Hubs (Standard in pilot, **Premium at scale** for the SLA, CMK and geo-replication), zone-redundant | Audit event stream; producers wait for the ack; Cosmos `audit-spool` takes over if Event Hubs is unavailable | Private endpoint |
-| Audit store | Azure Blob Storage, immutable (time-based retention), GZRS | Tamper-evident hash chain (one per Event Hubs partition) of metadata + content pointers; 5-minute seals copied to a seal store in a separately administered subscription | Retention per records policy (e.g. 7 years) **[confirm]** |
+| Audit store | Azure Blob Storage, immutable (time-based retention), GZRS | Tamper-evident hash chain (one per Event Hubs partition) of metadata + content pointers; 5-minute seals copied to a seal store in a separately administered subscription | Retention per records policy (e.g. 7 years) **[confirm]**; content is encrypted by `tool-gateway` before it reaches Event Hubs (Standard has no CMK **[confirm]**) |
 | Audit content store | Separate Azure Blob Storage account, GZRS, not immutable | Masked prompts and outputs, each encrypted with a data key wrapped by a per-customer Key Vault key | Erasure = delete the customer key (crypto-shredding); completes after the Key Vault soft-delete/purge-protection window (≥ 7 days) |
 | Keys | Azure Key Vault Premium (HSM-backed keys); Managed HSM if the Bank's crypto standard requires single-tenant HSMs | Approval-signing key (EC P-256, ES256, `kid` versioned), CMKs, per-customer content keys, secrets for non-Entra APIs | `web-bff`: sign only; `tool-gateway`: public key only; orchestrator: none; rotation every 90 days with overlap |
 | Telemetry | Azure Monitor: Application Insights (OpenTelemetry), Log Analytics | Traces, logs, dependency maps | **Metadata only**: GenAI content capture off, Foundry tracing content recording off, APIM body bytes 0, exception messages scrubbed; enforced by Azure Policy and a CI test |
@@ -118,8 +118,8 @@ CRM, core banking (via an ODS read replica), lending and trade finance (LOS), KY
 1. RM opens the brief from the CRM sidebar or the Teams tab; Entra ID SSO token attached.
 2. Application Gateway (WAF) → `web-bff` validates the token, gets the OBO token for `tool-gateway`, creates the request id and W3C `traceparent`, sets the request deadline (8 s).
 3. `web-bff` → `orchestrator`: intent `customer_brief` (fixed workflow; no router call when launched from a CRM record).
-4. `orchestrator` → `tool-gateway`: read tools with the RM's token. **Entitlement check first** (cache ≤ 60 s, invalidated by a CRM portfolio-change webhook through APIM). Denied → 403 `NOT_ENTITLED`, no data moves.
-5. `tool-gateway` → APIM system API facade → CRM, core banking ODS, LOS, KYC, news, in parallel, each with a deadline-derived timeout and a circuit breaker. **Only the CRM profile is critical**; if LOS facilities, ODS transactions, KYC or news fail, the brief is returned with that section flagged as unavailable (partial brief).
+4. `orchestrator` → `tool-gateway`: read tools with the RM's token. **Entitlement check first** (≤ 60 s in total: 50 s in Cosmos DB + 10 s in-process; invalidated by CRM portfolio-change events delivered through APIM to the Event Hub `crm-portfolio-events`). Denied → 403 `NOT_ENTITLED`, no data moves.
+5. `tool-gateway` (tool `get_brief_inputs`) fans out → APIM system API facade → CRM, core banking ODS, LOS, KYC, news, in parallel, each with a deadline-derived timeout and a circuit breaker. **Only the CRM profile is critical**; if LOS facilities, ODS transactions, KYC or news fail, the brief is returned with that section flagged as unavailable (partial brief).
 6. `tool-gateway` minimises and masks fields (no national ID; transactions aggregated), returns **facts** with source references, and writes one audit event per call to Event Hubs.
 7. `orchestrator` masks PII and runs Prompt Shields on fetched free text (documents), in parallel with the slowest tool calls.
 8. `orchestrator` → APIM AI gateway → Azure OpenAI `gen-large`: masked facts in, wording with `{placeholders}` out.
@@ -139,7 +139,7 @@ feed through the firewall allow-list.
 6. `web-bff` canonicalises the final draft (RFC 8785 JSON), hashes it (SHA-256) and asks Key Vault to **sign** an approval token (ES256): `{iss: web-bff, aud: tool-gateway, sub: RM oid, customer_id, op: "crm.commit_followup", draft_sha256, schema: "followup/1", iat, exp: iat+300, jti, kid}`.
 7. `orchestrator` passes draft + token to `tool-gateway` commit. It cannot mint or alter a token.
 8. `tool-gateway` verifies: signature with the public key for `kid`, `aud`, `exp` (30 s skew), `sub` = the `oid` of the RM token on the call, `customer_id` and `op` match the request, hash of the canonical submitted draft matches, then an **atomic create** of `jti` in Cosmos DB (409 = replay). The verdict is persisted with the draft.
-9. Saga: call report and each task written to CRM through APIM with the external reference `jti:item`; on timeout or 5xx the item goes to the **Cosmos outbox**; `outbox-worker` reads before retrying (by external reference) so nothing is posted twice. Status per item shown to the RM (`committed`, `queued`, `failed`).
+9. Saga: call report and each task written to CRM through APIM with the external reference `jti:item`; on timeout or 5xx the item goes to the **Cosmos outbox**; `outbox-worker` reads before retrying (by external reference) so nothing is posted twice. Queued items are written later with `tool-gateway`'s identity and an APIM-signed RM header, authorised by the stored verdict (no user token is available then) **[confirm the CRM accepts this]**. Status per item shown to the RM (`committed`, `queued`, `failed`).
 10. Audit events `approval_issued`, `write_committed` / `write_queued` / `write_failed` with lineage. The approved email opens in Outlook via a compose deeplink for the RM to send. Call reports are marked "AI-assisted, RM-approved" in the CRM.
 
 ### 4.3 UC2 policy question
@@ -160,8 +160,8 @@ feed through the firewall allow-list.
 | Item | Target (illustrative) |
 |---|---|
 | Users | Pilot 30 RMs; scale 300 RMs; peak 0.5 requests/s; ~5,400 requests/day at scale |
-| Availability SLO | **Pilot 99.0% in business hours** (Mon–Fri 07:00–20:00 GST); scale 99.5%, **committed only after 3 months of pilot measurements** and conditional on CRM ≥ 99.9% and Event Hubs Premium (maths in `05`). "Available" = a correct answer **or** a clearly flagged degraded answer. Composite maths in `05-nfr-scenarios-and-dr.md` |
-| Latency p95 (verified output, end to end) | UC1 brief ≤ 8 s; UC2 answer ≤ 7 s; UC3 draft ≤ 10 s; commit ≤ 2 s |
+| Availability SLO | Counted as available: correct answers, flagged degraded answers, partial briefs and UC2 declines; kill-switch time is excluded and reported separately. **Pilot 99.0% in business hours** (Mon–Fri 07:00–20:00 GST); scale 99.5%, **committed only after 3 months of pilot measurements** and conditional on CRM ≥ 99.9% and Event Hubs Premium (maths in `05`). "Available" = a correct answer **or** a clearly flagged degraded answer. Composite maths in `05-nfr-scenarios-and-dr.md` |
+| Latency p95 (verified output, end to end) | UC1 brief ≤ 8 s; UC2 answer ≤ 7 s; UC3 draft ≤ 10 s; commit ≤ 2 s (excluding any step-up sign-in) |
 | Deadlines | Set at `web-bff`, propagated as a header; every hop's timeout = min(own cap, remaining deadline − reserve). Tool cap 2 s; model cap = remaining deadline; failover to a second backend only if ≥ 4 s remain, else degraded mode |
 | RPO / RTO | Zone failure: audit RPO 0, RTO minutes (automatic). Region loss: audit RPO target ≤ 15 min (GZRS has no RPO guarantee unless geo priority replication is used **[confirm]**), app RTO best effort 24 h (BCP, only if UAE Central's catalogue allows the rebuild) |
 | Quality gates | Groundedness ≥ 0.95 and citation accuracy ≥ 0.95 as the **95% Wilson lower bound** on a ≥ 300-item golden set (needs about ≥ 293/300 observed); entitlement leaks = 0; numeric mismatches = 0; injection success = 0 on a red-team suite of ≥ 1,000 attacks (zero failures in 300 items only bounds the rate below about 1%); false-positive block rate ≤ 2% |
@@ -215,6 +215,8 @@ Latency budget per use case (p95, ms):
 | Session state | Cosmos DB | 24 h TTL |
 | Drafts and approval verdicts | Cosmos DB | 30 days TTL (committed items live in CRM) |
 | jti replay store | Cosmos DB | 1 day TTL (> token life) |
+| Approval verdicts, saga state and outbox items | Cosmos DB `approvals` | 30 days after the last item reaches a final state |
+| Idempotency records | Cosmos DB | 7 days |
 | Entitlement and tool-result cache | Cosmos DB / in-process | ≤ 60 s / request scope |
 | Audit metadata hash chain | Immutable Blob (GZRS) | 7 years |
 | Audit content (masked prompts, outputs) | Encrypted store, per-customer key | 1 year, crypto-shred on erasure |
@@ -272,3 +274,9 @@ fixes. 4. Verification: tests, evals, stack smoke and load run, slide layout, pr
   spool as fallback; 99.5% scale SLO conditional on pilot measurements, CRM ≥ 99.9% and Event Hubs Premium;
   retention gaps referenced to `05`. Deck contradictions (roadmap, data, security, metrics, evals, stack,
   governance) sent to the deck workstream.
+- v2.3 (26 Nov): LLD review. tool-gateway is the only audit producer and owns the Graph calendar call and the UC1
+  fan-out (`get_brief_inputs`); queued writes use tool-gateway identity + APIM-signed RM header under the stored
+  verdict; portfolio-change events via Event Hub `crm-portfolio-events`; cache split 50 s + 10 s; audit content
+  encrypted before Event Hubs; SLO counting rules; commit SLO excludes step-up; retention rows for verdicts, saga,
+  outbox and idempotency; model backends named primary/secondary (both Regional Standard). UC2 retry rule kept at
+  ≥ 4 s, accepting that most failed checks decline at p95.
