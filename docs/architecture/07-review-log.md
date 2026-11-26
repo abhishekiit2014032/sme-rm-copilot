@@ -218,3 +218,33 @@ meets the pilot target with at least 0.25 points of headroom on every use case. 
    bound with z = 1.96, and a red-team suite of ≥ 1,000 attacks in every release gate from the first pilot release.
 6. **Governance:** every [confirm] fact in §4.2 is closed or risk-accepted by its owner before go-live; ADR statuses
    are ratified by this verdict and any later change follows ADR README rule 5 (new ADR, old one superseded).
+
+## 6. Red-team of the working prototype (code)
+
+Scope: the mock-Azure stack in `code/` (services over HTTP, Azure-shaped mocks), attacked over HTTP by an
+independent reviewer after the design review. Method: each attack written as a failing test first
+(`code/tests/test_redteam.py`), then the minimal fix, then the full suite run three times.
+
+| Id | Severity | Attack | Before | Fix |
+|---|---|---|---|---|
+| CR-01 | High | Queue a commit while CRM is down, switch the `writes` kill switch off, CRM recovers | Outbox still wrote to CRM | Outbox checks `writes` every tick and holds items without spending attempts |
+| CR-02 | High | Customer id with path characters (`harbourline/brief-inputs?a=`) | Data returned; audit content keyed to an alias, so crypto-shredding the customer would miss it | Plain-id validation at web-bff, orchestrator and the audit relay; internal path segments encoded |
+| CR-03 | Medium | Commit straight to tool-gateway with `writes` off; App Configuration unreachable for a long time | 201; a stale `writes=on` honoured indefinitely | tool-gateway enforces `writes`; fails closed after 15 min of staleness (plan §3.3) |
+| CR-04 | Medium | Item queued, then the RM loses the customer | Outbox wrote it | Outbox re-checks entitlement after read-before-retry; item fails `ENTITLEMENT_REVOKED` |
+| CR-05 | Medium | UAE PII in other formats (dotted Emirates ID, `+971 (0)50`, spaced IBAN) | Reached the model | Wider always-on patterns; guardrail version 2026.11.3 |
+| CR-06 | Medium | Client sends its own `x-request-id` or another RM's `traceparent` | Text landed in spans; another RM's trace viewable | web-bff mints request ids and traces at the edge; client values ignored |
+| CR-07 | Medium | Another workload calls the AI gateway with `x-rm-oid` | Charged to an RM's token quota | Chat deployments and the RM quota header accepted only from the orchestrator (and tool-gateway for embeddings) |
+| CR-08 | Medium | audit-writer restarts on an existing chain | Chain restarted at 0 and reported false tampering | Writer resumes from the last sequence and hash |
+| CR-09 | Low | Approval token with extra claims, `exp < iat`, `jku` header, oversized | Accepted | Exact claim and header sets, `0 < exp - iat <= 300`, 2 KiB cap, constant-time hash compare |
+| CR-10 | Low | Malformed drafts (list body, tasks as a string, 11+ tasks) | 500 or 60 CRM writes | Schema validation (max 10 tasks), NFC normalisation before hashing |
+| CR-11 | Low | Read shredded content after new content for the same customer | 500 | 410 `CONTENT_SHREDDED` |
+| CR-12 | Low | Stale authentication on Approve in the console | Console never prompted step-up (error code mismatch) | Error code aligned |
+
+Held (tests kept): wrong audience, expired, `alg:none`, HS256-with-public-key and re-signed `oid` tokens rejected;
+cross-RM access denied; 8 parallel commits of one token give exactly one 201; cross-customer token reuse and
+single-character draft edits rejected; news injection screened; quoted instructions quarantined; no customer
+data in spans, logs or `/metrics`; generic error envelopes; text-only rendering under a strict CSP; signer and
+verifier separated in Key Vault; mid-chain audit tampering detected.
+
+Result: 89 tests green on three consecutive runs; evals gate PASS; careless-model gate FAIL as intended; smoke
+and load test within budget. Remaining mock limitations are listed in `code/README.md`.
