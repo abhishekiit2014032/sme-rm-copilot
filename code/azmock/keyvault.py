@@ -32,9 +32,11 @@ APPROVAL_KEY = "approval-signing"
 TRANSPORT_KEY = "audit-transport"  # RSA-OAEP-256: producers wrap content keys with its public half
 RBAC = {
     "web-bff": {"keys/sign", "keys/get"},              # Key Vault Crypto User (sign) scoped to the approval key
-    "tool-gateway": {"keys/get"},                      # public key only (Key Vault Crypto Service Encryption User-like read)
+    "tool-gateway": {"keys/get", "secrets/get", "secrets/set"},  # approval public key; per-customer MEMORY keys (scoped below)
     "audit-writer": {"secrets/get", "secrets/set", "secrets/delete", "keys/unwrap"},  # content keys; unwraps transport DEKs
 }
+# Secret-name scopes (production: a separate memory key vault, so tool-gateway cannot read audit content keys).
+SECRET_SCOPES = {"tool-gateway": ("memory-",)}
 
 
 class KeyVaultMock(Mock):
@@ -73,7 +75,12 @@ class KeyVaultMock(Mock):
     def _auth(self, r: Request, action: str) -> None:
         self.require_api_version(r)
         self.simulate("keyvault")
-        self.rbac(self.caller(r, AUD["vault"]), RBAC, action)
+        claims = self.caller(r, AUD["vault"])
+        self.rbac(claims, RBAC, action)
+        scopes = SECRET_SCOPES.get(claims.get("azp", ""))
+        if action.startswith("secrets/") and scopes and not r.params.get("name", "").startswith(scopes):
+            raise HttpError(403, "Forbidden", f"Caller is not authorized to perform action '{action}' on this secret.",
+                            details={"innererror": {"code": "ForbiddenByRbac"}})
 
     def _lookup(self, name: str, version: str | None) -> tuple[str, p256.PrivateKey]:
         with self._lock:

@@ -1,8 +1,12 @@
-"""orchestrator: UC1/UC2/UC3 workflows (plan §3.2, §4).
+"""orchestrator: UC1/UC2/UC3 as a fixed multi-agent graph (plan §3.2, §3.7, §3.8, §4).
 
-Runs the same `rm_copilot.Copilot` workflows as the in-process demo and evals, with HTTP adapters
-(`orchestrator_adapters.py`) for the model (APIM AI gateway), the tool layer (tool-gateway) and the safety
-services (Content Safety, AI Language). It holds no keys and cannot mint approvals.
+A supervisor agent hands off once to a specialist (brief-agent, policy-agent, followup-agent; at most 2 agent hops),
+each calling tools only through the APIM MCP gateway with its own Entra agent identity (`services/agents.py`). The
+specialists run the same `rm_copilot.Copilot` workflows as the in-process demo and evals, with HTTP adapters
+(`orchestrator_adapters.py`) for the model (APIM AI gateway), the tools (MCP) and the safety services (Content
+Safety, AI Language). Verification and commit are deterministic code. A checkpoint is written after every node; UC3
+pauses for the RM's approval and resumes from its checkpoint (`POST /v1/commit` with `run_id`), in any process.
+It holds no keys, no Cosmos DB access and cannot mint approvals.
 
 Inbound: `Authorization` = web-bff workload token (role `Copilot.Invoke`); `X-RM-Authorization` = the RM's OBO
 token for tool-gateway, validated here for the RM's `oid` (quota key, audit) and forwarded unchanged.
@@ -17,14 +21,14 @@ import time
 import urllib.parse
 
 from rm_copilot import tools as t
-from rm_copilot.orchestrator import Copilot
-from services.common.config import StackConfig
+from services.agents import AgentGraph
+from services.common.config import AUD, StackConfig
 from services.common.contracts import JTI_RE, RemoteAuditSink, valid_customer_id
-from services.common.flags import FLAG_DEFAULTS, FeatureFlags  # noqa: F401 - re-exported
-from services.common.httpkit import HttpError, Request, Response, TransportError, request_context, time_left
+from services.common.flags import FLAG_DEFAULTS, ConfigValues, FeatureFlags  # noqa: F401 - re-exported
+from services.common.httpkit import HttpError, Request, Response, TransportError, request_context
 from services.common.service import Service
 from services.common.telemetry import current_span
-from services.orchestrator_adapters import ApimChatModel, Budget, HttpGuard, HttpTools, rm_user
+from services.orchestrator_adapters import Budget, HttpTools, rm_user
 
 
 def decline_code(reason: str) -> str:
@@ -42,9 +46,11 @@ class Orchestrator(Service):
         super().__init__(cfg)
         self.audit = RemoteAuditSink(cfg, self.client, self.tokens, self.name, transport_key=self.transport_key)
         self._transport: tuple[float, dict] | None = None
-        self.tools = HttpTools(self)
-        self.copilot = Copilot(ApimChatModel(self), self.tools, HttpGuard(self), time_left=time_left)
+        self.tools = HttpTools(self)  # REST: meetings, write status and the commit (not agent tools)
         self.flags = FeatureFlags(self)
+        self.config = ConfigValues(self)
+        self.agents = AgentGraph(self)
+        self.procedural = self.agents.procedural
         m = self.metrics
         self.m_requests = m.counter("usecase_requests_total", "Use-case requests by outcome", ("use_case", "outcome"))
         self.m_declines = m.counter("declines_total", "UC2 declines by reason", ("use_case", "reason"))
@@ -57,6 +63,10 @@ class Orchestrator(Service):
         a("POST", "/v1/commit")(lambda r: self._run(r, "commit", self._commit))
         a("GET", "/v1/writes/{jti}")(lambda r: self._run(r, "status", self._writes))
         a("GET", "/v1/meetings")(lambda r: self._run(r, "meetings", lambda r, u: {"value": self.tools.meetings()}))
+
+    def workload_assertion(self) -> str:
+        """The pod's workload identity assertion: the only credential the agent identities federate with (C24)."""
+        return self.tokens.app_token(f"{AUD['token-exchange']}/.default")
 
     def transport_key(self) -> dict:
         """Public half of Key Vault key `audit-transport`, published in App Configuration (cached 5 min)."""
@@ -80,7 +90,7 @@ class Orchestrator(Service):
         self.validator("orchestrator").validate(r.bearer(), scopes=("Copilot.Invoke",), azp=("web-bff",), app_only=True)
         rm_token = r.bearer("x-rm-authorization")
         claims = self.validator("tool-gateway").validate(rm_token, scopes=("Tools.Read",), app_only=False)
-        request_context().data.update(rm_token=rm_token, rm_oid=claims["oid"], use_case=use_case, budget=Budget(), lineage={})
+        request_context().data.update(rm_token=rm_token, rm_oid=claims["oid"], use_case=use_case, budget=Budget(), lineage={}, tool_calls=[])
         if (sp := current_span()) is not None:
             sp.set(**{"rmc.use_case": use_case})
         flag = {"uc1": "uc1", "uc2": "uc2", "uc3": "uc3", "commit": "writes"}.get(use_case)
@@ -95,12 +105,7 @@ class Orchestrator(Service):
         except HttpError as e:
             self.m_requests.inc(use_case=use_case, outcome=e.code.lower())
             raise
-        if isinstance(result, dict) and use_case in ("uc1", "uc2", "uc3"):
-            degraded = bool(result.get("degraded")) or result.get("status") == "degraded"
-            warnings = [{"code": "DEGRADED", "reason": "MODEL_UNAVAILABLE"}] if degraded else []
-            warnings += [{"code": "SOURCE_UNAVAILABLE", "section": s} for s in result.get("partial", [])]
-            result.update(mode="degraded" if degraded else ("partial" if result.get("partial") else "full"), warnings=warnings)
-        if isinstance(result, dict):
+        if isinstance(result, dict):  # mode and warnings were set by the graph's respond node
             outcome = "degraded" if result.get("degraded") or result.get("status") == "degraded" else str(result.get("status", "ok"))
             self.m_requests.inc(use_case=use_case, outcome=outcome)
             if outcome == "degraded":
@@ -122,9 +127,14 @@ class Orchestrator(Service):
         request_context().data["customer_id"] = cid
         return cid
 
-    # ------------------------------------------------------------------ use cases
+    # ------------------------------------------------------------------ use cases (the agent graph)
+    def _context(self, r: Request) -> dict | None:
+        """Session id and RM profile, set by web-bff (it overwrites anything a client sent under `context`)."""
+        ctx = self._body(r).get("context")
+        return ctx if isinstance(ctx, dict) else None
+
     def _brief(self, r: Request, user: t.User) -> dict:
-        out = self.copilot.brief(user, self._customer(r))
+        out = self.agents.run("uc1", user, self._customer(r), {}, self._context(r))
         if out["rejected_model_output"]:
             self.m_rejected.inc(len(out["rejected_model_output"]), type="model_output_rejected")
         return out
@@ -133,7 +143,7 @@ class Orchestrator(Service):
         q = str(self._body(r).get("question", "")).strip()
         if not q or len(q) > 2000:
             raise HttpError(400, "VALIDATION_FAILED", "question is required (max 2000 characters)", details={"reason": "SCHEMA"})
-        out = self.copilot.ask(user, q)
+        out = self.agents.run("uc2", user, None, {"question": q}, self._context(r))
         if out["status"] == "declined":
             self.m_declines.inc(use_case="uc2", reason=decline_code(out["reason"]))
         return out
@@ -142,15 +152,19 @@ class Orchestrator(Service):
         notes = str(self._body(r).get("notes", ""))
         if not notes.strip() or len(notes) > 8000:
             raise HttpError(400, "VALIDATION_FAILED", "notes are required (max 8000 characters)", details={"reason": "SCHEMA"})
-        return self.copilot.draft_followup(user, self._customer(r), notes)
+        return self.agents.run("uc3", user, self._customer(r), {"notes": notes}, self._context(r))
 
     def _commit(self, r: Request, user: t.User) -> Response:
         body = self._body(r)
         cid = self._customer(r)
         draft = body.get("draft") or {}
         # The full approved draft (incl. email text) travels unchanged: the token's hash covers all of it.
-        result = self.tools.create_call_report(user, cid, draft, approval_token=body.get("approval_token"))
-        return Response(result.pop("http_status", 200), result)
+        if body.get("run_id"):  # resume the paused UC3 run from its checkpoint (any orchestrator process)
+            result = self.agents.resume(str(body["run_id"]), user, cid, {"draft": draft, "approval_token": body.get("approval_token")},
+                                        self._context(r))
+        else:  # a commit without a paused run (e.g. a draft typed by the RM): the same write API, no agent involved
+            result = self.tools.create_call_report(user, cid, draft, approval_token=body.get("approval_token"))
+        return Response(result.pop("http_status", 200) or 200, result)
 
     def _writes(self, r: Request, user: t.User) -> Response:
         if not JTI_RE.fullmatch(r.params["jti"]):

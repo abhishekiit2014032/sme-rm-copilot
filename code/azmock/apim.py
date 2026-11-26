@@ -22,6 +22,18 @@ System API facade  GET|POST /{system}/api/{path}   for crm, ods, los, kyc, news
   breaker per backend (5 failures in 30 s by default), timeout from the deadline, and the RM's `oid` forwarded in
   a header signed by APIM (`x-apim-rm-oid|ts|sig`) for legacy systems that cannot take Entra tokens (plan §3.4).
 
+MCP gateway (plan §3.7, C24, C25)   POST /mcp/{server}   for the registered servers customer-data, policy-search,
+  crm-drafts, memory only (anything else 404; no external MCP servers)
+  1. `validate-jwt` twice: the agent token (`Authorization`, aud `api://rm-copilot-mcp`, an agent identity, minted
+     through the registered workload's federated credential: `xms_fic_sub`) and the user token
+     (`X-RM-Authorization`, same audience, `Tools.Read`, actor `act.azp` = the same agent);
+  2. `rate-limit-by-key` per agent identity and per RM (`oid` of the validated user token)   -> 429 + Retry-After;
+  3. forwards to the MCP servers in tool-gateway with both tokens unchanged plus its own managed-identity token
+     (`X-Gateway-Authorization`, role `Mcp.Forward`): tool-gateway accepts MCP calls only through this gateway;
+  4. filters the `tools/list` result to the tools whose role the agent token holds (defence in depth: tool-gateway
+     filters too and stays the policy decision point).
+  Bodies are never logged; spans carry agent, server and JSON-RPC method only.
+
 CRM events API (`rmc-crm-events`, LLD §7.3)   POST /crm-events/v1/portfolio
   `validate-jwt` (CRM integration identity, role `CrmEvents.Publish`), `validate-content` (ids only: event_id, type,
   occurred_at, rm_oid, customer_id, change; <= 100 events, <= 64 KiB), forwarded to Event Hub `crm-portfolio-events`
@@ -44,6 +56,9 @@ from services.common.auth import TokenProvider
 from services.common.config import AUD, SOR_SYSTEMS, StackConfig, scope
 from services.common.contracts import valid_customer_id
 from services.common.httpkit import HttpError, Request, Response, TransportError, time_left
+from services.common.identities import AGENT_WORKLOAD, AGENTS
+from services.common.mcp import SERVERS as MCP_SERVERS
+from services.common.mcp import TOOL_DENIED, rpc_error
 from services.common.resilience import STATE_CODE, CircuitBreaker
 from services.common.telemetry import current_span
 
@@ -75,7 +90,8 @@ class ApimMock(Mock):
         super().__init__(cfg)
         s = cfg.settings
         self.policies = {"tokens_per_minute": s.apim_tokens_per_minute, "token_quota_per_day": s.apim_token_quota_per_day,
-                         "calls_per_minute": s.apim_calls_per_minute, "min_failover_s": s.apim_min_failover_s}
+                         "calls_per_minute": s.apim_calls_per_minute, "min_failover_s": s.apim_min_failover_s,
+                         "mcp_agent_calls_per_minute": s.apim_mcp_agent_calls_per_minute, "mcp_rm_calls_per_minute": s.apim_mcp_rm_calls_per_minute}
         self.backends = [Backend("aoai-primary", cfg.url("aoai-primary"), 1, CircuitBreaker(1, 10, s.apim_breaker_trip_s)),
                          Backend("aoai-secondary", cfg.url("aoai-secondary"), 2, CircuitBreaker(1, 10, s.apim_breaker_trip_s))]
         self.sor_breakers = {k: CircuitBreaker(s.sor_breaker_failures, s.sor_breaker_window_s, s.sor_breaker_trip_s) for k in SOR_SYSTEMS}
@@ -89,6 +105,8 @@ class ApimMock(Mock):
         self.m_backend = m.counter("apim_backend_requests_total", "Requests forwarded per backend", ("backend", "status"))
         self.m_reject = m.counter("apim_policy_rejections_total", "Requests rejected by a gateway policy", ("policy",))
         self.m_breaker = m.gauge("circuit_breaker_state", "0 closed, 1 open, 2 half-open", ("backend",))
+        self.m_mcp = m.counter("mcp_gateway_requests_total", "MCP gateway requests", ("agent", "server", "outcome"))
+        self._mcp_calls: dict[str, deque] = {}
         self._publish_breakers()
         a = self.app.route
         a("POST", "/openai/deployments/{deployment}/chat/completions")(self._ai)
@@ -96,6 +114,7 @@ class ApimMock(Mock):
         a("GET", "/{system}/api/{rest:path}")(self._sor)
         a("POST", "/{system}/api/{rest:path}")(self._sor)
         a("POST", "/crm-events/v1/portfolio")(self._crm_events)
+        a("POST", "/mcp/{server}")(self._mcp)
         a("GET", "/admin/policies")(lambda r: {**self.policies, "breakers": self._breaker_states()})
         a("POST", "/admin/policies")(self._set_policies)
         a("POST", "/admin/reset")(lambda r: (self.reset(), {"status": "reset"})[1])
@@ -112,6 +131,7 @@ class ApimMock(Mock):
             self._minute.clear()
             self._calls.clear()
             self._day.clear()
+            self._mcp_calls.clear()
         for b in self.backends:
             b.breaker.reset()
         for br in self.sor_breakers.values():
@@ -217,6 +237,71 @@ class ApimMock(Mock):
         if sp:
             sp.set(**{"rmc.reason": reason})
         return _apim_error(503, "No backend in the pool is available.", {"x-apim-failover": reason, **(last.headers if last else {})})
+
+    # ------------------------------------------------------------------ MCP gateway
+    def _mcp_limited(self, key: str, limit: int) -> int:
+        """Sliding one-minute window; returns seconds to wait (0 = admitted)."""
+        now = time.time()
+        with self._lock:
+            q = self._mcp_calls.setdefault(key, deque())
+            while q and now - q[0] > 60:
+                q.popleft()
+            if len(q) >= limit:
+                return max(1, math.ceil(60 - (now - q[0])))
+            q.append(now)
+        return 0
+
+    def _mcp(self, r: Request) -> Response:
+        if realistic(self.cfg):
+            sleep_ms(4)
+        server = r.params["server"]
+        body = r.json()
+        rpc_id = body.get("id") if isinstance(body, dict) else None
+        method = str(body.get("method", ""))[:32] if isinstance(body, dict) else ""
+        sp = current_span()
+
+        def deny(status: int, code: str, message: str, outcome: str, agent: str = "unknown", headers: dict | None = None) -> Response:
+            self.m_mcp.inc(agent=agent, server=server if server in MCP_SERVERS else "unregistered", outcome=outcome)
+            if sp:
+                sp.set(**{"rmc.decision": "deny", "rmc.reason": outcome})
+            return Response(status, rpc_error(rpc_id, TOOL_DENIED, message, {"code": code, "status": status, "reason": outcome.upper()}),
+                            headers=headers or {})
+        if server not in MCP_SERVERS:
+            return deny(404, "NOT_FOUND", "No such MCP server is registered.", "unregistered_server")
+        try:
+            agent = self.caller(r, AUD["mcp"], app_only=True, azp=AGENTS)
+            user = self.caller(r, AUD["mcp"], token=r.bearer("x-rm-authorization"), scopes=("Tools.Read",), app_only=False)
+        except HttpError as e:
+            return deny(e.status, e.code, e.message, "invalid_token", headers=e.headers)
+        name = agent["azp"]
+        if sp:
+            sp.set(**{"rmc.agent": name, "rmc.server": server, "rmc.rpc_method": method})
+        act = user.get("act") if isinstance(user.get("act"), dict) else {}
+        if agent.get("xms_fic_sub") != AGENT_WORKLOAD[name] or act.get("azp") != name:
+            return deny(403, "WORKLOAD_MISMATCH", "The agent token was not issued through the registered workload identity.", "workload_mismatch", name)
+        for key, limit, policy in ((f"agent:{name}", self.policies["mcp_agent_calls_per_minute"], "agent"),
+                                   (f"rm:{user['oid']}", self.policies["mcp_rm_calls_per_minute"], "rm")):
+            wait = self._mcp_limited(key, int(limit))
+            if wait:
+                self.m_reject.inc(policy=f"mcp-rate-limit-{policy}")
+                return deny(429, "RATE_LIMITED", f"MCP rate limit per {policy} is exceeded. Try again in {wait} seconds.", f"rate_limited_{policy}",
+                            name, {"Retry-After": str(wait)})
+        headers = {"content-type": "application/json", "authorization": r.header("authorization") or "",
+                   "x-rm-authorization": r.header("x-rm-authorization") or "",
+                   "x-gateway-authorization": "Bearer " + self.tokens.app_token(scope("tool-gateway"))}
+        try:
+            up = self.client.request("POST", f"{self.cfg.url('tool-gateway')}/mcp/{server}", data=r.body, headers=headers, timeout=10.0, peer="tool-gateway")
+        except TransportError as e:
+            return deny(504 if e.kind in ("timeout", "deadline") else 502, "DEPENDENCY_UNAVAILABLE", f"MCP server {e.kind}.", "backend_" + e.kind, name)
+        out = up.json()
+        if method == "tools/list" and up.ok and isinstance(out.get("result"), dict):
+            roles = set(agent.get("roles", []))
+            out["result"]["tools"] = [t for t in out["result"].get("tools", []) if (t.get("_meta") or {}).get("rmc/role") in roles]
+            self.m_mcp.inc(agent=name, server=server, outcome="ok")
+            return Response(up.status, out)
+        self.m_mcp.inc(agent=name, server=server, outcome="ok" if up.ok else f"status_{up.status}")
+        return Response(up.status, up.body if up.body else None, {k: v for k, v in up.headers.items() if k in ("www-authenticate", "retry-after")},
+                        content_type="application/json")
 
     # ------------------------------------------------------------------ CRM events API (rmc-crm-events, LLD §7.3)
     def _crm_events(self, r: Request) -> Response:

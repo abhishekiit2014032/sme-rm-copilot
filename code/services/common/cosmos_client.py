@@ -44,6 +44,12 @@ class CosmosClient:
             raise HttpError(503, "DEPENDENCY_UNAVAILABLE", f"read failed ({r.status})", details={"reason": "STATE_STORE"})
         return r.json()
 
+    def delete(self, coll: str, doc_id: str) -> bool:
+        r = self._req("DELETE", coll, doc_id)
+        if r.status not in (204, 404):
+            raise HttpError(503, "DEPENDENCY_UNAVAILABLE", f"delete failed ({r.status})", details={"reason": "STATE_STORE"})
+        return r.status == 204
+
     def query(self, coll: str, sql: str, **params) -> list[dict]:
         r = self._req("POST", coll, body={"query": sql, "parameters": [{"name": "@" + k, "value": v} for k, v in params.items()]},
                       headers={"x-ms-documentdb-isquery": "true", "content-type": "application/query+json"})

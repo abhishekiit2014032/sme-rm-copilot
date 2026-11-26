@@ -111,7 +111,8 @@ def main(argv: list[str] | None = None) -> int:
         factory = lambda upn: ConsoleClient.for_url(args.url, upn).sign_in()  # noqa: E731
     else:
         # Raise the per-RM gateway limits so the test measures latency, not the (separately tested) throttling.
-        stack = Stack(Settings.from_env(latency=args.latency, apim_tokens_per_minute=1_000_000, apim_calls_per_minute=10_000)).start()
+        stack = Stack(Settings.from_env(latency=args.latency, apim_tokens_per_minute=1_000_000, apim_calls_per_minute=10_000,
+                                        apim_mcp_rm_calls_per_minute=10_000, apim_mcp_agent_calls_per_minute=10_000)).start()
         print(f"Stack started in-process · latency profile: {args.latency}")
         factory = lambda upn: ConsoleClient(stack, upn).sign_in()  # noqa: E731
     try:

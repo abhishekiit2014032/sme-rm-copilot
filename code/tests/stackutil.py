@@ -41,9 +41,12 @@ def reset(stack: Stack) -> None:
     stack.components["apim"].reset()
     s = stack.settings
     stack.components["apim"].policies.update(tokens_per_minute=s.apim_tokens_per_minute, token_quota_per_day=s.apim_token_quota_per_day,
-                                             calls_per_minute=s.apim_calls_per_minute, min_failover_s=s.apim_min_failover_s)
+                                             calls_per_minute=s.apim_calls_per_minute, min_failover_s=s.apim_min_failover_s,
+                                             mcp_agent_calls_per_minute=s.apim_mcp_agent_calls_per_minute,
+                                             mcp_rm_calls_per_minute=s.apim_mcp_rm_calls_per_minute)
     for f in ("uc1", "uc2", "uc3", "writes"):
         stack.components["appconfig"].set_flag(f, True)
+    stack.publish_pins()
 
 
 class Workload:
@@ -111,3 +114,39 @@ def crm_records(stack: Stack, jti: str) -> list[dict]:
 
 def query_string(url: str) -> dict:
     return dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
+
+
+# --------------------------------------------------------------------------- agents, MCP and memory (plan §3.7, §3.8)
+def agent_tokens(stack: Stack, upn: str, agent: str) -> dict:
+    """The two tokens an agent presents on the MCP gateway, obtained exactly as the orchestrator does: the workload
+    assertion of the orchestrator identity is the agent's federated credential (no agent secret exists)."""
+    from services.common.auth import FederatedTokenProvider
+    orch = Workload(stack, "orchestrator")
+    assertion = orch.tokens.app_token(f"{AUD['token-exchange']}/.default")
+    fed = FederatedTokenProvider(orch.http, stack.cfg.token_url, agent, lambda: assertion)
+    return {"authorization": "Bearer " + fed.app_token(f"{AUD['mcp']}/.default"),
+            "x-rm-authorization": "Bearer " + fed.obo_token(rm_tool_token(stack, upn, scp="Tools.Read"), f"{AUD['mcp']}/Tools.Read")}
+
+
+def mcp(stack: Stack, server: str, method: str, params: dict | None = None, headers: dict | None = None, via: str = "apim"):
+    """One JSON-RPC 2.0 request to an MCP server, through the APIM MCP gateway (default) or straight at tool-gateway."""
+    w = Workload(stack, "orchestrator")
+    body = {"jsonrpc": "2.0", "id": 1, "method": method, **({"params": params} if params is not None else {})}
+    return w.request("POST", f"{stack.url(via)}/mcp/{server}", headers=headers or {}, json_body=body)
+
+
+def call_tool(stack: Stack, upn: str, agent: str, server: str, tool: str, args: dict):
+    return mcp(stack, server, "tools/call", {"name": tool, "arguments": args}, agent_tokens(stack, upn, agent))
+
+
+def checkpoints(stack: Stack, run_id: str) -> list[dict]:
+    """Operator replay (PIM role `Checkpoints.Replay`): every checkpoint of a run, decrypted, with its integrity."""
+    ops = Workload(stack, "ops-admin")
+    r = ops.request("GET", f"{stack.url('tool-gateway')}/internal/v1/memory/checkpoints/{run_id}",
+                    headers={"authorization": "Bearer " + ops.app_token("tool-gateway")})
+    assert r.status == 200, r.body[:300]
+    return r.json()["value"]
+
+
+def memory_docs(stack: Stack, container: str) -> list[dict]:
+    return list(stack.components["cosmos"]._colls[container].values())

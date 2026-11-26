@@ -39,9 +39,10 @@ function flag(text, kind) { return el("span", { class: "flag " + kind, text }); 
 function list(items) { return el("ul", {}, ...items.map((t) => el("li", { text: String(t) }))); }
 
 async function api(method, path, body, headers) {
+  const session = state.session && state.session.session_id ? { "x-session-id": state.session.session_id } : {};
   const res = await fetch(path, {
     method,
-    headers: Object.assign({ "content-type": "application/json" }, state.token ? { authorization: "Bearer " + state.token } : {}, headers || {}),
+    headers: Object.assign({ "content-type": "application/json" }, state.token ? { authorization: "Bearer " + state.token } : {}, session, headers || {}),
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   let data = {};
@@ -62,6 +63,15 @@ async function busy(button, fn) {
   try { await fn(); } catch (e) { console.error(e); } finally { button.disabled = false; }
 }
 
+// Which agent handled the request and which MCP tools it called (plain text, plan §3.7).
+function agentsBox(a) {
+  if (!a) return null;
+  const route = a.hops ? `${a.supervisor} → ${a.specialist} (${a.hops} agent hops)` : `${a.specialist} run resumed from its checkpoint (no agent hop)`;
+  const tools = (a.tools || []).map((t) => `${t.server}/${t.tool} (${t.agent}, ${t.decision})`);
+  return el("div", { class: "agents" }, el("p", { class: "muted", text: `Handled by: ${route} · graph ${a.graph}` }),
+    el("p", { class: "muted", text: "Tools called through the MCP gateway: " + (tools.length ? tools.join(", ") : "none") }));
+}
+
 // ------------------------------------------------------------------ sign-in
 async function signIn(upn) {
   const form = new URLSearchParams({ grant_type: "password", client_id: state.config.client_id, username: upn,
@@ -72,6 +82,8 @@ async function signIn(upn) {
   state.token = tok.access_token; state.upn = upn;
   const s = await api("POST", "/api/session");
   state.session = s.data;
+  const p = await api("GET", "/api/profile");
+  if (p.status === 200) $("#uc1-format").value = p.data.brief_format;
   $("#who").textContent = `Signed in as ${s.data.name}`;
   loadMeetings();
   return true;
@@ -105,7 +117,10 @@ async function runBrief() {
       el("h3", { text: "Watch" }), list(b.watch),
       el("h3", { text: "Talking points" }), b.talking_points.length ? list(b.talking_points) : el("p", { class: "muted", text: "None (see flags)." }),
       el("h3", { text: "Opportunities" }), list(b.opportunities.length ? b.opportunities : ["None"]),
-      el("h3", { text: "News (external, screened)" }), list(b.news.length ? b.news : ["None"]));
+      el("h3", { text: "News (external, screened)" }), list(b.news.length ? b.news : ["None"]),
+      el("h3", { text: "Your earlier interactions (RM-approved, from memory)" }),
+      list((b.previous_interactions || []).length ? b.previous_interactions.map((e) => `${e.text} [${e.source}]`) : ["None"]),
+      agentsBox(b.agents));
   });
 }
 
@@ -126,6 +141,8 @@ async function runAsk() {
       box.append(flag("Declined", "warn"), el("p", { text: a.message }), el("p", { class: "muted", text: "Reason: " + a.reason }));
       if (a.closest_sources && a.closest_sources.length) box.append(el("h3", { text: "Closest sources" }), list(a.closest_sources));
     }
+    const ab = agentsBox(a.agents);
+    if (ab) box.append(ab);
   });
 }
 
@@ -153,6 +170,8 @@ async function runDraft() {
     const tasks = clear($("#uc3-tasks"));
     d.tasks.forEach((t) => tasks.append(taskRow(t)));
     $("#uc3-email").value = d.email_draft || "";
+    const ab = agentsBox(d.agents);
+    if (ab) f.append(ab, el("p", { class: "muted", text: "Paused for your approval: the run is checkpointed and resumes when you approve." }));
     clear($("#uc3-result"));
   });
 }
@@ -178,6 +197,8 @@ async function approve() {
     }
     if (res.status >= 400 && res.status !== 409) return showError(out, res);
     renderWrite(out, res.data);
+    const ab = agentsBox(res.data.agents);
+    if (ab) out.append(ab);
     if (res.data.email && res.data.email.compose_link) {
       out.append(el("p", {}, el("a", { href: res.data.email.compose_link, target: "_blank", rel: "noopener noreferrer", text: "Open the approved email in Outlook" })));
     }
@@ -241,6 +262,9 @@ async function boot() {
     document.querySelectorAll(".tabs button").forEach((x) => x.setAttribute("aria-selected", String(x === b)));
     document.querySelectorAll(".panel").forEach((p) => { p.hidden = p.id !== b.dataset.tab; });
   }));
+  $("#uc1-format").addEventListener("change", async (e) => {
+    await api("PUT", "/api/profile", { brief_format: e.target.value });   // profile memory: set by the RM only
+  });
   $("#uc1-go").addEventListener("click", runBrief);
   $("#uc2-go").addEventListener("click", runAsk);
   $("#uc3-go").addEventListener("click", runDraft);

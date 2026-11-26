@@ -114,14 +114,14 @@ class Mock:
         if key in self.faults.targets:
             self.faults.before(key)
 
-    def caller(self, r: Request, audience: str, **kw) -> dict:
-        """Validate the bearer token for this resource. Returns its claims (azp = calling workload)."""
+    def caller(self, r: Request, audience: str, token: str | None = None, **kw) -> dict:
+        """Validate the bearer token (or `token`) for this resource. Returns its claims (azp = calling workload)."""
         if self._jwks is None:
             self._jwks = Jwks(self.client, self.cfg.jwks_url)
         v = self._validators.get(audience)
         if v is None:
             v = self._validators[audience] = TokenValidator(self._jwks, self.cfg.issuer, audience, self.cfg.settings.tenant_id)
-        return v.validate(r.bearer(), **kw)
+        return v.validate(token if token is not None else r.bearer(), **kw)
 
     @staticmethod
     def require_api_version(r: Request) -> None:

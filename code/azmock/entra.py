@@ -5,8 +5,18 @@ Imitates:
   GET  /{tenant}/discovery/v2.0/keys                      JWKS (RS256 signing key, `kid`)
   POST /{tenant}/oauth2/v2.0/token                        grant types:
        client_credentials                                  workload identity -> app token (`idtyp=app`, `roles`)
-       urn:ietf:params:oauth:grant-type:jwt-bearer         On-Behalf-Of (`requested_token_use=on_behalf_of`)
+                                                           agent identity -> app token, ONLY with a federated credential
+                                                           (`client_assertion` = the orchestrator workload's assertion)
+       urn:ietf:params:oauth:grant-type:jwt-bearer         On-Behalf-Of (`requested_token_use=on_behalf_of`); for an agent
+                                                           the token keeps the RM `oid` and names the agent in `act`
        password                                            RM sign-in for the offline console only (see below)
+
+Agent identities (plan §3.7, C24; `services/common/identities.py`): `supervisor`, `brief-agent`, `policy-agent`,
+`followup-agent` are service principals with app roles per MCP tool on `api://rm-copilot-mcp` and NO client secret.
+Each has one federated identity credential: issuer = the AKS OIDC issuer, subject =
+`system:serviceaccount:rm-copilot:orchestrator`, audience `api://AzureADTokenExchange`. Only the orchestrator workload
+can obtain such an assertion (client credentials for `api://AzureADTokenExchange`, standing in for the projected
+service-account token AKS mounts into the pod), so agent tokens cannot be minted outside the orchestrator pod.
 
 Tokens are real RS256 JWTs with the v2 claim set the services rely on: `iss`, `aud`, `tid`, `oid`, `sub`,
 `name`, `preferred_username`, `roles`, `scp`, `azp`, `idtyp`, `iat`, `nbf`, `exp`, plus `auth_time` for step-up.
@@ -16,6 +26,9 @@ Differences from the real service (deliberate, documented in README):
   uses MSAL authorization code + PKCE (CRM sidebar) or Teams SSO, with MFA and Conditional Access.
 * Workloads authenticate with client secrets generated at stack start-up (in memory). Production uses AKS
   workload identity (federated credentials); no secrets exist.
+* Agent identities are plain service principals, not Entra Agent ID objects (agent identity blueprints, agent user
+  flows); the workload assertion is signed by this mock for the orchestrator's client credentials instead of by the
+  AKS OIDC issuer; `xms_fic_sub` / `act.xms_fic_sub` are this mock's claims for the federation.
 * `auth_time` is put in the access token; real Entra conveys fresh authentication via ID tokens / auth context
   (`acrs`) claims. web-bff's step-up check would read that instead.
 * No consent, no Conditional Access, no token revocation, no group overage. Directory = the fictional RMs.
@@ -31,6 +44,8 @@ from rm_copilot import data
 from services.common import jose, rsa
 from services.common.config import AUD, StackConfig, user_oid
 from services.common.httpkit import HttpError, Request, Response
+from services.common.identities import (AGENT_DELEGATED_SCOPES, AGENT_ROLES, AGENT_WORKLOAD, AGENTS, JWT_BEARER_ASSERTION, WORKLOAD_SUBJECTS,
+                                        aks_issuer)
 
 from ._base import Mock
 
@@ -41,20 +56,30 @@ WORKLOADS = ("web-bff", "orchestrator", "tool-gateway", "outbox-worker", "audit-
 # App roles granted to workload identities on our own APIs (client credentials).
 APP_ROLES = {
     "web-bff": {AUD["orchestrator"]: ["Copilot.Invoke"]},
-    "orchestrator": {AUD["tool-gateway"]: ["Tools.Invoke", "Audit.Append"], AUD["apim"]: ["AiGateway.Invoke"]},
+    "orchestrator": {AUD["tool-gateway"]: ["Tools.Invoke", "Audit.Append", "Memory.Checkpoint"], AUD["apim"]: ["AiGateway.Invoke"],
+                     AUD["token-exchange"]: []},  # the workload assertion agent identities federate with
     "tool-gateway": {AUD["apim"]: ["SystemApis.Read", "SystemApis.Write", "AiGateway.Invoke"]},
     "outbox-worker": {AUD["apim"]: ["SystemApis.Read", "SystemApis.Write"], AUD["tool-gateway"]: ["Audit.Append"]},
     "ingestion-worker": {AUD["apim"]: ["AiGateway.Invoke"]},
-    "ops-admin": {AUD["audit"]: ["Audit.ReadContent", "Audit.Erase"]},  # PIM-activated operator role in production
+    # PIM-activated operator roles in production: audit content and erasure; checkpoint replay for debugging (C29)
+    "ops-admin": {AUD["audit"]: ["Audit.ReadContent", "Audit.Erase"], AUD["tool-gateway"]: ["Checkpoints.Replay"]},
     "crm-integration": {AUD["apim"]: ["CrmEvents.Publish"]},  # the CRM's publisher identity (LLD §7.3 rmc-crm-events)
+    "apim": {AUD["tool-gateway"]: ["Mcp.Forward"]},  # the MCP gateway forwarding to the MCP servers in tool-gateway
+    **{a: {AUD["mcp"]: list(AGENT_ROLES[a])} for a in AGENTS},  # one service principal per agent, roles per tool
 }
-OWN_APIS = {AUD["web-bff"], AUD["orchestrator"], AUD["tool-gateway"], AUD["apim"], AUD["audit"]}
+OWN_APIS = {AUD["web-bff"], AUD["orchestrator"], AUD["tool-gateway"], AUD["apim"], AUD["audit"], AUD["mcp"], AUD["token-exchange"]}
 # Delegated permissions a client may obtain for the signed-in RM (OBO and sign-in).
 DELEGATED = {
     CONSOLE_CLIENT_ID: {AUD["web-bff"]: {"access_as_user"}},
     "web-bff": {AUD["tool-gateway"]: {"Tools.Read", "Tools.Write"}},
     "tool-gateway": {AUD["graph"]: {"Calendars.ReadBasic"}},
+    **{a: {AUD["mcp"]: set(AGENT_DELEGATED_SCOPES)} for a in AGENTS},  # agent OBO for the RM: read only, never Tools.Write
 }
+AGENT_OBO_UPSTREAM = (AUD["tool-gateway"], "web-bff")  # the RM token an agent may exchange: audience and issuing client
+
+
+def sp_oid(client_id: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, "rm-copilot-sp:" + client_id))
 
 
 def upn_for(rm_id: str) -> str:
@@ -100,6 +125,34 @@ class EntraMock(Mock):
                   "scp": scp, "auth_time": auth_time if auth_time is not None else int(time.time()) - auth_age_s, "amr": ["pwd", "mfa"]})
         return self._sign(c)
 
+    def issue_agent_token(self, agent: str, roles: list[str] | None = None, fic_sub: str | None = "registered", lifetime: int = 3600) -> str:
+        """In-process helper (tests): an agent app token. `fic_sub=None` = a token NOT minted through the workload's
+        federated credential (what a leaked secret on a misconfigured app registration would yield)."""
+        c = self._base_claims(AUD["mcp"], lifetime)
+        oid = sp_oid(agent)
+        c.update({"azp": agent, "appid": agent, "idtyp": "app", "oid": oid, "sub": oid,
+                  "roles": list(AGENT_ROLES.get(agent, ())) if roles is None else roles})
+        if fic_sub:
+            c.update(xms_fic_sub=AGENT_WORKLOAD[agent] if fic_sub == "registered" else fic_sub, xms_fic_iss=aks_issuer(self.cfg.url("entra")))
+        return self._sign(c)
+
+    def issue_agent_user_token(self, upn: str, agent: str, fic_sub: str | None = "registered", scp: str = "Tools.Read") -> str:
+        """In-process helper (tests): the agent OBO token for an RM (aud MCP, RM oid, `act` = the agent)."""
+        u = self.users[upn]
+        c = self._base_claims(AUD["mcp"], 3600)
+        act = {"sub": sp_oid(agent), "azp": agent}
+        if fic_sub:
+            act["xms_fic_sub"] = AGENT_WORKLOAD[agent] if fic_sub == "registered" else fic_sub
+        c.update({"azp": agent, "appid": agent, "name": u["name"], "oid": u["oid"], "sub": u["oid"], "preferred_username": upn, "roles": ["RM"],
+                  "scp": scp, "auth_time": int(time.time()), "act": act})
+        return self._sign(c)
+
+    def _verify_own(self, token: str) -> dict | None:
+        try:
+            return jose.verify(token, {self.kid: jose.VerifyingKey.from_jwk(jose.rsa_jwk(self._key.public_key(), self.kid))}).claims
+        except jose.JoseError:
+            return None
+
     def _metadata(self, r: Request) -> dict:
         base = f"{self.cfg.url('entra')}/{r.params['tenant']}"
         return {"issuer": self.cfg.issuer, "token_endpoint": f"{base}/oauth2/v2.0/token", "jwks_uri": f"{base}/discovery/v2.0/keys",
@@ -114,6 +167,23 @@ class EntraMock(Mock):
         cid, secret = form.get("client_id", ""), form.get("client_secret", "")
         expected = self.cfg.secrets.get(cid)
         return bool(expected) and secrets.compare_digest(expected, secret)
+
+    def _authenticate_client(self, form: dict) -> dict | Response:
+        """Client authentication. Workloads: client secret (stand-in for workload identity). Agents: ONLY a federated
+        credential, i.e. a `client_assertion` that is the registered workload's assertion. Returns the federation
+        claims for an agent ({} for a workload) or an error response."""
+        cid = form.get("client_id", "")
+        if cid not in AGENTS:
+            return {} if self._client_ok(form) else self._error(401, "invalid_client", "AADSTS7000215: Invalid client secret provided.")
+        if form.get("client_secret"):
+            return self._error(401, "invalid_client", "AADSTS7000222: agent identities have no client secrets; use the workload's federated credential.")
+        if form.get("client_assertion_type") != JWT_BEARER_ASSERTION or not form.get("client_assertion"):
+            return self._error(401, "invalid_client", "AADSTS700016: a client assertion from the agent's federated credential is required.")
+        a = self._verify_own(form["client_assertion"])
+        if (a is None or a.get("aud") != AUD["token-exchange"] or a.get("iss") != aks_issuer(self.cfg.url("entra"))
+                or a.get("sub") != AGENT_WORKLOAD[cid] or not isinstance(a.get("exp"), (int, float)) or a["exp"] < time.time()):
+            return self._error(401, "invalid_client", "AADSTS70021: No matching federated identity record found for presented assertion.")
+        return {"xms_fic_sub": a["sub"], "xms_fic_iss": a["iss"]}
 
     @staticmethod
     def _parse_scope(scope: str) -> tuple[str, set[str]]:
@@ -150,38 +220,51 @@ class EntraMock(Mock):
                               "access_token": token, "scope": scope}, headers={"Cache-Control": "no-store"})
 
     def _client_credentials(self, form: dict, resource: str, names: set[str]) -> Response:
-        if not self._client_ok(form):
-            return self._error(401, "invalid_client", "AADSTS7000215: Invalid client secret provided.")
+        fic = self._authenticate_client(form)
+        if isinstance(fic, Response):
+            return fic
         if names != {".default"}:
             return self._error(400, "invalid_scope", "AADSTS1002012: client credentials require the /.default scope")
         cid = form["client_id"]
         if resource in OWN_APIS and resource not in APP_ROLES.get(cid, {}):
             return self._error(400, "invalid_grant", "AADSTS501051: application is not assigned a role for this API")
+        if cid in AGENTS and resource != AUD["mcp"]:
+            return self._error(400, "invalid_grant", "AADSTS501051: agent identities may only call the MCP gateway")
         c = self._base_claims(resource, 3600)
-        sp_oid = str(uuid.uuid5(uuid.NAMESPACE_URL, "rm-copilot-sp:" + cid))
-        c.update({"azp": cid, "appid": cid, "idtyp": "app", "oid": sp_oid, "sub": sp_oid, "roles": APP_ROLES.get(cid, {}).get(resource, [])})
+        if resource == AUD["token-exchange"]:
+            # The workload assertion (stand-in for the projected service-account token of the orchestrator pod).
+            c.update({"iss": aks_issuer(self.cfg.url("entra")), "sub": WORKLOAD_SUBJECTS[cid], "azp": cid, "idtyp": "app",
+                      "kubernetes.io": {"namespace": "rm-copilot", "serviceaccount": {"name": cid}}})
+            return self._token_response(self._sign(c), 3600, f"{resource}/.default")
+        oid = sp_oid(cid)
+        c.update({"azp": cid, "appid": cid, "idtyp": "app", "oid": oid, "sub": oid, "roles": APP_ROLES.get(cid, {}).get(resource, []), **fic})
         return self._token_response(self._sign(c), 3600, f"{resource}/.default")
 
     def _obo(self, form: dict, resource: str, names: set[str]) -> Response:
-        if not self._client_ok(form):
-            return self._error(401, "invalid_client", "AADSTS7000215: Invalid client secret provided.")
+        fic = self._authenticate_client(form)
+        if isinstance(fic, Response):
+            return fic
         cid = form["client_id"]
-        try:
-            d = jose.verify(form.get("assertion", ""), {self.kid: jose.VerifyingKey.from_jwk(jose.rsa_jwk(self._key.public_key(), self.kid))})
-        except jose.JoseError:
+        a = self._verify_own(form.get("assertion", ""))
+        if a is None:
             return self._error(400, "invalid_grant", "AADSTS50013: Assertion failed signature validation.")
-        a = d.claims
         if a.get("exp", 0) < time.time():
             return self._error(400, "invalid_grant", "AADSTS500133: Assertion is not within its valid time range.")
-        if a.get("aud") != APP_ID_URIS.get(cid) or a.get("idtyp") == "app":
+        agent = cid in AGENTS
+        upstream_ok = (a.get("aud"), a.get("azp")) == AGENT_OBO_UPSTREAM if agent else a.get("aud") == APP_ID_URIS.get(cid)
+        if not upstream_ok or a.get("idtyp") == "app":
             return self._error(400, "invalid_grant", "AADSTS50013: Assertion audience does not match the client application.")
         allowed = DELEGATED.get(cid, {}).get(resource, set())
+        if agent:  # an agent never gets more than the RM delegated upstream
+            allowed = allowed & set(str(a.get("scp", "")).split())
         granted = allowed if names == {".default"} else names
         if not granted or not granted <= allowed:
             return self._error(400, "invalid_grant", "AADSTS65001: The user or administrator has not consented to use the application.")
         c = self._base_claims(resource, 3600)
         c.update({k: a[k] for k in ("name", "oid", "sub", "preferred_username", "roles", "auth_time", "amr") if k in a})
         c.update({"azp": cid, "appid": cid, "scp": " ".join(sorted(granted))})
+        if agent:  # the RM stays the subject; the agent is the actor (RFC 8693 `act`)
+            c["act"] = {"sub": sp_oid(cid), "azp": cid, **({"xms_fic_sub": fic["xms_fic_sub"]} if fic.get("xms_fic_sub") else {})}
         return self._token_response(self._sign(c), 3600, " ".join(f"{resource}/{n}" for n in sorted(granted)))
 
     def _password(self, form: dict, resource: str, names: set[str]) -> Response:

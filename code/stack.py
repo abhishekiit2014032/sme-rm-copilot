@@ -36,6 +36,7 @@ from azmock.systems import SystemsOfRecordMock
 from services.audit_writer import AuditWriter
 from services.common.config import SOR_SYSTEMS, Settings, StackConfig, env_url_overrides
 from services.common.httpkit import Server
+from services.common.procedural import PINS_KEY, pins
 from services.ingestion_worker import IngestionWorker
 from services.orchestrator import Orchestrator
 from services.outbox_worker import OutboxWorker
@@ -89,11 +90,28 @@ class Stack:
             # Pipeline step (LLD §4.7): the approval key versions tool-gateway accepts; ops edit it to rotate or revoke.
             version = self.components["keyvault"].public_jwk("approval-signing")["kid"].rsplit("/", 1)[-1]
             self.components["appconfig"].put_value("rmc:tool-gateway:approval:allowed_kids", json.dumps([version]), "application/json")
+        if "appconfig" in self.components:
+            self.publish_pins()
         self.ingestion = IngestionWorker(self.cfg).run()
         for n in ("audit-writer", "outbox-worker", "tool-gateway"):
             if n in self.components:
                 self.components[n].start()
         return self
+
+    def publish_pins(self, value: dict | None = None) -> None:
+        """Pipeline step (plan §3.8): pin the procedural memory (graph, prompt templates, MCP tool definitions)."""
+        self.components["appconfig"].put_value(PINS_KEY, json.dumps(value or pins()), "application/json")
+
+    def restart(self, name: str) -> None:
+        """Stop one service and start a fresh instance on the same port (a pod restart: in-memory state is lost)."""
+        old = self.servers[name]
+        if name in ("tool-gateway", "outbox-worker", "audit-writer"):
+            self.components[name].stop()
+        old.stop()
+        self.components[name] = SERVICES[name](self.cfg)
+        self.servers[name] = Server(name, old.host, old.port).start(self.components[name].app)
+        if name in ("tool-gateway", "outbox-worker", "audit-writer"):
+            self.components[name].start()
 
     def stop(self) -> None:
         for n in ("tool-gateway", "outbox-worker", "audit-writer"):
@@ -180,7 +198,8 @@ class ConsoleClient:
         return out
 
     def raw(self, method: str, path: str, body: dict | None = None, *, headers: dict | None = None) -> tuple[int, dict, dict]:
-        h = {"content-type": "application/json", **({"authorization": "Bearer " + self.token} if self.token else {}), **(headers or {})}
+        h = {"content-type": "application/json", **({"authorization": "Bearer " + self.token} if self.token else {}),
+             **({"x-session-id": self.session["session_id"]} if self.session.get("session_id") else {}), **(headers or {})}
         return self._http(method, self.base + path, json.dumps(body).encode() if body is not None else None, h)
 
     def approve_headers(self) -> dict:
@@ -205,15 +224,28 @@ class ConsoleClient:
         return self.call("GET", f"/api/trace/{request_id}")
 
 
+def _agents(out: dict) -> str:
+    a = out.get("agents") or {}
+    tools = ", ".join(f"{t['server']}/{t['tool']}" for t in a.get("tools", [])) or "none"
+    return f"{a.get('supervisor')} -> {a.get('specialist')} ({a.get('hops')} hops{', resumed from checkpoint' if a.get('resumed') else ''}) · tools: {tools}"
+
+
 def smoke(stack: Stack) -> int:
     c = ConsoleClient(stack).sign_in()
     b = c.brief("harbourline")
     print(f"UC1 brief: {len(b['talking_points'])} talking points, {len(b['watch'])} watch items · trace {b['trace_id'][:8]}")
+    print(f"    agents: {_agents(b)}")
     a = c.ask("Can a company trading for 2 years get an unsecured working capital line?")
     print(f"UC2 answer: {a['status']} · grounded {a.get('grounded')} · sources {a.get('source_ids')}")
+    print(f"    agents: {_agents(a)}")
     d = c.draft("harbourline", "Met Mr Haddad. I promised to send the limit increase checklist by Friday. His ID is 784-1985-1234567-1.")
+    print(f"UC3 draft: {len(d['tasks'])} tasks · paused for approval (run {d['run_id'][:8]})")
+    print(f"    agents: {_agents(d)}")
     w = c.approve(d)
     print(f"UC3 commit: {w['status']} · items {[i['status'] for i in w['items']]}")
+    print(f"    agents: {_agents(w)}")
+    b2 = c.brief("harbourline")
+    print(f"UC1 again: {len(b2.get('previous_interactions', []))} RM-approved episode(s) recalled from memory")
     t = c.trace(b["request_id"])
     print(f"UC1 trace: {len(t['spans'])} spans across {', '.join(t['components'])}")
     time.sleep(0.5)

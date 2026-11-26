@@ -30,6 +30,7 @@ SAFE_KEYS = frozenset({
     "rmc.retry_after_ms", "rmc.remaining_ms", "rmc.index", "rmc.offset", "rmc.event", "rmc.queue_depth",
     "gen_ai.system", "gen_ai.operation.name", "gen_ai.request.model", "gen_ai.response.model",
     "gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens", "service", "level", "event", "status",
+    "rmc.agent", "rmc.node", "rmc.hop", "rmc.server", "rmc.step", "rmc.memory", "rmc.rpc_method", "rmc.graph", "rmc.resumed",
 })
 _MAX_STR = 80
 
@@ -198,8 +199,11 @@ class Metrics:
     def gauge(self, name: str, help_text: str, labels: tuple[str, ...] = ()) -> Gauge:
         return self._get(Gauge, name, help_text, labels)
 
-    def histogram(self, name: str, help_text: str, labels: tuple[str, ...] = ()) -> Histogram:
-        return self._get(Histogram, name, help_text, labels)
+    def histogram(self, name: str, help_text: str, labels: tuple[str, ...] = (), buckets: tuple[float, ...] | None = None) -> Histogram:
+        h = self._get(Histogram, name, help_text, labels)
+        if buckets and not h.series:
+            h.BUCKETS = tuple(buckets)
+        return h
 
     def render(self) -> str:
         out = []

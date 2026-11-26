@@ -58,3 +58,5 @@ button.chip { cursor: pointer; }
 .span-bar i.err { background: var(--bad); }
 .dur { text-align: right; color: var(--muted); }
 a { color: var(--accent); }
+.agents { margin-top: 12px; padding-top: 8px; border-top: 1px dashed var(--border); }
+.agents p { margin: 2px 0; }

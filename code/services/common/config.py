@@ -44,6 +44,8 @@ AUD = {
     "tool-gateway": "api://rm-copilot-tool-gateway",
     "apim": "api://rm-copilot-apim",
     "audit": "api://rm-copilot-audit",
+    "mcp": "api://rm-copilot-mcp",                     # MCP gateway (APIM) and the MCP servers in tool-gateway (plan §3.7)
+    "token-exchange": "api://AzureADTokenExchange",    # audience of the workload assertion used as a federated credential
     "cognitive": "https://cognitiveservices.azure.com",
     "search": "https://search.azure.com",
     "vault": "https://vault.azure.net",
@@ -91,6 +93,16 @@ class Settings:
     outbox_backoff_s: float = 0.5
     outbox_max_attempts: int = 12
     audit_poll_s: float = 0.2
+    # agents, MCP and memory (plan §3.7, §3.8, §7)
+    apim_mcp_agent_calls_per_minute: int = 600   # APIM MCP gateway: per agent identity
+    apim_mcp_rm_calls_per_minute: int = 240      # APIM MCP gateway: per RM (oid of the user token)
+    mcp_list_ttl_s: float = 60.0                 # orchestrator cache of `tools/list` per agent and server
+    session_token_budget: int = 300              # session memory: last turns + rolling summary within this many tokens
+    session_max_turns: int = 6
+    checkpoint_ttl_s: int = 7 * 86400            # plan §7: 7 days ...
+    checkpoint_open_ttl_s: int = 30 * 86400      # ... 30 days while a UC3 draft waits for approval
+    episode_ttl_s: int = 90 * 86400
+    memory_key_cache_s: float = 60.0
     run_dir: str = ""
 
     @classmethod

@@ -10,10 +10,14 @@
 * Serves the console with a strict Content-Security-Policy; the console renders model output as text only.
 * `GET /api/trace/{request_id}`: the span tree for one request, collected from every component's telemetry
   endpoint (local stand-in for an Application Insights end-to-end transaction view).
+* Memory (plan §3.8): passes the session id (thread of the agent graph) and the RM's profile (`rm-profile`:
+  language, brief format; `GET|PUT /api/profile`, set only by the RM) to the orchestrator under `context`, which it
+  always overwrites; on approve it sends the paused run id of the draft so the orchestrator resumes from the checkpoint.
 """
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 import threading
 import time
@@ -33,6 +37,8 @@ from services.common.service import Service
 WEB_DIR = Path(__file__).with_name("web")
 STATIC = {"console.js": "application/javascript; charset=utf-8", "console.css": "text/css; charset=utf-8"}
 APPROVAL_KEY = "approval-signing"
+SESSION_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+PROFILE_VALUES = {"language": ("en", "ar"), "brief_format": ("standard", "short")}
 
 
 def _origin(url: str) -> str:
@@ -57,6 +63,8 @@ class WebBff(Service):
         self.m_issued = m.counter("approval_tokens_issued_total", "Approval tokens minted after an RM approval", ())
         self.m_stepup = m.counter("step_up_required_total", "Approvals refused for stale authentication", ())
         self.m_csrf = m.counter("csrf_rejections_total", "Approvals refused by Origin/CSRF checks", ("reason",))
+        self.m_memory = m.counter("memory_writes_total", "Writes to copilot memory", ("type",))
+        self._profiles: dict[str, tuple[float, dict]] = {}
         a = self.app.route
         a("GET", "/")(lambda r: self._file("console.html", "text/html; charset=utf-8"))
         a("GET", "/favicon.ico")(lambda r: Response(204, None))
@@ -71,6 +79,8 @@ class WebBff(Service):
         a("POST", "/api/uc3/approve")(self._approve)
         a("GET", "/api/uc3/writes/{jti}")(lambda r: self._proxy(r, "GET", f"/v1/writes/{urllib.parse.quote(r.params['jti'], safe='')}", None, self.cfg.settings.deadline_commit_s))
         a("GET", "/api/trace/{request_id}")(self._trace)
+        a("GET", "/api/profile")(lambda r: self._profile(self._user(r)[0]["oid"]))
+        a("PUT", "/api/profile")(self._set_profile)
 
     # ------------------------------------------------------------------ static and config
     def _file(self, name: str, ctype: str | None) -> Response:
@@ -128,16 +138,51 @@ class WebBff(Service):
         hdrs = {k: v for k, v in resp.headers.items() if k in ("retry-after",)}
         return Response(resp.status, out, hdrs)
 
+    # ------------------------------------------------------------------ memory: profile and session context
+    def _profile(self, oid: str) -> dict:
+        now = time.monotonic()
+        hit = self._profiles.get(oid)
+        if hit and hit[0] > now:
+            return hit[1]
+        doc = self.cosmos.read("rm-profile", self._profile_id(oid)) or {}
+        profile = {k: doc.get(k) if doc.get(k) in allowed else allowed[0] for k, allowed in PROFILE_VALUES.items()}
+        self._profiles[oid] = (now + 30.0, profile)
+        return profile
+
+    @staticmethod
+    def _profile_id(oid: str) -> str:
+        return "p-" + hashlib.sha256(oid.encode()).hexdigest()[:40]
+
+    def _set_profile(self, r: Request) -> dict:
+        claims, _ = self._user(r)
+        body = r.json()
+        if not isinstance(body, dict) or not body or any(k not in PROFILE_VALUES or body[k] not in PROFILE_VALUES[k] for k in body):
+            raise HttpError(400, "VALIDATION_FAILED", "profile: language en|ar, brief_format standard|short", details={"reason": "SCHEMA"})
+        profile = {**self._profile(claims["oid"]), **body}
+        self.cosmos.upsert("rm-profile", {"id": self._profile_id(claims["oid"]), "oid": claims["oid"], **profile,
+                                          "provenance": {"source": "rm", "author_oid": claims["oid"], "time": int(time.time())}})
+        self._profiles.pop(claims["oid"], None)
+        self.m_memory.inc(type="profile")
+        return profile
+
+    def _with_context(self, r: Request, claims: dict, body: object) -> object:
+        """The orchestrator gets the session (graph thread) and the RM profile from here, never from the client."""
+        if not isinstance(body, dict):
+            return body
+        sid = r.header("x-session-id") or ""
+        return {**body, "context": {"session": sid if SESSION_RE.fullmatch(sid) else None, "profile": self._profile(claims["oid"])}}
+
     def _proxy(self, r: Request, method: str, path: str, body: dict | None, deadline_s: float) -> Response:
-        _, token = self._user(r)
+        claims, token = self._user(r)
         self._set_deadline(deadline_s)
-        return self._orch(method, path, body, token)
+        return self._orch(method, path, self._with_context(r, claims, body) if method == "POST" else body, token)
 
     def _draft(self, r: Request) -> Response:
         claims, token = self._user(r)
         self._set_deadline(self.cfg.settings.deadline_uc3_s)
-        resp = self._orch("POST", "/v1/followup", r.json(), token)
-        if resp.status == 200 and isinstance(resp.body, dict):
+        resp = self._orch("POST", "/v1/followup", self._with_context(r, claims, r.json()), token)
+        if resp.status == 200 and isinstance(resp.body, dict) and not resp.body.get("draft_id"):
+            # The follow-up agent stores its draft through the crm-drafts MCP tool; this is the fallback.
             draft_id = secrets.token_urlsafe(12)
             self.cosmos.upsert("drafts", {"id": draft_id, "oid": claims["oid"], "customer_id": resp.body.get("customer_id"),
                                           "model_draft": followup_payload({**resp.body, "email": resp.body.get("email_draft", "")}), "status": "drafted", "created": int(time.time())})
@@ -208,18 +253,21 @@ class WebBff(Service):
     def _approve(self, r: Request) -> Response:
         self._set_deadline(self.cfg.settings.deadline_commit_s)
         claims, user_token, cid, draft = self._approval_request(r)
-        approval, c = self.mint(claims["oid"], cid, draft)
-        resp = self._orch("POST", "/v1/commit", {"customer_id": cid, "draft": draft, "approval_token": approval}, user_token, write=True)
         body = r.json()
+        doc = self.cosmos.read("drafts", str(body["draft_id"])) if body.get("draft_id") and SESSION_RE.fullmatch(str(body["draft_id"])) else None
+        doc = doc if doc and doc.get("oid") == claims["oid"] and doc.get("customer_id") == cid else None
+        approval, c = self.mint(claims["oid"], cid, draft)
+        commit = {"customer_id": cid, "draft": draft, "approval_token": approval}
+        if doc and doc.get("run_id"):
+            commit["run_id"] = doc["run_id"]  # resume the paused agent run from its checkpoint
+        resp = self._orch("POST", "/v1/commit", self._with_context(r, claims, commit), user_token, write=True)
         if isinstance(resp.body, dict):
             email = draft["email"]  # only the approved, hash-bound email text goes into the compose link
             resp.body["email"] = {"body": email, "compose_link": outlook_compose_link(FOLLOWUP_SUBJECT, email)} if email and resp.status in (201, 202) else None
-            if body.get("draft_id"):
-                doc = self.cosmos.read("drafts", str(body["draft_id"]))
-                if doc and doc.get("oid") == claims["oid"]:
-                    doc = {k: v for k, v in doc.items() if not k.startswith("_")}
-                    doc.update(status=resp.body.get("status"), jti=c["jti"], edited=doc.get("model_draft") != draft)
-                    self.cosmos.upsert("drafts", doc)
+            if doc:
+                doc = {k: v for k, v in doc.items() if not k.startswith("_")}
+                doc.update(status=resp.body.get("status"), jti=c["jti"], edited=doc.get("model_draft") != draft)
+                self.cosmos.upsert("drafts", doc)
         return resp
 
     # ------------------------------------------------------------------ trace view

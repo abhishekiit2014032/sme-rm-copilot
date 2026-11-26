@@ -105,9 +105,12 @@ class TokenProvider:
         self._cache: dict[tuple[str, str], tuple[str, float]] = {}
         self._lock = threading.Lock()
 
+    def _client_auth(self) -> dict:
+        return {"client_secret": self._secret}
+
     def _request(self, form: dict) -> tuple[str, float]:
         import urllib.parse
-        body = urllib.parse.urlencode({"client_id": self.client_id, "client_secret": self._secret, **form}).encode()
+        body = urllib.parse.urlencode({"client_id": self.client_id, **self._client_auth(), **form}).encode()
         r = self.client.request("POST", self.token_url, data=body, headers={"content-type": "application/x-www-form-urlencoded"},
                                 timeout=3.0, peer="entra")
         if not r.ok:
@@ -134,3 +137,17 @@ class TokenProvider:
         key = (hashlib.sha256(assertion.encode()).hexdigest(), scope)
         return self._cached(key, {"grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer", "requested_token_use": "on_behalf_of",
                                   "assertion": assertion, "scope": scope})
+
+
+class FederatedTokenProvider(TokenProvider):
+    """Tokens for an agent identity, which has no secret: the client authenticates with a federated credential, the
+    workload assertion of the pod it runs in (`assertion()`; production: the projected service-account token AKS
+    workload identity mounts, `azure-identity` WorkloadIdentityCredential / Entra Agent ID SDK)."""
+
+    def __init__(self, client: HttpClient, token_url: str, client_id: str, assertion):
+        super().__init__(client, token_url, client_id, "")
+        self._assertion = assertion
+
+    def _client_auth(self) -> dict:
+        from .identities import JWT_BEARER_ASSERTION
+        return {"client_assertion_type": JWT_BEARER_ASSERTION, "client_assertion": self._assertion()}

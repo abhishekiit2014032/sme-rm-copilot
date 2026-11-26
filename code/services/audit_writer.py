@@ -8,7 +8,9 @@
   content with a per-customer key held in Key Vault and stores it separately; the chain keeps only a pointer and
   the ciphertext hash.
 * Crypto-shredding (`POST /audit/erasure`) deletes the customer's key: the content becomes unreadable for good,
-  while the chain still verifies (plan C21).
+  while the chain still verifies (plan C21). The same erasure covers copilot memory (plan §3.8, C29): it deletes the
+  customer's memory keys (`memory-ckpt-c-<id>`, `memory-ep-c-<id>`), so sealed checkpoints and episodes are shredded,
+  and removes those documents from Cosmos DB `checkpoints` and `episodes`.
 
 Local files live under `<run_dir>/audit/`. The content cipher (services/common/envelope.py) is a MOCK built from
 the standard library; production uses AES-256-GCM with keys wrapped by Key Vault HSM keys. Differences from the
@@ -28,7 +30,9 @@ from pathlib import Path
 from services.common import jose
 from services.common.envelope import seal, unseal
 from services.common.config import StackConfig
+from services.common.cosmos_client import CosmosClient
 from services.common.httpkit import HttpError, Request, RequestContext, TransportError, set_request_context
+from services.common.memory import key_name as memory_key_name
 from services.common.service import Service
 from services.common.telemetry import parse_traceparent
 
@@ -79,6 +83,7 @@ class AuditWriter(Service):
         self._seq, self._prev = self._head()  # resume after a restart: never restart the chain at seq 0 (false tamper alarm)
         self._keys: dict[str, bytes] = {}
         self._lock = threading.Lock()
+        self.cosmos = CosmosClient(self)
         m = self.metrics
         self.m_records = m.counter("audit_records_total", "Records appended to the hash chain", ("event",))
         self.m_content = m.counter("audit_content_sealed_total", "Content blobs encrypted per customer key", ())
@@ -207,10 +212,34 @@ class AuditWriter(Service):
                 raise HttpError(503, "DEPENDENCY_UNAVAILABLE", "cannot reach the key store", details={"reason": "KEY_VAULT"}) from None
             if d.status not in (200, 404):
                 raise HttpError(503, "DEPENDENCY_UNAVAILABLE", "key deletion failed", details={"reason": "KEY_VAULT"})
+            memory = self._erase_memory(customer)
             # The erasure itself is recorded in the chain (the writer owns the chain; no round trip through the stream).
             self._write({"schema": "audit/1", "event_id": secrets.token_hex(12), "event": "erasure_executed", "customer": customer,
-                         "producer": {"service": self.name}, "metadata": {"key": key_name(customer), "result": "shredded" if d.ok else "no_key"}}, None)
-        return {"customer": customer, "key": key_name(customer), "status": "shredded" if d.ok else "no_key"}
+                         "producer": {"service": self.name}, "metadata": {"key": key_name(customer), "result": "shredded" if d.ok else "no_key",
+                                                                          "checkpoints": memory["checkpoints"], "episodes": memory["episodes"]}}, None)
+        return {"customer": customer, "key": key_name(customer), "status": "shredded" if d.ok else "no_key", "memory": memory}
+
+    def _erase_memory(self, customer: str) -> dict:
+        """Crypto-shred the customer's memory keys, then delete the sealed checkpoints and episodes (C29)."""
+        shredded = []
+        for purpose in ("ckpt", "ep"):
+            name = memory_key_name(purpose, customer)
+            try:
+                d = self.client.request("DELETE", f"{self.cfg.url('keyvault')}/secrets/{name}?api-version=7.4", headers=self.auth_headers("vault"),
+                                        timeout=2.0, peer="keyvault")
+            except TransportError:
+                raise HttpError(503, "DEPENDENCY_UNAVAILABLE", "cannot reach the key store", details={"reason": "KEY_VAULT"}) from None
+            if d.status not in (200, 404):
+                raise HttpError(503, "DEPENDENCY_UNAVAILABLE", "memory key deletion failed", details={"reason": "KEY_VAULT"})
+            if d.ok:
+                shredded.append(purpose)
+        counts = {}
+        for coll in ("checkpoints", "episodes"):
+            docs = self.cosmos.query(coll, "SELECT * FROM c WHERE c.customer_id = @cid", cid=customer)
+            for doc in docs:
+                self.cosmos.delete(coll, doc["id"])
+            counts[coll] = len(docs)
+        return {**counts, "keys_shredded": shredded}
 
     def _content(self, r: Request) -> dict:
         self._admin(r, "Audit.ReadContent")

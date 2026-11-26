@@ -99,6 +99,7 @@ AUDIT_SCHEMA = "audit/1"
 AUDIT_EVENTS = frozenset({
     "tool_call", "entitlement_denied", "brief_built", "groundedness", "declined", "degraded", "injection_flagged", "followup_drafted",
     "model_call", "approval_issued", "approval_verified", "approval_rejected", "write_blocked", "write_committed", "write_queued", "write_failed",
+    "mcp_denied", "episode_recorded", "checkpoint_replayed",
 })
 
 
@@ -126,7 +127,7 @@ class EventHubAuditSink:
         for e in events:
             body = {"schema": AUDIT_SCHEMA, "event_id": secrets.token_hex(12), "ts": round(time.time(), 3), "event": e["event"],
                     "producer": {"service": self.source, "posted_by": posted_by or self.source},
-                    "actor": actor or {"type": "rm", "oid": ctx.data.get("rm_oid")},
+                    "actor": actor or {"type": "rm", "oid": ctx.data.get("rm_oid"), **({"agent": ctx.data["agent"]} if ctx.data.get("agent") else {})},
                     "request_id": ctx.request_id, "trace_id": current_trace_id(),
                     "customer": e.get("customer") or ctx.data.get("customer_id"), "metadata": e.get("metadata") or {},
                     "lineage": {**(e.get("lineage") or _lineage_now()), "guardrails": GUARDRAIL_VERSION, "tool_contract": TOOL_CONTRACT_VERSION}}

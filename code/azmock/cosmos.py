@@ -1,4 +1,5 @@
-"""Azure Cosmos DB for NoSQL mock (REST data plane): sessions, drafts, jti replay store, approvals, outbox.
+"""Azure Cosmos DB for NoSQL mock (REST data plane): sessions, drafts, jti replay store, approvals, outbox, and the
+memory containers of plan §3.8 (`checkpoints`, `episodes`, `rm-profile`; session memory lives in `sessions`).
 
 Imitates:
   POST   /dbs/{db}/colls/{coll}/docs           create (409 Conflict if the id exists: the atomic jti check);
@@ -29,11 +30,14 @@ from ._base import Mock
 DAY = 86400
 CONTAINERS = {  # container -> default TTL (plan §7)
     "sessions": DAY, "drafts": 30 * DAY, "jti": DAY, "approvals": 30 * DAY, "outbox": 30 * DAY, "leases": None,
+    "checkpoints": 7 * DAY, "episodes": 90 * DAY, "rm-profile": None,
 }
 RBAC = {
-    "web-bff": {"sessions", "drafts"},
-    "tool-gateway": {"jti", "approvals", "outbox"},
+    "web-bff": {"sessions", "drafts", "rm-profile"},
+    # tool-gateway is also the memory store: agent drafts, graph checkpoints, session memory, episodes (sealed per customer)
+    "tool-gateway": {"jti", "approvals", "outbox", "drafts", "checkpoints", "sessions", "episodes"},
     "outbox-worker": {"outbox", "approvals", "leases"},
+    "audit-writer": {"checkpoints", "episodes"},  # erasure removes a customer's checkpoints and episodes (C29)
 }
 _COND = re.compile(r"c\.(\w+)\s*=\s*(@\w+|'[^']*'|-?\d+|true|false)", re.I)
 
