@@ -71,13 +71,16 @@ Containers and partition keys:
 | Container | Partition key | Documents | TTL | Writers | Readers |
 |---|---|---|---|---|---|
 | `sessions` | `/id` (hash of the session cookie) | Session state | 24 h (container default) | `web-bff` | `web-bff` |
-| `drafts` | `/rm_oid` | Draft, versions (ETag), reference to the approval `jti` | 30 days | `web-bff` (the orchestrator holds no state, `02-lld.md` §2.2) | `web-bff`; `outbox-worker` reads metadata for the unused-approval sweep |
+| `drafts` | `/rm_oid` | Draft, versions (ETag), reference to the approval `jti` | 30 days | `web-bff` | `web-bff`; `outbox-worker` reads metadata for the unused-approval sweep |
 | `approvals` | `/jti` | `jti` marker (per-item TTL 1 day), approval document with verdict, approved snapshot and saga state, outbox items (TTL -1 while open, 30 days once the last item is final) | Per item | `tool-gateway`, `outbox-worker` | `tool-gateway`, `outbox-worker` |
 | `idempotency` | `/id` (hash of `rm_oid:key`) | Stored responses for `Idempotency-Key` | 7 days | `web-bff`, `tool-gateway` | same |
 | `leases` | `/id` | Change feed processor leases | none | `outbox-worker` | `outbox-worker` |
 | `entitlements` | `/id` (`rm_oid`) | Cached portfolio and delegation records (C22) | 50 s (+ 10 s in-process = 60 s) | `tool-gateway` | `tool-gateway` |
 | `audit-spool` | `/producer_pod` | Audit events spooled during an Event Hubs outage | none (deleted when drained) | `tool-gateway` (the only producer) | `audit-writer` (drains into chain `s0`) |
 | `audit-chain-heads` | `/id` (`chain_id`) | Hash-chain heads, ETag-guarded | none | `audit-writer` | `audit-writer` |
+| `checkpoints` | `/thread_id` (RM session) | Agent graph state after every node; interrupts awaiting RM approval (ADR-025, ADR-026) | 7 days; 30 days while a UC3 draft is open | `orchestrator` (graph runtime) | `orchestrator`; replay only under a PIM grant |
+| `episodes` | `/rm_oid` | Episodic memory: pointers to RM-approved or RM-authored events with provenance, never customer facts (ADR-026) | 90 days | `tool-gateway` (memory MCP server) | `tool-gateway`, entitlement re-checked at recall |
+| `rm-profile` | `/rm_oid` | RM preferences: language, brief format | until changed | `web-bff` | `web-bff`, `orchestrator` |
 
 Rationale for the keys:
 
@@ -146,3 +149,5 @@ Risks and mitigations
   records), ADR-002 (stateless services on AKS).
 - Code: `code/rm_copilot/tools.py` (in-memory `AUDIT_LOG`, `CRM_WRITES` and the stateless HMAC verify that this
   replaces).
+
+Amendment (26 Nov 2026, plan v2.6): with supervisor-led agents (ADR-025) the orchestrator now holds graph checkpoints; the memory containers above follow ADR-026.

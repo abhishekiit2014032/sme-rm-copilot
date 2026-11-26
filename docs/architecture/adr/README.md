@@ -3,12 +3,13 @@
 This folder holds the architecture decision records (ADRs) for the SME RM Copilot. Each ADR follows the same
 structure: status, date, context (forces, constraints and NFRs from `../00-plan.md`), options considered, a trade-off
 table, decision, consequences (positive, negative, risks with mitigations), review trigger, and related ADRs and
-plan sections. The baseline is `../00-plan.md` v2.4; the high-level design is `../01-hld.md`. ADRs 003, 008, 009, 010, 013, 015,
+plan sections. The baseline is `../00-plan.md` v2.4 (ADR-023 to ADR-026 and the ADR-005 amendment follow v2.6); the high-level design is `../01-hld.md`. ADRs 003, 008, 009, 010, 013, 015,
 019 and 020 were amended before ARB approval to match plan v2.1 to v2.4; each records its amendment in the status
 table (`07-review-log.md` lists the findings). Once the ARB approves the pack, rule 5 below applies.
 
-Status values: **Accepted** (in force for the pilot), **Proposed** (to be decided at a stated gate), **Superseded**
-(replaced by a later ADR, which is linked). Items marked **[confirm]** inside an ADR are facts to verify with the
+Status values: **Accepted** (in force for the pilot), **Proposed** (to be decided at a stated gate), **Amended by**
+(still in force, with the changes recorded in the later ADR, which is linked), **Superseded** (replaced by a later
+ADR, which is linked). Items marked **[confirm]** inside an ADR are facts to verify with the
 Bank or Microsoft (plan §10); a decision may stand while its [confirm] items are open, but each is tracked to closure
 before go-live.
 
@@ -20,7 +21,7 @@ before go-live.
 | ADR-002 | AKS private cluster for compute | Accepted | [ADR-002-aks-compute.md](ADR-002-aks-compute.md) |
 | ADR-003 | API Management as AI gateway and system API facade | Accepted | [ADR-003-apim-ai-gateway.md](ADR-003-apim-ai-gateway.md) |
 | ADR-004 | Model hosting and tiering on Azure OpenAI in Azure AI Foundry | Accepted (PTU gate Proposed) | [ADR-004-model-hosting-and-tiering.md](ADR-004-model-hosting-and-tiering.md) |
-| ADR-005 | Thin custom orchestrator with deterministic workflows | Accepted | [ADR-005-orchestration-approach.md](ADR-005-orchestration-approach.md) |
+| ADR-005 | Thin custom orchestrator with deterministic workflows | Amended by ADR-025 (supervisor-led agents on the same deterministic principles) | [ADR-005-orchestration-approach.md](ADR-005-orchestration-approach.md) |
 | ADR-006 | Retrieval on Azure AI Search with hybrid query and semantic ranker | Accepted | [ADR-006-retrieval-azure-ai-search.md](ADR-006-retrieval-azure-ai-search.md) |
 | ADR-007 | Customer data is read live as the RM, not embedded or indexed | Accepted | [ADR-007-customer-data-live-not-indexed.md](ADR-007-customer-data-live-not-indexed.md) |
 | ADR-008 | Entra OBO plus workload identity; entitlements enforced in tool-gateway | Accepted | [ADR-008-identity-obo-and-entitlements.md](ADR-008-identity-obo-and-entitlements.md) |
@@ -38,6 +39,10 @@ before go-live.
 | ADR-020 | Feature flags and kill switches in Azure App Configuration | Accepted | [ADR-020-feature-flags-kill-switch.md](ADR-020-feature-flags-kill-switch.md) |
 | ADR-021 | Infrastructure as code with Bicep and Azure Verified Modules, CI/CD with OIDC | Accepted (CI platform follows the Bank standard [confirm]) | [ADR-021-iac-and-cicd.md](ADR-021-iac-and-cicd.md) |
 | ADR-022 | No unverified streaming: buffer, verify, release | Accepted | [ADR-022-no-unverified-streaming.md](ADR-022-no-unverified-streaming.md) |
+| ADR-023 | APIM as the MCP gateway in front of tool-gateway MCP servers | Accepted (APIM-native MCP features used where confirmed) | [ADR-023-mcp-gateway-and-tool-access.md](ADR-023-mcp-gateway-and-tool-access.md) |
+| ADR-024 | Three identities on every tool call: user, agent and workload | Accepted (Entra Agent ID used where available) | [ADR-024-agent-identity-three-way.md](ADR-024-agent-identity-three-way.md) |
+| ADR-025 | Supervisor-led multi-agent orchestration on a fixed graph | Accepted (graph framework choice Proposed until the Phase 0 spike) | [ADR-025-multi-agent-orchestration.md](ADR-025-multi-agent-orchestration.md) |
+| ADR-026 | Memory architecture: seven typed memories, partitioned by RM, no customer facts memorised | Accepted | [ADR-026-memory-architecture.md](ADR-026-memory-architecture.md) |
 
 Titles and statuses above are taken from each ADR file.
 
@@ -54,7 +59,7 @@ Titles and statuses above are taken from each ADR file.
 | C7 CRM write retries and atomicity | ADR-010 |
 | C8 APIM semantic cache | ADR-003 |
 | C9 Brief prefetch without the RM | ADR-008 (Phase 2) |
-| C10 Token and cost runaway | ADR-003, ADR-004, ADR-005 |
+| C10 Token and cost runaway | ADR-003, ADR-004, ADR-005, ADR-025 |
 | C11 Compute platform | ADR-002 |
 | C12 Model version retirement | ADR-004, ADR-018 |
 | C13 Content filter false positives | ADR-004, ADR-011 |
@@ -68,6 +73,12 @@ Titles and statuses above are taken from each ADR file.
 | C21 Audit immutability vs erasure | ADR-013, ADR-012 |
 | C22 Entitlement staleness and delegation | ADR-008 |
 | C23 Model risk management | ADR-018 |
+| C24 Agent identity sprawl and over-privilege | ADR-024, ADR-023 |
+| C25 MCP tool poisoning or rogue MCP servers | ADR-023 |
+| C26 Memory poisoning | ADR-026, ADR-011 |
+| C27 Memory leaking across RMs or customers | ADR-026, ADR-023, ADR-008 |
+| C28 Multi-agent error compounding, cost and latency | ADR-025 |
+| C29 Checkpoints hold customer data | ADR-026, ADR-025 |
 
 ## Writing a new ADR
 
