@@ -5,9 +5,11 @@
 <title>Complete architecture</title>
 <!-- SME RM Copilot (fictional, unbranded bank) on Azure UAE North, drawn in the four-lane "complete architecture"
      format of an AI system design guide: A online request path, B controlled execution, C state + data freshness,
-     D production operations. Badge numbers on boxes are the guide's 11 building blocks.
+     D production operations. Badge numbers on boxes are the guide's 11 building blocks plus two from plan v2.6:
+     12 agent identity + MCP gateway (plan §3.7) and 13 memory (plan §3.8).
      Every box, arrow, pill and label comes from the SPEC array below and carries a `step`:
-       0     = the v1 prototype,  1..11 = the building block that adds it.  `until` = step at which it is replaced.
+       0     = the v1 prototype,  1..13 = the building block that adds it.  `until` = step at which it is replaced;
+       `from` = step from which an element (keeping its original `step`) is shown, used when an element moves.
      ?step=N (or <html data-step="N">) shows elements with step <= N and highlights the ones added at step N.
      No step: the complete diagram, no highlight.  Generic line icons only; offline; no external requests.
      Render: node docs/architecture/diagrams/system-design/render.js -->
@@ -20,7 +22,7 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { background: var(--bg); }
 body { font-family: Inter, "Segoe UI", Arial, sans-serif; color: var(--ink); }
-#canvas { position: relative; width: 2400px; height: 1500px; background: var(--canvas); overflow: hidden; }
+#canvas { position: relative; width: 2400px; height: 1794px; background: var(--canvas); overflow: hidden; }
 
 /* header (complete view) */
 #hdr { position: absolute; left: 24px; top: 22px; width: 2352px; height: 96px; }
@@ -35,8 +37,8 @@ body { font-family: Inter, "Segoe UI", Arial, sans-serif; color: var(--ink); }
 #cap .chip { background: var(--hi); color: #0A1526; font: 800 30px/1 Inter, Arial, sans-serif; padding: 14px 18px; border-radius: 10px; letter-spacing: 1px; white-space: nowrap; }
 #cap .txt { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 #cap .main { font: 800 40px/1.05 Inter, Arial, sans-serif; letter-spacing: -0.3px; white-space: nowrap; }
-#cap .sub { font-size: 19px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 1640px; }
-#cap .dots { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+#cap .sub { font-size: 19px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 1460px; }
+#cap .dots { margin-left: auto; display: flex; gap: 6px; align-items: center; flex: none; }
 #cap .dots i { display: block; width: 30px; height: 30px; border-radius: 50%; border: 2px solid #4B6B8E; font: 700 15px/26px Inter, Arial, sans-serif; text-align: center; font-style: normal; color: #7E97B0; }
 #cap .dots i.done { background: #2B4A6E; color: var(--ink); border-color: #2B4A6E; }
 #cap .dots i.now { background: var(--hi); color: #0A1526; border-color: var(--hi); }
@@ -62,6 +64,17 @@ body { font-family: Inter, "Segoe UI", Arial, sans-serif; color: var(--ink); }
 .box.dim > * { opacity: .72; }
 .box.dim .badges { opacity: 1; }
 .box.ans { border-color: #5BA7E8; }
+/* small boxes inside a group (memory) */
+.box.mini { padding: 10px 12px; }
+.box.mini .t { font-size: 22px; }
+.box.mini .d { font-size: 15.5px; line-height: 1.28; }
+/* group frame (memory): a titled container, not a box */
+.group { position: absolute; border: 1.5px dashed #6FA8DC; border-radius: 13px; background: rgba(124,196,255,.05); }
+.group .ghead { position: absolute; left: 14px; right: 14px; top: 8px; height: 36px; display: flex; align-items: center; gap: 10px; }
+.group .ghead svg.ic { width: 28px; height: 28px; color: var(--icon); flex: none; }
+.group .gt { font: 800 24px/1 Inter, Arial, sans-serif; color: var(--ink); white-space: nowrap; }
+.group .gs { margin-left: auto; font: 400 16.5px/1 Inter, Arial, sans-serif; color: var(--muted); white-space: nowrap; }
+.new.group { border: 2.5px dashed var(--hi) !important; box-shadow: 0 0 0 3px rgba(200,240,74,.25), 0 0 30px rgba(200,240,74,.4); }
 .offtag { display: inline-block; font: 800 15px/1 Inter, Arial, sans-serif; color: #0A1526; background: #8FA6BC; border-radius: 5px; padding: 4px 7px; margin-left: 6px; vertical-align: 3px; letter-spacing: 1px; }
 
 /* labels and pills */
@@ -69,6 +82,7 @@ body { font-family: Inter, "Segoe UI", Arial, sans-serif; color: var(--ink); }
 .lbl.cyan { color: var(--cyan); } .lbl.amber { color: var(--amber); } .lbl.violet { color: #CDB0FF; }
 .pill { position: absolute; font: 700 15.5px/1 Inter, Arial, sans-serif; white-space: nowrap; color: var(--amber); border: 1.5px solid var(--amber);
         border-radius: 8px; padding: 7px 12px; background: rgba(245,184,46,.10); }
+.pill.id { color: #D6EBFF; border: 1.5px dashed #7CC4FF; background: rgba(124,196,255,.10); line-height: 1.35; padding: 6px 14px; }
 
 /* highlight: added in this step */
 .new.box { border: 2.5px solid var(--hi) !important; box-shadow: 0 0 0 3px rgba(200,240,74,.35), 0 0 34px rgba(200,240,74,.55); }
@@ -79,7 +93,7 @@ body { font-family: Inter, "Segoe UI", Arial, sans-serif; color: var(--ink); }
 svg#wires { position: absolute; left: 0; top: 0; pointer-events: none; }
 
 /* legend */
-#legend { position: absolute; left: 24px; top: 1408px; width: 2352px; height: 64px; display: flex; align-items: center; gap: 44px; font-size: 18px; color: var(--muted); border-top: 1.5px solid var(--lane-line); padding-top: 6px; }
+#legend { position: absolute; left: 24px; top: 1714px; width: 2352px; height: 64px; display: flex; align-items: center; gap: 44px; font-size: 18px; color: var(--muted); border-top: 1.5px solid var(--lane-line); padding-top: 6px; }
 #legend .it { display: flex; align-items: center; gap: 12px; white-space: nowrap; }
 #legend .dashbox { width: 46px; height: 28px; border: 2px dashed #6F8DAE; border-radius: 6px; }
 #legend .hibox { width: 46px; height: 28px; border: 2.5px solid var(--hi); border-radius: 6px; box-shadow: 0 0 12px rgba(200,240,74,.6); }
@@ -111,6 +125,8 @@ svg#wires { position: absolute; left: 0; top: 0; pointer-events: none; }
     <symbol id="i-chart" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 20h16"/><path d="M7 16v-4M11 16V8M15 16v-6M19 16V5"/></g></symbol>
     <symbol id="i-check" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2.5"/><path d="M8 12.2l2.8 2.8L16.5 9"/></g></symbol>
     <symbol id="i-gear" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8"/></g></symbol>
+    <symbol id="i-agent" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="8" width="14" height="11" rx="3"/><path d="M12 8V5"/><circle cx="12" cy="3.6" r="1.2"/><path d="M9.5 16h5M3 12.5v3M21 12.5v3"/><circle cx="9.5" cy="12.5" r=".6" fill="currentColor"/><circle cx="14.5" cy="12.5" r=".6" fill="currentColor"/></g></symbol>
+    <symbol id="i-plug" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v5M15 3v5"/><path d="M6.5 8h11v3a5.5 5.5 0 0 1-11 0z"/><path d="M12 16.5V21"/></g></symbol>
     <symbol id="i-cycle" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12a7 7 0 0 1-12.3 4.6M5 12a7 7 0 0 1 12.3-4.6"/><path d="M17.5 3.5v4h-4M6.5 20.5v-4h4"/></g></symbol>
   </defs>
 </svg>
@@ -118,7 +134,7 @@ svg#wires { position: absolute; left: 0; top: 0; pointer-events: none; }
 <div id="hdr">
   <div class="kicker">AZURE UAE NORTH · FICTIONAL BANK · ARCHITECTURE-REVIEW VIEW</div>
   <h1>SME RM Copilot · complete architecture on Azure</h1>
-  <div class="note"><span class="badge">01</span> numbers = building blocks 01 to 11</div>
+  <div class="note"><span class="badge">01</span> numbers = building blocks 01 to 13</div>
 </div>
 <div id="cap">
   <div class="chip" id="capchip">STEP 01</div>
@@ -141,23 +157,40 @@ svg#wires { position: absolute; left: 0; top: 0; pointer-events: none; }
 
 <script>
 // ---------- geometry (one place) ----------
+const W = 2400, H = 1794, LAST = 13;
 const LANES = [
   { k: 'A', name: 'ONLINE REQUEST PATH',     y: 132, h: 316 },
-  { k: 'B', name: 'CONTROLLED EXECUTION',    y: 462, h: 466 },
-  { k: 'C', name: 'STATE + DATA FRESHNESS',  y: 942, h: 238 },
-  { k: 'D', name: 'PRODUCTION OPERATIONS',   y: 1194, h: 198 },
+  { k: 'B', name: 'CONTROLLED EXECUTION',    y: 462, h: 730 },
+  { k: 'C', name: 'STATE + DATA FRESHNESS',  y: 1206, h: 280 },
+  { k: 'D', name: 'PRODUCTION OPERATIONS',   y: 1500, h: 198 },
 ];
 const AY = 216, AH = 200, AM = AY + AH / 2;          // lane A boxes, arrow height
 const BYP = AY - 24;                                   // cache bypass line
-const F1 = 496, F2 = 532;                              // router fan-out bus levels
-const BY = 576, BH = 144;                              // lane B upper row
-const LY = BY + BH + 66, LH = 110;                     // lane B lower row
-const CY = 1016, CH = 136;                             // lane C boxes
-const DY = 1266, DH = 104;                             // lane D boxes
-const XINV = 1340;                                     // cache invalidate line
+const F1 = 496;                                        // approve / escalate bus (right of the lane B heading)
+const BUS = 544;                                       // supervisor hand-off bus (below the lane B heading)
+const VB1 = 530, VB2 = 560;                            // v1 .. step 11: router -> bank tools / RAG buses (above the model gateway)
+const BY = 576, BH = 144;                              // model gateway, human in the loop
+const OY = 786, OH = 110;                              // Azure OpenAI
+const AGY = 572, AGH = 108;                            // specialist agents row (step 12)
+const MGY = 760, MGH = 84;                             // MCP gateway (step 12)
+const SY = 896, SH = 116;                              // MCP servers row (step 12); v1 RAG + tools before that
+const LY = 1070, LH = 90;                              // index + bank APIs row
+const YINV = 1176;                                     // cache invalidate line, under the lane B boxes
+const CY = 1280, CH = 184;                             // lane C boxes
+const DY = 1572, DH = 104;                             // lane D boxes
+const XINV = 1340;                                     // cache invalidate line (gap between tools column and model column)
 // lane A x positions
 const xa = { rm: [48, 150], gw: [246, 240], rate: [534, 230], inp: [812, 250], cache: [1122, 250], rt: [1432, 280], out: [1796, 278], ans: [2122, 230] };
 const R = k => xa[k][0] + xa[k][1];   // right edge
+// step 12: agents, MCP gateway and MCP servers (x, w); step 13: memory group
+const AG = { brief: [48, 404], policy: [477, 404], follow: [906, 404] };
+const AC = k => AG[k][0] + AG[k][1] / 2;
+const SV = { cdata: [48, 268], crm: [340, 280], ps: [644, 356], mem: [1024, 286] };
+const SC = k => SV[k][0] + SV[k][1] / 2;
+const MEMX = 748, MEMW = 1182, MEMHD = 52;             // memory group frame and header height
+const MBW = 223, MBG = 10, MBX = MEMX + 12;            // memory sub-boxes
+const mbx = i => MBX + i * (MBW + MBG);
+const XMEM = 1270;                                     // memory server -> episodic memory
 
 // ---------- the spec: every element carries `step` (0 = v1 prototype), optional `until` (replaced at that step) ----------
 const SPEC = [
@@ -168,7 +201,8 @@ const SPEC = [
   { type: 'box', id: 'inp', step: 3, x: 812, y: AY, w: 250, h: AH, layout: 'col', icon: 'filter', badges: ['03'], title: 'Input guardrails', lines: ['Prompt Shields · PII masking · quote quarantine'] },
   { type: 'box', id: 'cache', step: 4, x: 1122, y: AY, w: 250, h: AH, layout: 'col', icon: 'cache', badges: ['04'], dim: true, title: 'Semantic cache', off: true, lines: ['OFF for customer data · public policy Q&A only, Phase 2'] },
   { type: 'box', id: 'rt', step: 0, until: 7, x: 1432, y: AY, w: 280, h: AH, layout: 'col', icon: 'router', title: 'Router + orchestrator', lines: ['intent · fixed workflows'] },
-  { type: 'box', id: 'rt', step: 7, x: 1432, y: AY, w: 280, h: AH, layout: 'col', icon: 'router', badges: ['07'], title: 'Router + orchestrator', lines: ['intent · fixed workflows · step, time and token budgets'] },
+  { type: 'box', id: 'rt', step: 7, until: 12, x: 1432, y: AY, w: 280, h: AH, layout: 'col', icon: 'router', badges: ['07'], title: 'Router + orchestrator', lines: ['intent · fixed workflows · step, time and token budgets'] },
+  { type: 'box', id: 'rt', step: 12, x: 1432, y: AY, w: 280, h: AH, layout: 'col', icon: 'router', badges: ['07'], title: 'Supervisor agent', lines: ['intent · picks one specialist · budgets · ≤ 2 hops'] },
   { type: 'box', id: 'out', step: 3, x: 1796, y: AY, w: 278, h: AH, layout: 'col', icon: 'guard', badges: ['03'], title: 'Output guardrails', lines: ['numeric + policy checks · groundedness · verify before release'] },
   { type: 'box', id: 'ans', step: 0, x: 2122, y: AY, w: 230, h: AH, layout: 'col', icon: 'chat', ans: true, title: 'Answer to RM', lines: ['citations · facts first · safe decline'] },
 
@@ -187,41 +221,76 @@ const SPEC = [
   { type: 'label', step: 3, kind: 'cyan', x: 1754, y: AM - 36, text: 'draft\nanswer' },
   { type: 'arrow', step: 3, kind: 'cyan', pts: [[R('out'), AM], [2122, AM]] },
 
-  // lane B
-  { type: 'box', id: 'rag', step: 0, until: 5, x: 300, y: BY, w: 480, h: BH, layout: 'row', icon: 'search', title: 'Retrieval / RAG', lines: ['AI Search hybrid + semantic rerank'] },
-  { type: 'box', id: 'rag', step: 5, x: 300, y: BY, w: 480, h: BH, layout: 'row', icon: 'search', badges: ['05'], title: 'Retrieval / RAG', lines: ['AI Search hybrid + semantic rerank', 'filtered by status, date, clearance'] },
-  { type: 'box', id: 'idx', step: 0, x: 300, y: LY, w: 480, h: LH, layout: 'row', icon: 'db', title: 'Vector + keyword index', lines: [] },
-  { type: 'box', id: 'tools', step: 0, until: 1, x: 860, y: BY, w: 400, h: BH, layout: 'row', icon: 'tool', title: 'Bank tools', lines: ['tool-gateway · typed, minimised'] },
-  { type: 'box', id: 'tools', step: 1, x: 860, y: BY, w: 400, h: BH, layout: 'row', icon: 'tool', title: 'Bank tools', lines: ['tool-gateway · entitlement first', 'typed, minimised'] },
-  { type: 'box', id: 'apis', step: 0, until: 1, x: 860, y: LY, w: 400, h: LH, layout: 'row', icon: 'bank', title: 'Bank APIs via APIM', lines: ['CRM · core ODS · LOS · KYC'] },
-  { type: 'box', id: 'apis', step: 1, x: 860, y: LY, w: 400, h: LH, layout: 'row', icon: 'bank', title: 'Bank APIs via APIM', lines: ['CRM · core ODS · LOS · KYC, RM identity enforced'] },
+  // lane B, v1 .. step 11: router -> retrieval and bank tools directly (replaced at step 12)
+  { type: 'box', id: 'tools', step: 0, until: 1, x: 48, y: SY, w: 528, h: SH, layout: 'row', icon: 'tool', title: 'Bank tools', lines: ['tool-gateway · typed, minimised'] },
+  { type: 'box', id: 'tools', step: 1, until: 12, x: 48, y: SY, w: 528, h: SH, layout: 'row', icon: 'tool', title: 'Bank tools', lines: ['tool-gateway · entitlement first', 'typed, minimised'] },
+  { type: 'box', id: 'rag', step: 0, until: 5, x: 600, y: SY, w: 520, h: SH, layout: 'row', icon: 'search', title: 'Retrieval / RAG', lines: ['AI Search hybrid + semantic rerank'] },
+  { type: 'box', id: 'rag', step: 5, until: 12, x: 600, y: SY, w: 520, h: SH, layout: 'row', icon: 'search', badges: ['05'], title: 'Retrieval / RAG', lines: ['AI Search hybrid + semantic rerank', 'filtered by status, date, clearance'] },
+  { type: 'arrow', step: 0, until: 12, kind: 'cyan', both: true, pts: [[1462, AY + AH], [1462, VB1], [312, VB1], [312, SY]] },
+  { type: 'arrow', step: 0, until: 12, kind: 'cyan', both: true, pts: [[1517, AY + AH], [1517, VB2], [860, VB2], [860, SY]] },
+  { type: 'arrow', step: 0, until: 12, kind: 'cyan', both: true, pts: [[312, SY + SH], [312, LY]] },
+  { type: 'arrow', step: 0, until: 12, kind: 'cyan', both: true, pts: [[860, SY + SH], [860, LY]] },
+  { type: 'pill', step: 6, until: 12, x: 460, y: (SY + SH + LY) / 2, text: 'Writes need RM-signed approval' },
+
+  // lane B, always
+  { type: 'box', id: 'idx', step: 0, x: 600, y: LY, w: 520, h: LH, layout: 'row', icon: 'db', title: 'Vector + keyword index', lines: [] },
+  { type: 'box', id: 'apis', step: 0, until: 1, x: 48, y: LY, w: 528, h: LH, layout: 'row', icon: 'bank', title: 'Bank APIs via APIM', lines: ['CRM · core ODS · LOS · KYC'] },
+  { type: 'box', id: 'apis', step: 1, x: 48, y: LY, w: 528, h: LH, layout: 'row', icon: 'bank', title: 'Bank APIs via APIM', lines: ['CRM · core ODS · LOS · KYC, RM identity enforced'] },
   { type: 'box', id: 'mgw', step: 7, until: 8, x: 1392, y: BY, w: 400, h: BH, layout: 'row', icon: 'chip', badges: ['07'], title: 'Model gateway', lines: ['APIM AI gateway · small or large model'] },
   { type: 'box', id: 'mgw', step: 8, x: 1392, y: BY, w: 400, h: BH, layout: 'row', icon: 'chip', badges: ['07', '08'], title: 'Model gateway', lines: ['APIM · small or large model', 'retries, failover if 4 s left'] },
-  { type: 'box', id: 'llm', step: 0, until: 8, x: 1392, y: LY, w: 520, h: LH, layout: 'row', icon: 'spark', title: 'Azure OpenAI', lines: ['Regional, UAE North'] },
-  { type: 'box', id: 'llm', step: 8, x: 1392, y: LY, w: 520, h: LH, layout: 'row', icon: 'spark', title: 'Azure OpenAI primary / secondary', lines: ['Regional, UAE North; degraded mode if both fail'] },
+  { type: 'box', id: 'llm', step: 0, until: 8, x: 1392, y: OY, w: 520, h: OH, layout: 'row', icon: 'spark', title: 'Azure OpenAI', lines: ['Regional, UAE North'] },
+  { type: 'box', id: 'llm', step: 8, x: 1392, y: OY, w: 520, h: OH, layout: 'row', icon: 'spark', title: 'Azure OpenAI primary / secondary', lines: ['Regional, UAE North; degraded mode if both fail'] },
   { type: 'box', id: 'hitl', step: 6, x: 1960, y: BY, w: 392, h: BH, layout: 'row', icon: 'human', badges: ['06'], title: 'Human in the loop', lines: ['RM approves every write · Key Vault signs · declines go to the credit desk'] },
 
-  { type: 'arrow', step: 0, kind: 'cyan', both: true, pts: [[1462, AY + AH], [1462, F1], [600, F1], [600, BY]] },
-  { type: 'arrow', step: 0, kind: 'cyan', both: true, pts: [[1517, AY + AH], [1517, F2], [1060, F2], [1060, BY]] },
-  { type: 'arrow', step: 0, until: 7, kind: 'cyan', both: true, pts: [[1572, AY + AH], [1572, LY]] },
+  { type: 'arrow', step: 0, until: 7, kind: 'cyan', both: true, pts: [[1572, AY + AH], [1572, OY]] },
   { type: 'arrow', step: 7, kind: 'cyan', both: true, pts: [[1572, AY + AH], [1572, BY]] },
-  { type: 'arrow', step: 7, kind: 'cyan', both: true, pts: [[1572, BY + BH], [1572, LY]] },
-  { type: 'arrow', step: 0, kind: 'cyan', both: true, pts: [[600, BY + BH], [600, LY]] },
-  { type: 'arrow', step: 0, kind: 'cyan', both: true, pts: [[1200, BY + BH], [1200, LY]] },
-  { type: 'pill', step: 6, x: 1036, y: BY + BH + 31, text: 'Writes need RM-signed approval' },
+  { type: 'arrow', step: 7, kind: 'cyan', both: true, pts: [[1572, BY + BH], [1572, OY]] },
   { type: 'arrow', step: 6, kind: 'amber', pts: [[1672, AY + AH], [1672, F1], [2156, F1], [2156, BY]] },
   { type: 'label', step: 6, kind: 'amber', x: 1914, y: F1 + 20, text: 'APPROVE / ESCALATE' },
   { type: 'arrow', step: 6, kind: 'amber', pts: [[2156, BY + BH], [2156, CY]] },
-  { type: 'label', step: 6, kind: 'amber', x: 2172, y: 860, text: 'sign + audit', align: 'left' },
+  { type: 'label', step: 6, kind: 'amber', x: 2172, y: 1000, text: 'sign + audit', align: 'left' },
+
+  // lane B, step 12: supervisor -> one specialist agent -> MCP gateway (APIM) -> MCP servers (tool-gateway)
+  { type: 'box', id: 'brief', step: 12, x: AG.brief[0], y: AGY, w: AG.brief[1], h: AGH, layout: 'row', icon: 'agent', title: 'Brief agent', lines: ['UC1 customer brief · gen-large', 'tools: customer-data · memory'] },
+  { type: 'box', id: 'policy', step: 12, x: AG.policy[0], y: AGY, w: AG.policy[1], h: AGH, layout: 'row', icon: 'agent', title: 'Policy agent', lines: ['UC2 cited answers · gen-small / large', 'tools: policy-search only'] },
+  { type: 'box', id: 'follow', step: 12, x: AG.follow[0], y: AGY, w: AG.follow[1], h: AGH, layout: 'row', icon: 'agent', title: 'Follow-up agent', lines: ['UC3 notes to drafts · gen-small', 'tools: customer-data · crm-drafts'] },
+  { type: 'box', id: 'mcpgw', step: 12, x: 48, y: MGY, w: 1262, h: MGH, layout: 'row', icon: 'plug', badges: ['12'], title: 'MCP gateway (APIM)', lines: ['user token + agent token · tools/list filtered per agent · per-agent limits'] },
+  { type: 'box', id: 'cdata', step: 12, x: SV.cdata[0], y: SY, w: SV.cdata[1], h: SH, layout: 'row', icon: 'user', title: 'customer-data', lines: ['read only · minimised', 'entitlement first'] },
+  { type: 'box', id: 'crm', step: 12, x: SV.crm[0], y: SY, w: SV.crm[1], h: SH, layout: 'row', icon: 'doc', title: 'crm-drafts', lines: ['create drafts only', 'no commit tool'] },
+  { type: 'box', id: 'ps', step: 12, x: SV.ps[0], y: SY, w: SV.ps[1], h: SH, layout: 'row', icon: 'search', badges: ['05'], title: 'policy-search', lines: ['AI Search hybrid + rerank', 'status · date · clearance'] },
+  { type: 'box', id: 'mem', step: 12, x: SV.mem[0], y: SY, w: SV.mem[1], h: SH, layout: 'row', icon: 'db', title: 'memory', lines: ['episodic recall', 'own RM only'] },
+
+  ...['brief', 'policy', 'follow'].map(k => ({ type: 'arrow', step: 12, kind: 'cyan', both: true, pts: [[1462, AY + AH], [1462, BUS], [AC(k), BUS], [AC(k), AGY]] })),
+  { type: 'label', step: 12, kind: 'cyan', x: 1000, y: BUS - 18, text: 'hands off to one specialist' },
+  ...['brief', 'policy', 'follow'].map(k => ({ type: 'arrow', step: 12, kind: 'cyan', both: true, pts: [[AC(k), AGY + AGH], [AC(k), MGY]] })),
+  { type: 'pill', step: 12, style: 'id', x: (AC('policy') + AC('follow')) / 2, y: (AGY + AGH + MGY) / 2, text: 'RM (OIDC/OBO) ∩ agent service principal\n∩ pod managed identity' },
+  { type: 'arrow', step: 12, kind: 'cyan', both: true, pts: [[AG.follow[0] + AG.follow[1], AGY + 54], [1392, AGY + 54]] },
+  ...['cdata', 'crm', 'ps', 'mem'].map(k => ({ type: 'arrow', step: 12, kind: 'cyan', both: true, pts: [[SC(k), MGY + MGH], [SC(k), SY]] })),
+  { type: 'label', step: 12, kind: 'cyan', x: (SC('crm') + SC('ps')) / 2, y: (MGY + MGH + SY) / 2, text: 'MCP servers · tool-gateway' },
+  { type: 'arrow', step: 12, kind: 'cyan', both: true, pts: [[SC('cdata'), SY + SH], [SC('cdata'), LY]] },
+  { type: 'arrow', step: 12, kind: 'cyan', both: true, pts: [[520, SY + SH], [520, LY]] },
+  { type: 'arrow', step: 12, kind: 'cyan', both: true, pts: [[SC('ps'), SY + SH], [SC('ps'), LY]] },
+  { type: 'pill', step: 6, from: 12, x: (SC('cdata') + 520) / 2, y: (SY + SH + LY) / 2, text: 'Writes need RM-signed approval' },
+  { type: 'arrow', step: 12, until: 13, kind: 'violet', both: true, pts: [[XMEM, SY + SH], [XMEM, CY]] },
 
   // lane C
-  { type: 'box', id: 'ing', step: 5, x: 48, y: CY, w: 712, h: CH, layout: 'row', icon: 'doc', badges: ['05'], title: 'Knowledge ingestion', lines: ['policy DMS publish → parse → PII scan → chunk by clause → embed', 'version + effective date'] },
-  { type: 'box', id: 'sess', step: 0, x: 1392, y: CY, w: 520, h: CH, layout: 'row', icon: 'db', title: 'Session + state store', lines: ['Cosmos DB · sessions, drafts, approvals, outbox · TTL'] },
+  { type: 'box', id: 'ing', step: 5, until: 13, x: 48, y: CY, w: 672, h: CH, layout: 'row', icon: 'doc', badges: ['05'], title: 'Knowledge ingestion', lines: ['policy DMS publish → parse → PII scan → chunk by clause → embed', 'version + effective date'] },
+  { type: 'box', id: 'ing', step: 5, from: 13, x: 48, y: CY, w: 672, h: CH, layout: 'row', icon: 'doc', badges: ['05'], title: 'Knowledge ingestion', lines: ['policy DMS publish → parse → PII scan → chunk by clause → embed', 'version + effective date', 'semantic memory: policies'] },
+  { type: 'box', id: 'sess', step: 0, until: 13, x: 1040, y: CY, w: 600, h: CH, layout: 'row', icon: 'db', title: 'Session + state store', lines: ['Cosmos DB · sessions, drafts, approvals, outbox · TTL'] },
   { type: 'box', id: 'sec', step: 6, x: 1960, y: CY, w: 392, h: CH, layout: 'row', icon: 'lock', title: 'Secure storage', lines: ['Key Vault HSM · immutable audit (WORM) · encrypted content'] },
-  { type: 'arrow', step: 5, kind: 'violet', pts: [[700, CY], [700, LY + LH]] },
-  { type: 'label', step: 5, kind: 'violet', x: 716, y: 968, text: 'publish event: re-embed + supersede', align: 'left' },
-  { type: 'arrow', step: 5, kind: 'violet', pts: [[760, CY + 70], [XINV, CY + 70], [XINV, AY + AH]] },
-  { type: 'label', step: 5, kind: 'violet', x: 1050, y: CY + 50, text: 'invalidate cache' },
+  { type: 'arrow', step: 5, kind: 'violet', pts: [[660, CY], [660, LY + LH]] },
+  { type: 'label', step: 5, kind: 'violet', x: 556, y: 1243, text: 'publish event:\nre-embed + supersede' },
+  { type: 'arrow', step: 5, kind: 'violet', pts: [[700, CY], [700, YINV], [XINV, YINV], [XINV, AY + AH]] },
+  { type: 'label', step: 5, kind: 'violet', x: XINV + 12, y: 1110, text: 'invalidate cache', align: 'left' },
+
+  // lane C, step 13: memory (plan §3.8); semantic memory = the policy index, working memory = graph state in the request
+  { type: 'group', id: 'memory', step: 13, x: MEMX, y: CY, w: MEMW, h: CH, icon: 'db', badges: ['13'], title: 'Memory', sub: 'Cosmos DB, encrypted · per RM, never across RMs' },
+  { type: 'box', id: 'm-ckpt', step: 13, mini: true, x: mbx(0), y: CY + MEMHD, w: MBW, h: CH - MEMHD - 10, layout: 'col', title: 'Checkpointer', lines: ['graph state per node', 'pause / resume'] },
+  { type: 'box', id: 'm-sess', step: 13, mini: true, x: mbx(1), y: CY + MEMHD, w: MBW, h: CH - MEMHD - 10, layout: 'col', title: 'Session', lines: ['turns + summary', '24 h'] },
+  { type: 'box', id: 'm-epi', step: 13, mini: true, x: mbx(2), y: CY + MEMHD, w: MBW, h: CH - MEMHD - 10, layout: 'col', title: 'Episodic', lines: ['approved history per RM and customer', '90 days'] },
+  { type: 'box', id: 'm-proc', step: 13, mini: true, x: mbx(3), y: CY + MEMHD, w: MBW, h: CH - MEMHD - 10, layout: 'col', title: 'Procedural', lines: ['prompts, graphs, tool schemas', 'versioned'] },
+  { type: 'box', id: 'm-prof', step: 13, mini: true, x: mbx(4), y: CY + MEMHD, w: MBW, h: CH - MEMHD - 10, layout: 'col', title: 'Profile', lines: ['RM preferences'] },
+  { type: 'arrow', step: 13, kind: 'violet', both: true, pts: [[XMEM, SY + SH], [XMEM, CY + MEMHD]] },
 
   // lane D
   { type: 'box', id: 'obs', step: 10, x: 48, y: DY, w: 546, h: DH, layout: 'row', icon: 'chart', badges: ['10'], title: 'Observability', lines: ['traces · p95 · tokens · cost · alerts · metadata only'] },
@@ -231,7 +300,13 @@ const SPEC = [
 ];
 
 const BLOCKS = ['', 'Authentication & authorization', 'Rate limiting', 'Guardrails', 'Semantic caching', 'Knowledge freshness',
-  'Human in the loop', 'Model routing', 'Fault tolerance & fallback', 'Scaling', 'Observability', 'Evals & safe releases'];
+  'Human in the loop', 'Model routing', 'Fault tolerance & fallback', 'Scaling', 'Observability', 'Evals & safe releases',
+  'Agent identity + MCP gateway', 'Memory'];
+// caption sub-line where the list of added elements would be too long
+const CAPSUB = {
+  12: 'SME RM Copilot · supervisor + brief, policy and follow-up agents · MCP gateway (APIM) · MCP servers · RM ∩ agent ∩ pod identity on every tool call',
+  13: 'SME RM Copilot · memory: checkpointer · session · episodic · procedural · profile (semantic = policy index)',
+};
 
 const COLORS = { cyan: '#22D3EE', amber: '#F5B82E', violet: '#B98DFF' };
 const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -241,18 +316,24 @@ function readStep() {
   const a = document.documentElement.dataset.step;
   const v = q !== null ? q : (a !== undefined ? a : null);
   if (v === null || v === '' || isNaN(+v)) return null;
-  return Math.max(0, Math.min(11, Math.round(+v)));
+  return Math.max(0, Math.min(LAST, Math.round(+v)));
 }
 
 function renderStep(step) {
-  const N = step === null ? 11 : step;
+  const N = step === null ? LAST : step;
   const isNew = el => step !== null && el.step === step;
-  const vis = el => el.step <= N && (el.until === undefined || N < el.until);
+  const vis = el => el.step <= N && (el.from === undefined || N >= el.from) && (el.until === undefined || N < el.until);
   const layer = document.getElementById('layer');
   let html = '';
   for (const l of LANES) {
     html += `<div class="lane" style="left:24px;top:${l.y}px;width:2352px;height:${l.h}px"></div>`;
     html += `<div class="lanehead obstacle" style="left:44px;top:${l.y + 16}px"><span class="c">${l.k}</span><span class="l">${l.name}</span></div>`;
+  }
+  // groups (frames drawn under wires and boxes)
+  for (const g of SPEC.filter(e => e.type === 'group' && vis(e))) {
+    const badges = (g.badges || []).map(n => `<span class="badge">${n}</span>`).join('');
+    html += `<div class="group${isNew(g) ? ' new' : ''}" data-id="${g.id}" style="left:${g.x}px;top:${g.y}px;width:${g.w}px;height:${g.h}px">` +
+      `<div class="ghead"><svg class="ic"><use href="#i-${g.icon}"/></svg><span class="gt">${esc(g.title)}</span>${badges}<span class="gs">${esc(g.sub)}</span></div></div>`;
   }
   // wires
   let defs = '';
@@ -268,16 +349,16 @@ function renderStep(step) {
       (a.kind === 'violet' ? ' stroke-dasharray="10 7"' : '') +
       ` marker-end="url(#ah-${a.kind})"` + (a.both ? ` marker-start="url(#ah-${a.kind})"` : '') + '/>';
   }
-  html += `<svg id="wires" width="2400" height="1500"><defs>${defs}<filter id="blur"><feGaussianBlur stdDeviation="3"/></filter></defs>` +
+  html += `<svg id="wires" width="${W}" height="${H}"><defs>${defs}<filter id="blur"><feGaussianBlur stdDeviation="3"/></filter></defs>` +
           `<g filter="url(#blur)">${glow}</g>${halo}${lines}</svg>`;
   // boxes
   for (const b of SPEC.filter(e => e.type === 'box' && vis(e))) {
-    const cls = ['box', b.layout, b.dim ? 'dim' : '', b.ans ? 'ans' : '', isNew(b) ? 'new' : ''].join(' ');
+    const cls = ['box', b.layout, b.mini ? 'mini' : '', b.dim ? 'dim' : '', b.ans ? 'ans' : '', isNew(b) ? 'new' : ''].join(' ');
     const badges = (b.badges || []).map(n => `<span class="badge">${n}</span>`).join('');
     const pad = b.layout === 'row' && b.badges ? (b.badges.length * 40 + 4) : 0;
     const title = `<div class="t">${esc(b.title)}${b.off ? '<span class="offtag">OFF</span>' : ''}</div>`;
     const det = b.lines.map(s => `<div class="d">${esc(s)}</div>`).join('');
-    const icon = `<svg class="ic"><use href="#i-${b.icon}"/></svg>`;
+    const icon = b.icon ? `<svg class="ic"><use href="#i-${b.icon}"/></svg>` : '';
     const inner = b.layout === 'col'
       ? `${icon}${title}${det}`
       : `${icon}<div class="tx" style="padding-right:${pad}px">${title}${det}</div>`;
@@ -285,7 +366,7 @@ function renderStep(step) {
   }
   // labels and pills (x,y = centre unless align left)
   for (const t of SPEC.filter(e => (e.type === 'label' || e.type === 'pill') && vis(e))) {
-    const cls = (t.type === 'pill' ? 'pill' : 'lbl ' + t.kind) + (isNew(t) ? ' new' : '');
+    const cls = (t.type === 'pill' ? 'pill' + (t.style ? ' ' + t.style : '') : 'lbl ' + t.kind) + (isNew(t) ? ' new' : '');
     const tf = t.align === 'left' ? 'translate(0,-50%)' : 'translate(-50%,-50%)';
     const txt = esc(t.text).replace('\n', '<br>');
     html += `<div class="${cls}" style="left:${t.x}px;top:${t.y}px;transform:${tf};text-align:center">${txt}</div>`;
@@ -302,15 +383,15 @@ function renderStep(step) {
     document.getElementById('capchip').textContent = step === 0 ? 'v1' : 'STEP ' + two;
     document.getElementById('capmain').textContent = step === 0 ? 'v1: the prototype (works in the demo)' : `Step ${two} · ${BLOCKS[step]}`;
     const added = [];
-    for (const e of SPEC) if (e.step === step && (e.type === 'box' || e.type === 'pill')) {
-      const n = e.type === 'box' ? e.title : e.text;
+    for (const e of SPEC) if (e.step === step && e.from === undefined && (e.type === 'box' || e.type === 'pill' || e.type === 'group')) {
+      const n = e.type === 'pill' ? e.text : e.title;
       if (!added.includes(n)) added.push(n);
     }
     document.getElementById('capsub').textContent = step === 0
       ? 'SME RM Copilot · RM → orchestrator → retrieval, bank tools and one model → answer; the building blocks are added next'
-      : 'SME RM Copilot · added in this step: ' + added.join(' · ');
+      : CAPSUB[step] || 'SME RM Copilot · added in this step: ' + added.join(' · ');
     let dots = '';
-    for (let i = 0; i <= 11; i++) dots += `<i class="${i < step ? 'done' : i === step ? 'now' : ''}">${i === 0 ? 'v1' : String(i).padStart(2, '0')}</i>`;
+    for (let i = 0; i <= LAST; i++) dots += `<i class="${i < step ? 'done' : i === step ? 'now' : ''}">${i === 0 ? 'v1' : String(i).padStart(2, '0')}</i>`;
     document.getElementById('capdots').innerHTML = dots;
     document.title = step === 0 ? 'Complete architecture · v1' : 'Complete architecture · step ' + two;
   }
@@ -322,10 +403,13 @@ function checkLayout() {
   const cv = document.getElementById('canvas').getBoundingClientRect();
   const rr = el => { const r = el.getBoundingClientRect(); return { x: r.left - cv.left, y: r.top - cv.top, w: r.width, h: r.height, el }; };
   const ov = (a, b, m = 0) => a.x < b.x + b.w + m && b.x < a.x + a.w + m && a.y < b.y + b.h + m && b.y < a.y + a.h + m;
+  const inside = (a, b) => a.x >= b.x && a.y >= b.y && a.x + a.w <= b.x + b.w && a.y + a.h <= b.y + b.h;
   const name = el => el.dataset.id || el.textContent.trim().slice(0, 40);
   const boxes = [...document.querySelectorAll('#layer .box')].map(rr);
+  const groups = [...document.querySelectorAll('#layer .group')].map(rr);
   const tags = [...document.querySelectorAll('#layer .lbl, #layer .pill')].map(rr);
-  const heads = [...document.querySelectorAll('#layer .lanehead')].map(rr);
+  // obstacles: lane headings and group headings (icon, title, badge, subtitle)
+  const heads = [...document.querySelectorAll('#layer .lanehead, #layer .ghead > *')].map(rr);
   // boxes: overlap, overflow, canvas bounds
   for (let i = 0; i < boxes.length; i++) {
     for (let j = i + 1; j < boxes.length; j++) if (ov(boxes[i], boxes[j], 4)) issues.push(`box overlap: ${name(boxes[i].el)} / ${name(boxes[j].el)}`);
@@ -335,7 +419,21 @@ function checkLayout() {
     const b = el.getBoundingClientRect(); for (const c of el.querySelectorAll('.t, .d, .badge, svg.ic')) {
       const r = c.getBoundingClientRect(); if (r.right > b.right - 1 || r.bottom > b.bottom - 1) issues.push(`content outside box ${name(el)}: "${c.textContent.slice(0, 30)}"`);
     }
-    for (const h of heads) if (ov(boxes[i], h, 4)) issues.push(`box ${name(el)} over a lane heading`);
+    for (const h of heads) if (ov(boxes[i], h, 4)) issues.push(`box ${name(el)} over a heading "${name(h.el)}"`);
+    // a box is either fully inside a group (with a margin) or clear of it
+    for (const g of groups) {
+      const gin = { x: g.x + 6, y: g.y + 6, w: g.w - 12, h: g.h - 12 };
+      if (ov(boxes[i], g, 4) && !inside(boxes[i], gin)) issues.push(`box ${name(el)} crosses group ${name(g.el)}`);
+    }
+  }
+  // groups: overflow of the heading, overlap with each other
+  for (let i = 0; i < groups.length; i++) {
+    const g = groups[i].el, hd = g.querySelector('.ghead'), gr = groups[i];
+    if (hd.scrollWidth > hd.clientWidth + 1) issues.push(`group heading too wide: ${name(g)}`);
+    for (const c of hd.children) { const r = rr(c); if (!inside(r, gr)) issues.push(`group heading outside group ${name(g)}`); }
+    const kids = [...hd.children].map(rr);
+    for (let a = 0; a < kids.length; a++) for (let b2 = a + 1; b2 < kids.length; b2++) if (ov(kids[a], kids[b2], 2)) issues.push(`group heading items overlap in ${name(g)}`);
+    for (let j = i + 1; j < groups.length; j++) if (ov(groups[i], groups[j], 4)) issues.push('groups overlap');
   }
   // badges inside a box must not overlap the title
   for (const el of document.querySelectorAll('#layer .box')) {
@@ -346,7 +444,7 @@ function checkLayout() {
         for (const b of bs) if (ov(r, b, 2)) issues.push(`badge overlaps text in ${name(el)}: "${t.textContent.slice(0, 30)}"`); }
     }
   }
-  // wires: segments must not pass through boxes, lane headings or labels
+  // wires: segments must not pass through boxes, headings or labels
   const segs = [];
   for (const p of document.querySelectorAll('#wires path.wire')) {
     const pts = JSON.parse(p.dataset.pts);
@@ -359,20 +457,29 @@ function checkLayout() {
   for (const s of segs) {
     for (const b of boxes) { const inner = { x: b.x + 3, y: b.y + 3, w: b.w - 6, h: b.h - 6 }; if (ov(s, inner)) issues.push(`wire ${s.s} passes through box ${name(b.el)}`); }
     for (const t of tags) if (ov(s, t, 3)) issues.push(`wire ${s.s} touches label "${name(t.el)}"`);
-    for (const h of heads) if (ov(s, h, 3)) issues.push(`wire ${s.s} crosses lane heading`);
+    for (const h of heads) if (ov(s, h, 3)) issues.push(`wire ${s.s} crosses heading "${name(h.el)}"`);
   }
   // labels: not on boxes, headings or each other; inside canvas
   for (let i = 0; i < tags.length; i++) {
     for (const b of boxes) if (ov(tags[i], b, 4)) issues.push(`label "${name(tags[i].el)}" overlaps box ${name(b.el)}`);
-    for (const h of heads) if (ov(tags[i], h, 4)) issues.push(`label "${name(tags[i].el)}" overlaps lane heading`);
+    for (const g of groups) if (ov(tags[i], g, 4)) issues.push(`label "${name(tags[i].el)}" overlaps group ${name(g.el)}`);
+    for (const h of heads) if (ov(tags[i], h, 4)) issues.push(`label "${name(tags[i].el)}" overlaps heading`);
     for (let j = i + 1; j < tags.length; j++) if (ov(tags[i], tags[j], 4)) issues.push(`labels overlap: "${name(tags[i].el)}" / "${name(tags[j].el)}"`);
   }
-  // fonts: nothing under 15px; everything inside the canvas
+  // fonts: nothing under 15px, box and group titles at least 22px; everything inside the canvas
   for (const el of document.querySelectorAll('#canvas *')) {
     if (el.closest('svg') || getComputedStyle(el).display === 'none' || el.offsetParent === null) continue;
     const hasText = [...el.childNodes].some(n => n.nodeType === 3 && n.textContent.trim());
     if (hasText && parseFloat(getComputedStyle(el).fontSize) < 15) issues.push(`font < 15px: "${el.textContent.trim().slice(0, 30)}"`);
-    const r = rr(el); if (r.w && (r.x < 0 || r.y < 0 || r.x + r.w > 2400 || r.y + r.h > 1500)) issues.push(`outside canvas: ${el.className}`);
+    if (hasText && el.matches('.box .t, .group .gt') && parseFloat(getComputedStyle(el).fontSize) < 22) issues.push(`title < 22px: "${el.textContent.trim().slice(0, 30)}"`);
+    const r = rr(el); if (r.w && (r.x < 0 || r.y < 0 || r.x + r.w > W || r.y + r.h > H)) issues.push(`outside canvas: ${el.className}`);
+  }
+  // caption bar (step view): main line and dots must not collide
+  const cap = document.getElementById('cap');
+  if (getComputedStyle(cap).display !== 'none') {
+    const m = rr(document.getElementById('capmain')), d = rr(document.getElementById('capdots')), c = rr(cap);
+    if (m.x + m.w > d.x - 8) issues.push('caption text runs into the step dots');
+    if (d.x + d.w > c.x + c.w) issues.push('step dots outside the caption bar');
   }
   return { boxes: boxes.length, wires: segs.length, labels: tags.length, issues };
 }
