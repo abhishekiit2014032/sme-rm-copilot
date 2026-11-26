@@ -1,6 +1,6 @@
 # SME RM Copilot on Azure: delivery plan and architecture baseline
 
-Status: **v2.6 baseline (v2.4 after the ARB review in `07-review-log.md`; v2.6 adds agents, the MCP gateway and memory)** · Owner: solution architecture · Date: 26 Nov 2026 · Presentation: Fri 27 Nov 2026
+Status: **v2.7 baseline (v2.4 after the ARB review in `07-review-log.md`; v2.6 adds agents, the MCP gateway and memory; v2.7 the evaluation architecture)** · Owner: solution architecture · Date: 26 Nov 2026 · Presentation: Fri 27 Nov 2026
 
 This file is the single source of truth for every workstream. Docs, deck, prototype and code must use the
 names, numbers and decisions below. If a workstream needs to change one, it changes it here first and logs it in
@@ -161,6 +161,30 @@ descriptions and schemas are versioned and hashed so a changed description is re
 Rules: customer facts are never memorised (read live); no memory crosses RMs; every memory item carries provenance
 (source, author, time, version); quarantined or injected text is never written to memory (C26); procedural memory is
 never changed at runtime by the model; erasure crypto-shreds checkpoints and episodes with the customer key.
+
+### 3.9 Evaluation architecture: runtime, online, scheduled and release (v2.7)
+Four tiers. Metric names follow RAGAS (faithfulness, answer relevancy, context precision, context recall, answer
+correctness) so offline and online numbers mean the same thing (ADR-027).
+
+| Tier | When | What is evaluated | How | Outcome |
+|---|---|---|---|---|
+| 1 · Runtime gates | Inline, every request | **Pre-generation retrieval gate** (UC2): best reranked passage ≥ the relevance threshold and context relevance (share of kept passages above the keep threshold) ≥ 0.5, else **decline without calling the model**. UC1: the CRM profile must be present, else no brief. **Post-generation**: faithfulness (each claim supported by its cited passage, ≥ 0.9 of claims and every claim cited), answer relevancy (answer addresses the question, ≥ 0.7), numeric and policy checks. **Budget guards**: tokens, steps and deadline | Deterministic and lexical checks plus embedding similarity; **no LLM judge on the hot path** (latency, cost) | Release, retry once if ≥ 4 s remain, decline, or degrade; every gate outcome counted |
+| 2 · Online sampled | Near real time, asynchronous (minutes) | RAGAS without a reference: faithfulness, answer relevancy, context precision, context utilisation; plus RM thumbs-up or down | In-region judge (`gen-large`) on 5% of UC1 and UC2 answers (cap 200/day), reading the audit content store | Rolling 1 h scores to Grafana; alert if faithfulness < 0.90 or answer relevancy < 0.80 for 1 h |
+| 3 · Scheduled | Nightly, weekly, monthly | Nightly golden-set regression against the production configuration (all RAGAS metrics with references: context recall, answer correctness); weekly drift (score distributions, decline and no-result rates, token and latency trends); monthly red team (≥ 1,000 attacks) | Pre-prod Azure OpenAI, `eval-runner` job | Report to the product owner and MRM; a regression opens an incident and can trip the kill switch |
+| 4 · Release gate | CI, every prompt, model, tool or index change | Full golden set (≥ 300 UC2, ≥ 50 UC1, ≥ 50 UC3) | RAGAS + security + replayed latency and tokens | Ship only if every threshold below holds |
+
+Release thresholds (95% Wilson lower bound where a rate): faithfulness ≥ 0.95, citation accuracy ≥ 0.95, context
+precision ≥ 0.85, context recall ≥ 0.90, answer relevancy ≥ 0.85, answer correctness ≥ 0.85, correct-decline rate
+≥ 0.90, entitlement leaks = 0, numeric mismatches = 0, injection success = 0, replayed p95 latency and p95 tokens per
+request within the §5 budgets. Thresholds are tuned on the golden set and owned by MRM; the runtime thresholds are
+pinned in App Configuration and change only through this gate.
+
+**Runtime operations metrics (every request, metadata only).** Latency p50/p95/p99 per use case and **per stage**
+(edge, entitlement, tool fan-out, retrieval, guardrails, each model call, checks); **tokens per request** (input and
+output, per use case, agent and deployment) and tokens per RM per day; estimated cost per request and per day (AED,
+from a price table in App Configuration); gate outcomes (passed, retried, declined, degraded); budget exceedances.
+Alerts: p95 above budget for 15 min, p95 tokens per request > 1.2× the 7-day baseline, daily cost > 80% of budget,
+retrieval-gate decline rate up 5 points on its 7-day baseline, faithfulness gate failures > 5% for 1 h.
 
 ## 4. Data flows (the deck and the prototype must match these numbers)
 
@@ -372,3 +396,7 @@ fixes. 4. Verification: tests, evals, stack smoke and load run, slide layout, pr
   ADR-026; ADR-005 amended.
 - v2.6a (26 Nov): ADR feedback. Orchestrator Key Vault role limited to memory-key wrap/unwrap; supervisor routing shares the UC2 rewrite call and uses rules where the intent is known, so the latency budget is unchanged; ADR-019 gains the memory containers.
 - v2.6b (26 Nov): §3.7 wording: two-token baseline (RM token forwarded unchanged plus the agent's own token); actor claim only once agent OBO is confirmed. `crm-drafts` creates drafts in Cosmos (create only); web-bff keeps edits and approval. Runbooks RB-17 to RB-19 added.
+- v2.7 (26 Nov): owner review. Added §3.9 evaluation architecture in four tiers (runtime gates including a
+  pre-generation retrieval gate and post-generation faithfulness and answer-relevancy checks; online sampled RAGAS
+  metrics with an in-region judge; scheduled nightly, weekly and monthly evals; release gate), RAGAS release
+  thresholds, and runtime operations metrics (per-stage p95, tokens per request, cost) with alerts. ADR-027.
