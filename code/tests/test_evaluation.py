@@ -59,7 +59,9 @@ class Formulas(unittest.TestCase):
     def test_retrieval_gate_follows_the_lld_examples(self):
         self.assertEqual(retrieval_gate(hits(3.1, 2.6), LLD)["context_relevance"], 1.0)
         g = retrieval_gate(hits(2.2, 1.9, 1.6, 1.4, 1.2), LLD)
-        self.assertEqual((g["passed"], g["context_relevance"], g["sub_reason"]), (False, 0.2, "low_context_relevance"))
+        # Plan v2.7b: low context relevance is flagged, not declined; only the kept passage goes to the model.
+        self.assertEqual((g["passed"], g["context_relevance"], g["sub_reason"]), (True, 0.2, "low_context_relevance"))
+        self.assertEqual([h["score"] for h in g["kept"]], [2.2])
         self.assertEqual(retrieval_gate(hits(1.7, 1.5), LLD)["sub_reason"], "top_below_threshold")
         self.assertEqual(retrieval_gate(hits(3.0, 0.9), LLD)["candidates"], [hits(3.0)[0]])  # below the candidate floor
 
@@ -262,8 +264,11 @@ class StackEvaluation(unittest.TestCase):
         self.assertEqual(self.layla.ask(CAREFUL_Q)["status"], "answered")
         self.stack.publish_eval_config({"rmc:orchestrator:gate:retrieval:keep_margin": 0.25, "rmc:orchestrator:gate:retrieval:context_relevance_min": 0.6,
                                         "rmc:orchestrator:gate:version": "gates/test", "rmc:orchestrator:gate:faithfulness:min": 5})
-        r = self.layla.ask(CAREFUL_Q)  # (8.7, 4.31): only the top passage is kept -> CRel 0.5 < 0.6
-        self.assertEqual((r["status"], r["sub_reason"], r["evaluation"]["gate_version"]), ("declined", "low_context_relevance", "gates/test"))
+        r = self.layla.ask(CAREFUL_Q)  # (8.7, 4.31): only the top passage is kept -> CRel 0.5 < 0.6: flagged, still answered
+        self.assertEqual((r["status"], r["evaluation"]["gate_version"]), ("answered", "gates/test"))
+        rg = next(g for g in r["evaluation"]["gates"] if g["gate"] == "retrieval")
+        self.assertEqual(rg["outcome"], "passed")
+        self.assertEqual(len(r.get("source_ids", [])) if r.get("source_ids") is not None else 1, 1)  # one passage reached the model
         self.assertIn('rmc_gate_config_rejected_total{key="faithfulness_min"}', self.metrics("orchestrator"))  # 5 is out of range
 
     def test_online_eval_worker_samples_scores_and_alerts(self):

@@ -91,8 +91,7 @@ Adopt **option 4**: four evaluation tiers with RAGAS metric definitions througho
 
 1. **Tier 1, runtime gates (inline, every request, no LLM judge).**
    - **Pre-generation retrieval gate (UC2).** After rerank, the best passage must score ≥ the relevance threshold
-     (`rerankerScore` 2.0) and context relevance (share of candidate passages at or above the keep threshold) must be
-     ≥ 0.5; otherwise the orchestrator **declines without calling the model** (`WEAK_RETRIEVAL`) and offers routing
+     (`rerankerScore` 2.0); otherwise the orchestrator **declines without calling the model** (`WEAK_RETRIEVAL`) and offers routing
      to the credit or product desk. UC1: the CRM profile must be present, else no brief (as today).
    - **Post-generation gates.** Faithfulness: every claim (sentence) cites a returned passage and ≥ 0.9 of claims are
      supported (lexical content-word support, embedding similarity to the cited passage, no unsupported number).
@@ -138,7 +137,7 @@ Adopt **option 4**: four evaluation tiers with RAGAS metric definitions througho
 
 | Metric | Definition (02 §17.1) | Needs reference? | Tier where computed | Threshold | Owner |
 |---|---|---|---|---|---|
-| Context relevance (runtime) | Share of candidate passages with reranker score ≥ the keep threshold | No | 1 | ≥ 0.5, and best passage ≥ 2.0, else decline before generation | MRM (threshold), architecture (tuning) |
+| Context relevance (runtime) | Share of candidate passages with reranker score ≥ the keep threshold | No | 1 | Monitored: alert below 0.5 (weak passages are dropped before generation); the decline rule is best passage < 2.0 | MRM (threshold), architecture (tuning) |
 | Faithfulness | Claims supported by the retrieved context ÷ claims in the answer | No | 1 (lexical and embedding approximation), 2, 3, 4 (judge) | T1 ≥ 0.9 and every claim cited; T2 alert < 0.90 over 1 h; T4 faithful-answer rate ≥ 0.95 (Wilson lower bound) | MRM |
 | Answer relevancy | Mean similarity between the question and questions the judge generates from the answer | No | 1 (embedding approximation), 2, 3, 4 | T1 ≥ 0.7; T2 alert < 0.80 over 1 h; T4 ≥ 0.85 | MRM |
 | Context precision | Rank-weighted precision of relevant passages in the top k | T2: no (judged against the question); T3, T4: yes (labelled passages) | 2, 3, 4 | T4 ≥ 0.85; T2 trend in the weekly drift report | Architecture (retrieval), MRM |
@@ -182,8 +181,9 @@ on the planned set sizes: 293 of 300 for a 0.95 bound; for the correct-decline r
 - Runtime approximations (lexical and embedding) are weaker than a judge; some unfaithful answers pass tier 1 and are
   only seen by tier 2 on a 5% sample. Accepted because tier 1 is tuned to decline when in doubt and every release is
   gated on the judge-based metrics.
-- The retrieval gate adds a second threshold (context relevance) that can raise the decline rate; it is tuned on the
-  golden set and its decline rate is alerted.
+- Context relevance was first a second decline threshold; the prototype showed it wrongly declined a strong clause
+  with weak neighbours, so it is now monitored only (plan v2.7b). The decline rate of the single remaining
+  threshold is tuned on the golden set and alerted.
 - A judge and its prompts are a model under MRM; calibration costs SME time each quarter.
 - More to own: the online worker, its APIM product, judge prompts, alert rules and a price table.
 - Pilot volume makes online windows noisy; alerts need sample-size guards and will be slower than at scale.

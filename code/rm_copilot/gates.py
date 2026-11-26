@@ -95,9 +95,12 @@ def retrieval_gate(hits: list[dict], th: dict) -> dict:
         return {"passed": False, "sub_reason": "top_below_threshold", "top": top, "context_relevance": 0.0, "candidates": cand, "kept": []}
     tau = max(th["keep_min"], top - th["keep_margin"])
     kept = [h for h in cand if h["score"] >= tau]
+    # Plan v2.7b: the hard decline is "best passage below top_min" only. Weak candidates are dropped (only `kept` goes to
+    # the model); context relevance is recorded and alerted on (rmc_runtime_gate_score, low_context_relevance alert) but
+    # does not decline, because one strong clause plus weak neighbours is a valid answer (review finding).
     crel = len(kept) / len(cand)
-    ok = crel >= th["context_relevance_min"]
-    return {"passed": ok, "sub_reason": None if ok else "low_context_relevance", "top": top, "context_relevance": round(crel, 4),
+    low = crel < th["context_relevance_min"]
+    return {"passed": True, "sub_reason": "low_context_relevance" if low else None, "top": top, "context_relevance": round(crel, 4),
             "candidates": cand, "kept": kept}
 
 

@@ -368,7 +368,7 @@ path.
 
 | Tier | Where it runs | When | What it decides |
 |---|---|---|---|
-| 1 Runtime gates | `orchestrator`, inline | Every request | UC2: decline before calling the model when the best passage or the context relevance is below threshold; after generation, faithfulness (every claim cited and supported) and answer relevancy; retry once if ≥ 4 s remain, else decline. UC1: no brief without the CRM profile; lines with invented numbers or promises dropped. Budget guards on tokens, steps, hops and deadline |
+| 1 Runtime gates | `orchestrator`, inline | Every request | UC2: decline before calling the model when the best passage is below threshold (weak passages dropped, context relevance monitored); after generation, faithfulness (every claim cited and supported) and answer relevancy; retry once if ≥ 4 s remain, else decline. UC1: no brief without the CRM profile; lines with invented numbers or promises dropped. Budget guards on tokens, steps, hops and deadline |
 | 2 Online sampled | `eval-runner` online worker in prod, in-region judge (`gen-large`) | Minutes after the answer | 5% of UC1 and UC2 answers (cap 200 per day) scored from masked audit content; alert if faithfulness < 0.90 or answer relevancy < 0.80 over 1 h |
 | 3 Scheduled | `eval-runner` CronJobs, pre-prod Azure OpenAI with the production configuration | Nightly, weekly, monthly | Golden-set regression with reference-based metrics; drift report; red team of ≥ 1,000 attacks; a regression opens an incident |
 | 4 Release gate | CI stage on pre-prod | Every prompt, model, tool, index or threshold change | Ships only if every RAGAS, security, latency and token threshold holds |

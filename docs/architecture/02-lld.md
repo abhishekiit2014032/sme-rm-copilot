@@ -1647,8 +1647,8 @@ Query issued by `search_policies` (illustrative):
 
 `tool-gateway` returns at most 5 results with `@search.rerankerScore ≥` the candidate floor (1.0, v2.7) in rank
 order with `n` = 1..k; the orchestrator's pre-generation retrieval gate (§17.2 step 4) then requires the top score
-`≥ 2.0` and a context relevance `≥ 0.5`, keeps passages `≥ max(2.0, top − 1.0)` and otherwise declines
-(`WEAK_RETRIEVAL`) without calling the model. Thresholds are tuned on the golden set and stored in App Configuration. Arabic questions (`language=ar`) use `searchFields` with the
+`≥ 2.0` and otherwise declines (`WEAK_RETRIEVAL`) without calling the model; it keeps passages `≥ max(2.0, top − 1.0)`
+and drops the rest before generation; context relevance is recorded and alerted, not a decline rule (v2.7b). Thresholds are tuned on the golden set and stored in App Configuration. Arabic questions (`language=ar`) use `searchFields` with the
 `_ar` fields. If the semantic ranker is unavailable, keyword + vector with RRF is used and a separate threshold
 on `@search.score` applies (`retrieval_mode=keyword` only when embeddings are down).
 
@@ -2233,7 +2233,7 @@ hashes. Thresholds are tuned on the golden set; the false-positive block rate (�
 | Policy check | orchestrator (UC1 lines, UC3 tasks and call report), tool-gateway (UC3 tasks at commit) | phrase and pattern list for Bank commitments: approval promises ("approved", "will approve", "pre-approved", "guarantee"), pricing ("rate of", "margin", "pricing", "discount", "fee waiver"), limits ("increase your limit", "new limit"); Arabic equivalents. Requests by the customer ("asked about a limit increase") are allowed by pattern design and measured in the false-positive gate |
 | Output rendering check | orchestrator | no URLs, no Markdown link or image syntax, no HTML tags, no zero-width or bidi control characters (C19) |
 | Structured output validation | orchestrator | JSON Schema validation of every structured output |
-| Retrieval gate (pre-generation, v2.7, §17.2 step 4) | orchestrator (UC2) | top `rerankerScore ≥ 2.0` and context relevance `≥ 0.5` over candidates `≥ 1.0`; keep passages `≥ max(2.0, top − 1.0)`; else decline with no model call |
+| Retrieval gate (pre-generation, v2.7, §17.2 step 4) | orchestrator (UC2) | top `rerankerScore ≥ 2.0` over candidates `≥ 1.0`, else decline with no model call; keep passages `≥ max(2.0, top − 1.0)`, drop the rest; context relevance `< 0.5` flagged and alerted, not declined (v2.7b) |
 | Faithfulness (local, always; v2.7 name for groundedness, §17.2 step 7) | orchestrator (UC2) | every sentence cites a valid passage; content-word support ≥ 0.6 and embedding similarity ≥ 0.75 to the cited passage; no number (digits or number words) absent from the cited passages; `F_rt ≥ 0.9`, which for UC2 answer lengths means **all** sentences pass |
 | Answer relevancy (local, v2.7, §17.2 step 7) | orchestrator (UC2) | calibrated question-to-answer embedding similarity `AR_rt ≥ 0.7` |
 | Groundedness (Content Safety) | Content Safety, only if offered in-region and flag on **[confirm]** | `ungroundedDetected = false` |
@@ -3771,11 +3771,11 @@ answer_relevancy_rt, attempts, gate_version}`), never in telemetry content.
    - If no candidate, or `top < top_min` (2.0): **decline `WEAK_RETRIEVAL`** (sub-reason `top_below_threshold`) **with
      no model call**.
    - Keep `K = { c ∈ Cand : s(c) ≥ max(keep_min, top − keep_margin) }` (2.0 and 1.0). Compute `CRel = count(K) / count(Cand)`.
-   - If `CRel < context_relevance_min` (0.5): **decline `WEAK_RETRIEVAL`** (sub-reason `low_context_relevance`), no model
-     call.
-   - Otherwise only `K` goes to the prompt (in rank order, renumbered from `[1]`).
+   - If `CRel < context_relevance_min` (0.5): **flag** `low_context_relevance` (recorded in the gate outcome, metric
+     and alert) but **do not decline** (v2.7b: a strong clause with weak neighbours is a valid answer).
+   - Only `K` goes to the prompt (in rank order, renumbered from `[1]`); weaker candidates are dropped.
    - Examples: scores (3.1, 2.6) give `K` = both, `CRel = 1.0`, pass. Scores (2.2, 1.9, 1.6, 1.4, 1.2) give
-     `τ_keep = 2.0`, `K` = one passage, `CRel = 0.2`, decline. Scores (1.7, 1.5) decline on `top`. A decline saves
+     `τ_keep = 2.0`, `K` = one passage, `CRel = 0.2`, pass with the flag; only the 2.2 passage reaches the model. Scores (1.7, 1.5) decline on `top`. A decline saves
      the `gen-large` call (≈ 5k input tokens and ≈ 3.5 s) and returns in about 1.5 s with routing to the desks.
 5. **Generate** with `uc2.answer` (attempt 1) and model timeout `remaining − post_reserve` (§1.6).
 6. **Sentinel.** Output exactly `INSUFFICIENT_EVIDENCE`: **decline `MODEL_INSUFFICIENT_EVIDENCE`** (not retried).
