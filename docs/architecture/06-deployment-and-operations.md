@@ -1,6 +1,6 @@
 # 06 Deployment and operations
 
-Status: v1 for ARB · Workstream B2 · Owner: solution architecture (resilience, security, operations) · Date: 26 Nov 2026
+Status: v1.1 for ARB (aligned to plan v2.4 after the ARB review, `07-review-log.md`) · Workstream B2 · Owner: solution architecture (resilience, security, operations) · Date: 26 Nov 2026
 
 Contract: `00-plan.md` ("plan §n"). Interfaces and SLOs: `04-interfaces-and-slas.md` ("04 §n"). Failure modes,
 capacity and MRM: `05-nfr-scenarios-and-dr.md` ("05 §n", "FM-nn"). Everything is fictional ("the Bank"). Azure facts we
@@ -39,8 +39,9 @@ Tenant root group
     │                                                  Bastion, DNS Private Resolver, central Private DNS zones)
     ├── mg-landingzones
     │   ├── mg-corp
-    │   │   ├── mg-corp-prod     sub-rmcilot-prod
-    │   │   └── mg-corp-nonprod  sub-rmcilot-preprod, sub-rmcilot-test, sub-rmcilot-dev
+    │   │   ├── mg-corp-prod     sub-rmc-prod, sub-rmc-audit-seal (seal store; administered by IT risk, not by
+    │   │   │                    the copilot or platform teams; plan §3.3 Audit store)
+    │   │   └── mg-corp-nonprod  sub-rmc-preprod, sub-rmc-test, sub-rmc-dev
     │   └── mg-online           (not used by the copilot)
     ├── mg-sandbox              (no connectivity, no Bank data)
     └── mg-decommissioned
@@ -52,6 +53,7 @@ Tenant root group
 | Platform: management | Cloud platform (operations), SOC | Sentinel workspace (security logs, Entra sign-in logs, Key Vault audit, Defender alerts, restricted audit metadata copy for C15 analytics); Defender for Cloud plans |
 | Platform: identity | Identity team | Entra ID tenant configuration, PIM, Conditional Access, app registrations for `web-bff` and `tool-gateway` APIs |
 | Application landing zone | Copilot team (with platform guardrails) | One subscription per environment; spoke VNet; all copilot resources |
+| Seal subscription (`sub-rmc-audit-seal`) | IT risk (second line), with internal audit read access | Immutable storage account `stsealrmcprod` (container `audit-seals`, locked time-based retention 7 years, private endpoint into the copilot spoke); `audit-writer`'s identity may only create blobs; nobody in the copilot or platform teams holds a role there |
 
 **Spoke network (illustrative address plan per environment, /22 per spoke):**
 
@@ -104,21 +106,22 @@ Naming: `<type>-rmc-<env>-uaen-<nn>` (storage and similar: `st<purpose>rmc<env>u
 | Application Gateway WAF v2 + WAF policy | `agw-rmc-prod-uaen-01` | WAF_v2, autoscale 2 to 4 | WAF_v2, 2 to 6 | Zones 1,2,3 | Internal frontend only | All logs + metrics → app workspace |
 | AKS (private, Standard tier) | `aks-rmc-prod-uaen-01` | Pools `system`, `signer`, `verifier`, `core`, each 3 nodes across zones (05 §2.7) | `signer` 3 to 6 × D2ds_v5; `verifier` 3 to 6 × D4ds_v5; `core` 3 to 9 × D4ds_v5 | Zones 1,2,3 | Private API server | Control-plane logs (audit-admin, guard) + Container Insights + managed Prometheus |
 | Container Registry | `crrmcprod` | Premium | Premium | Zone-redundant | Yes | Logs → workspace |
-| API Management | `apim-rmc-prod-uaen-01` | Premium, 1 unit (gap: 04 §10 item 5; recommend 2) | Premium, 2 to 3 units | Scale: zones (units spread) [confirm unit rules] | Internal VNet mode | Gateway logs with **body bytes 0** (C5), metrics, token metrics to App Insights |
+| API Management | `apim-rmc-prod-uaen-01` | Premium, **2 units across zones** (plan v2.2) | Premium, 3 units [confirm] | Units spread across zones [confirm unit rules and SLA, plan §10 item 6] | Internal VNet mode | Gateway logs with **body bytes 0** (C5), metrics, token metrics to App Insights |
 | Foundry resource (primary) + project | `aif-rmc-prod-uaen-01` | AIServices S0; deployments `gen-large`, `gen-small`, `embed` Regional Standard | Same; PTU only after the Phase 2 gate (05 §3.3) | Microsoft-managed [confirm] | Yes | Audit + RequestResponse **metadata** logs [confirm no content in these categories] |
 | Foundry resource (secondary, priority 2) | `aif-rmc-prod-uaen-02` | AIServices S0; same deployments | Same | As above | Yes | As above |
 | Content Safety | `cs-rmc-prod-uaen-01` | S0 | S0 | [confirm] | Yes | Audit, metrics |
 | AI Language | `lang-rmc-prod-uaen-01` | S | S | [confirm] | Yes | Audit, metrics |
 | Document Intelligence | `di-rmc-prod-uaen-01` | S0 | S0 | [confirm] | Yes | Audit, metrics |
 | AI Search | `srch-rmc-prod-uaen-01` | Standard S1, 2 replicas, 1 partition | S1, 3 replicas, 1 partition | Replicas across zones [confirm UAE North] | Yes; shared private link for indexer access not needed (push model) | OperationLogs (no query text [confirm category content]), metrics |
-| Cosmos DB for NoSQL | `cosmos-rmc-prod-uaen-01` | Autoscale max 1,000 RU/s (shared) + 1,000 (jti/outbox) | Same, raise on evidence | Zone-redundant | Yes | ControlPlaneRequests, DataPlaneRequests **without query text** [confirm], metrics |
-| Event Hubs namespace (hubs `audit-events`, `audit-content`, `crm-portfolio-events`) | `evhns-rmc-prod-uaen-01` | Standard, 2 TU, auto-inflate 4; 4 partitions on `audit-events` | Standard or **Premium** (04 §9.4) | Zone-redundant | Yes | Operational, runtime audit logs, metrics |
+| Cosmos DB for NoSQL | `cosmos-rmc-prod-uaen-01` | Autoscale max 1,000 RU/s (shared) + 1,000 (`approvals`); containers per ADR-019 incl. `audit-spool`; periodic backup with geo-redundant backup storage [confirm, plan §10 item 13] | Same, raise on evidence | Zone-redundant | Yes | ControlPlaneRequests, DataPlaneRequests **without query text** [confirm], metrics |
+| Event Hubs namespace (hubs `audit-events`, `audit-content`, `crm-portfolio-events`) | `evhns-rmc-prod-uaen-01` | Standard, 2 TU, auto-inflate 4; 4 partitions on `audit-events` | **Premium** (plan §3.3; a condition of the scale SLO, 04 §9.4) | Zone-redundant | Yes | Operational, runtime audit logs, metrics |
 | Storage: audit WORM | `stauditrmcprod` | StorageV2, **GZRS**, version-level immutability, locked time-based policy 7 years | Same | ZRS primary + geo | Yes (blob) | Read/write/delete logs → workspace and Sentinel |
+| Storage: seal store (in `sub-rmc-audit-seal`) | `stsealrmcprod` | StorageV2, GZRS, locked time-based immutability 7 years, container `audit-seals` | Same | ZRS primary + geo | Yes (blob, cross-subscription private endpoint) | Read/write logs to the IT risk workspace and Sentinel |
 | Storage: audit content | `stcontentrmcprod` | GZRS, per-customer key encryption (application-level envelope) + CMK at rest | Same | Yes | Yes | As above |
 | Storage: documents and chunks | `stdocsrmcprod` | GZRS | Same | Yes | Yes | Logs |
 | Storage: checkpoints | `stckptrmcprod` | ZRS | ZRS | Yes | Yes | Metrics |
 | Key Vault (approval signing) | `kv-rmc-sign-prod` | Premium, key `approval-signing` EC-HSM P-256, RBAC, purge protection | Same | Platform zone resilience [confirm] | Yes | AuditEvent → workspace + Sentinel |
-| Key Vault (customer content keys) | `kv-rmc-cust-prod` | Premium, keys `cust-<customer_ref>` RSA-HSM 3072, `audit-transport`, `audit-anchor`; soft-delete retention 7 days (02 §6.6) | Same, or Managed HSM if key count requires [confirm] | Same | Yes | AuditEvent → workspace + Sentinel |
+| Key Vault (customer content keys) | `kv-rmc-cust-prod` | Premium, keys `cust-<customer_ref>` RSA-HSM 3072, `audit-transport`, `audit-seal`; soft-delete retention 7 days (02 §6.6) | Same, or Managed HSM if key count requires [confirm] | Same | Yes | AuditEvent → workspace + Sentinel |
 | Key Vault (CMKs) | `kv-rmc-cmk-prod` | Premium, RSA-HSM 3072 CMKs | Same | Same | Yes | AuditEvent |
 | Key Vault (secrets, certificates) | `kv-rmc-sec-prod` | Standard or Premium | Same | Same | Yes | AuditEvent |
 | App Configuration | `appcs-rmc-prod-uaen-01` | Standard | Standard (+ replica in UAE Central if available [confirm]) | Platform [confirm] | Yes | HttpRequest, Audit |
@@ -134,8 +137,8 @@ Naming: `<type>-rmc-<env>-uaen-<nn>` (storage and similar: `st<purpose>rmc<env>u
 | Service Bus (Phase 2) | `sb-rmc-prod-uaen-01` | n/a | Premium | Zone-redundant | Yes | Logs |
 | Bot Service (Phase 2, after C1 sign-off) | `bot-rmc-prod` | n/a | [confirm regional option] | n/a | [confirm] | Logs |
 
-Pre-prod: identical resources and zone redundancy, smaller counts (AKS user pool 3 nodes, APIM 1 unit, AI Search 2
-replicas, eval-sized OpenAI quota). Test and dev: no zone redundancy, minimum SKUs, same private networking.
+Pre-prod: identical resources and zone redundancy, smaller counts (AKS pools 3 nodes each, APIM 2 units so zone
+drills match prod, AI Search 2 replicas, eval-sized OpenAI quota, a non-prod seal store). Test and dev: no zone redundancy, minimum SKUs, same private networking.
 
 ---
 
@@ -200,7 +203,7 @@ pull** (Flux in the cluster), so the control plane is never exposed publicly.
 | 1 | Pull request | Lint, format, unit tests, type checks; **SAST** (CodeQL or equivalent); **secret scanning** with push protection; **dependency scan** (SCA, licence policy); IaC lint (`bicep build`, PSRule for Azure, Checkov); Helm/Kustomize lint and policy test (Gatekeeper constraints with `gator` or equivalent) | All green; coverage ≥ 80% overall and ≥ 90% for entitlement, approval verification and masking (MAINT-03); no new high/critical SAST findings; two reviewers incl. a CODEOWNER for `tool-gateway` and `web-bff` security paths |
 | 2 | Build | Reproducible container build (minimal base); **SBOM** (SPDX or CycloneDX); **container scan**; **image signing with Notation** (signing key in Key Vault, pipeline identity has `sign` on that key only); push to non-prod ACR by digest | No critical CVEs; high CVEs with fix available block unless exception approved (≤ 15 days) |
 | 3 | Component and contract tests | Contract tests against SoR stubs and SoR test APIs; approval-token negative tests; **telemetry canary test** (seeded canary strings must not appear in exported spans, logs, APIM logs: C5); prompt-injection regression suite; numeric check corpus | 100% pass |
-| 4 | **Eval gate** (`eval-runner` on the pre-prod Foundry resource) | Golden set (≥ 300) + holdout (run by MRM pipeline on model/prompt changes) + adversarial set (≥ 100) | Groundedness ≥ 0.95 and citation accuracy ≥ 0.95 (lower 95% confidence bound); entitlement leaks 0; injection success 0; numeric mismatches 0; false-positive block rate ≤ 2%; correct decline ≥ 90%; Arabic slice parity within 5 points (Phase 2 GA); no metric regresses > 2 points vs the current production release |
+| 4 | **Eval gate** (`eval-runner` on the pre-prod Foundry resource) | Golden set (≥ 300 UC2 items, ≥ 50 UC1, ≥ 50 UC3) + holdout (run by MRM pipeline on model/prompt changes) + red-team suite (≥ 1,000 attacks, plan §5) | Groundedness ≥ 0.95 and citation accuracy ≥ 0.95 (95% Wilson lower bound, z = 1.96, plan §5); entitlement leaks 0; injection success 0; numeric mismatches 0; false-positive block rate ≤ 2%; correct decline ≥ 90%; Arabic slice parity within 5 points (Phase 2 GA); no metric regresses > 2 points vs the current production release |
 | 5 | IaC what-if | `az deployment sub what-if` per environment; Azure Policy compliance pre-check | Any `Delete` or `Modify` on data resources (Cosmos, Storage, Key Vault, AI Search) requires a second approver; no policy violations |
 | 6 | Deploy test | IaC apply; app deploy; integration and end-to-end tests with synthetic data | Pass |
 | 7 | Deploy pre-prod | IaC apply; app deploy; **load test** (1.5 req/s, 30 min, PERF-01..04); DAST; smoke; scheduled drills (zone, kill switch, rotation) | Latency p95 within plan §5; error ratio < 0.5%; DAST no high findings |
@@ -217,8 +220,8 @@ pull** (Flux in the cluster), so the control plane is never exposed publicly.
   the pipeline with the eval report attached; a prompt change is a release like code.
 - **APIOps** for APIM: APIs, products, policies (incl. `llm-token-limit`, body logging off, semantic cache off) in Git,
   extracted and published by pipeline.
-- **Index changes** (schema or embedding model): blue/green index `policies-v{n+1}`, alias swap after retrieval eval
-  (RB-07).
+- **Index changes** (schema or embedding model): blue/green index `policies-v{n+1}`, then flip the pin
+  `rmc:tool-gateway:search:index_name` after the retrieval eval (RB-07, 02 §6.2).
 
 ### 5.3 Release gates summary
 
@@ -296,7 +299,7 @@ Policy compliance is a pipeline gate (§5.1 stage 5) and a monthly report item.
 | Tier | Who | Hours | Scope |
 |---|---|---|---|
 | L1 | Bank IT service desk | Business hours, plus SOC 24×7 for security | Takes RM calls and tickets, checks the status page and known issues, triages by runbook "first response" steps, routes to L2 |
-| L2 | Copilot SRE / application support (on-call rota) | **On-call 07:00–20:00 GST Mon–Fri** (paging); best effort outside | Alerts, runbooks, kill switch, degraded mode, rollback, SoR liaison |
+| L2 | Copilot SRE / application support (on-call rota) | **On-call 07:00 to 20:00 GST Mon to Fri** (paging); best effort outside | Alerts, runbooks, kill switch, degraded mode, rollback, SoR liaison |
 | L3 | Copilot engineering (AI engineers, integration engineer) and cloud platform engineering | Business hours; called in by L2 for P1 | Code fixes, model and prompt issues, AKS, APIM, network |
 | Vendor | Microsoft via the Bank's support plan (Unified or equivalent [confirm plan and severity response times]) | 24×7 for Severity A | Azure platform incidents (Sev A for production down; Sev B for degraded) |
 | SoR resolver groups | CRM, data platform, lending, KYC, ECM, M365 teams | Per their OLA (04 §3) | Their systems |
@@ -354,7 +357,7 @@ Each runbook is stored in the operations wiki with exact commands and links; bel
 - **Trigger:** degraded rate > 5% over 30 min; breakers open on both model backends; AI Language or Content Safety
   outage (FM-02, FM-10, FM-11).
 - **Steps:** 1) Confirm the cause (model, PII, Shields) from breaker metrics. 2) If not automatic, force degraded mode
-  per use case with the flag `degraded.force` (use-case filter, 02 §2) (prevents slow
+  per use case with the flag `degraded_force` (use-case filter, 02 §2) (prevents slow
   timeouts for every request). 3) Post the status message ("Summaries temporarily unavailable; data and sources still
   shown"). 4) Open a Microsoft Sev B case if Azure-caused. 5) When healthy for 15 min, revert flags one use case at a
   time, UC2 first.
@@ -362,9 +365,9 @@ Each runbook is stored in the operations wiki with exact commands and links; bel
 
 ### RB-03 Kill switch on/off
 - **Trigger:** AI incident (§10), zero-tolerance event, risk or compliance instruction, Sentinel playbook (C15).
-- **Steps (on):** 1) Incident commander decides scope: one use case, all writes (`writes.enabled=false`), or all.
+- **Steps (on):** 1) Incident commander decides scope: one use case (`uc1`, `uc2` or `uc3` off), all writes (`writes` off), or all.
   2) Flip the flag (pipeline "kill switch" job or Sentinel playbook; both audited). 3) Watch config refresh age:
-  all pods must report the new value within 30 s (15 s refresh, 02 §2); restart any pod whose refresh age exceeds 5 min (writes already fail closed in that pod) (FM-66). 4) Banner
+  all pods must report the new value within 30 s (15 s refresh, 02 §2); restart any pod that has not refreshed within 60 s of the change (writes fail closed on their own only after 15 min stale, plan §3.3) (FM-66). 4) Banner
   shown automatically; send the RM communication. 5) Record in the incident.
 - **Steps (off):** 1) Requires root cause understood, fix released through the eval gate, and approval of the product
   owner plus MRM (and InfoSec for security incidents). 2) Re-enable for the canary cohort first, then all.
@@ -376,12 +379,12 @@ Each runbook is stored in the operations wiki with exact commands and links; bel
   misuse (emergency rotation).
 - **Steps (schedule from 02 §4.7):** 1) D0: confirm the new version N+1 exists in `kv-rmc-sign-prod`. 2) D0 + 1 h:
   pipeline adds N+1 to `rmc:tool-gateway:approval:allowed_kids`; verify every `tool-gateway` pod has pre-fetched the
-  public key (metric `approval_kids_loaded`). 3) D0 + 24 h: pipeline sets `rmc:web-bff:approval:active_kid` = N+1.
+  public key (metric `rmc_approval_kids_loaded`). 3) D0 + 24 h: pipeline sets `rmc:web-bff:approval:active_kid` = N+1.
   4) Watch `APPROVAL_INVALID` (must stay 0, in particular reason `UNKNOWN_KID`) and successful commits. 5) D0 + 8 d:
   pipeline removes N from `allowed_kids`; export N's public key to the audit store as a JWKS snapshot; never purge.
 - **Emergency:** remove the compromised `kid` from `allowed_kids` (effective ≤ 30 s) and rotate immediately; RMs
   re-approve pending drafts; persisted verdicts stay valid unless the incident commander also sets
-  `writes.enabled=false` and reviews queued items; open a security incident and review all commits signed with the
+  `writes` off and reviews queued items; open a security incident and review all commits signed with the
   compromised `kid` since the suspected time.
 - **Verification:** commits succeed with the new `kid`; audit events show the new `kid`; rotation recorded; next
   rotation date set.
@@ -417,16 +420,17 @@ Each runbook is stored in the operations wiki with exact commands and links; bel
   immediately (ingestion admin command) and mark it quarantined. 2) Fix the source in the DMS; re-ingest.
 - **Steps (rebuild):** 1) Create `policies-v{n+1}` from the schema in Git. 2) Push stored chunks and embeddings from
   Blob (re-embed only for an embedding change). 3) Validate: document count equals the manifest, 50-query retrieval
-  smoke and the UC2 golden slice. 4) Swap the alias `policies` to v{n+1}. 5) Keep v{n} for 7 days, then delete.
-- **Verification:** retrieval metrics equal or better than before; alias points to v{n+1}; UC2 probes `ok`; time taken
+  smoke and the UC2 golden slice. 4) Flip the pin `rmc:tool-gateway:search:index_name` to v{n+1} (audited App
+  Configuration change). 5) Keep v{n} for 7 days, then delete.
+- **Verification:** retrieval metrics equal or better than before; `index_version` in lineage shows v{n+1}; UC2 probes `ok`; time taken
   recorded against the 30 to 60 min estimate (05 §2.5).
 
 ### RB-08 Outbox poison items
 - **Trigger:** item at max attempts or permanently rejected (FM-16); outbox oldest item > 30 min (FM-15).
-- **Steps:** 1) List items by state (`queued`, `retrying`, `failed`) and error class. 2) For ambiguous outcomes, read
+- **Steps:** 1) List items by state (`queued`, `retry_wait`, `failed`) and error class (02 §5.6 admin API). 2) For ambiguous outcomes, read
   the CRM by external reference `jti:item`: if present, mark `committed` and stop. 3) For permanent errors
   (validation, customer closed): mark `failed`, notify the RM in the UI with the reason; the RM edits and re-approves
-  (new `jti`). 4) For systemic errors (CRM change broke the contract): pause deliveries (`outbox.delivery.enabled=false`, items stay `queued`, 02 §5.6), raise
+  (new `jti`). 4) For systemic errors (CRM change broke the contract): pause deliveries (flag `outbox_delivery` off, items stay `queued`, 02 §5.6), raise
   with the CRM owner, resume after the fix. 5) Never edit a draft or approval in place.
 - **Verification:** no item older than 30 min in `queued`; every item `committed` or visible `failed`; reconciliation
   of the day's commits vs CRM by external reference shows no duplicates.
@@ -456,7 +460,7 @@ Each runbook is stored in the operations wiki with exact commands and links; bel
 - **Trigger:** confirmed injection success (zero-tolerance), red-team finding, Prompt Shields detection pattern on
   CRM notes, news or policy documents (FM-48 to FM-53, FM-59).
 - **Steps:** 1) AI incident (§10), P1 if output reached an RM with harmful or false content or data crossed a
-  boundary. 2) Contain: kill switch for the affected use case or source (for example `news.enabled=false`, or `uc1.enabled=false`).
+  boundary. 2) Contain: kill switch for the affected use case or source (for example flag `news` off, or `uc1` off).
   3) Identify the vector (source record id; never copy the payload into tickets: reference the audit id). 4) Neutralise
   the source: ask the CRM owner to correct the note, quarantine the document (RB-07), block the news item. 5) Fix:
   quarantine rule, Shields threshold, policy check; add the payload (sanitised) to the adversarial set. 6) Release
@@ -466,8 +470,8 @@ Each runbook is stored in the operations wiki with exact commands and links; bel
 ### RB-12 Cost spike
 - **Trigger:** budget alert at 80% (actual) or 100% (forecast); cost anomaly alert; tokens per hour > 3× baseline
   (FM-47, FM-05).
-- **Steps:** 1) Break down by component (Cost Management) and, for tokens, by deployment, use case and pseudonymous RM
-  (APIM metrics). 2) Typical causes: runaway loop (step budget bypassed), misrouted eval or ingestion traffic, log flood
+- **Steps:** 1) Break down by component (Cost Management) and, for tokens, by deployment and use case (APIM metrics)
+  and by RM (restricted audit table, `metrics.tokens_in` / `tokens_out` per `actor.oid`). 2) Typical causes: runaway loop (step budget bypassed), misrouted eval or ingestion traffic, log flood
   (debug level left on), unexpected retries. 3) Contain: tighten APIM limits for the offender, disable the job, reset
   log levels, apply Log Analytics daily cap warning. 4) Fix the root cause through normal change.
 - **Verification:** hourly cost and tokens back within 20% of baseline; budget forecast below 100%.
@@ -502,8 +506,11 @@ Each runbook is stored in the operations wiki with exact commands and links; bel
   FM-35, FM-39, FM-42.
 - **Steps:** 1) Confirm scope from the dependency dashboard. 2) Raise with the owner's resolver group (04 §3) or
   Microsoft (Sev per §8.2). 3) Post the RM status message describing what is missing (partial briefs) or unavailable.
-  4) For hard dependencies (CRM, Cosmos, Event Hubs, APIM, Key Vault for approvals), consider the kill switch to replace
-  slow failures with a clear message. 5) Track restoration; remove messages.
+  4) For hard dependencies (CRM, Cosmos, APIM, Key Vault and Event Hubs for approvals), consider the kill switch to
+  replace slow failures with a clear message. 5) Event Hubs outage: confirm reads continue on the Cosmos
+  `audit-spool` (`rmc_audit_spool_writes_total` rising), post "approvals paused", watch `RmcAuditSpoolBacklog`, and
+  after recovery confirm the spool drains to zero and chain `s0` verifies (RB-10). 6) Track restoration; remove
+  messages.
 - **Verification:** breaker closed; probes `ok`; attribution recorded for the monthly report (04 §8.5).
 
 ---
@@ -548,9 +555,9 @@ audit content for investigation uses the audited break-glass role with DPO appro
 
 | Scope | Budget basis | Alerts |
 |---|---|---|
-| `sub-rmcilot-prod` | Monthly, from the cost model (05 §3) filled with calculator prices; separate pilot and scale budgets | 50% (info), **80% actual (action: FinOps review, RB-12)**, 100% forecast (product owner), 110% actual (steering) |
-| `sub-rmcilot-preprod` | Monthly; includes eval runs | 80% actual, 100% forecast |
-| `sub-rmcilot-test`, `sub-rmcilot-dev` | Monthly; auto-stop schedules | 80% actual, 100% forecast |
+| `sub-rmc-prod` | Monthly, from the cost model (05 §3) filled with calculator prices; separate pilot and scale budgets | 50% (info), **80% actual (action: FinOps review, RB-12)**, 100% forecast (product owner), 110% actual (steering) |
+| `sub-rmc-preprod` | Monthly; includes eval runs | 80% actual, 100% forecast |
+| `sub-rmc-test`, `sub-rmc-dev` | Monthly; auto-stop schedules | 80% actual, 100% forecast |
 | Azure OpenAI per environment | Resource-group or tag-filtered budget | 80% actual |
 | Cost anomaly detection | Cost Management anomaly alerts per subscription [confirm feature availability] | On anomaly |
 | Log Analytics | Daily cap warning (not a hard cap in prod, so security logs are not lost) | At 80% of expected daily GB |
@@ -558,8 +565,8 @@ audit content for investigation uses the audited break-glass role with DPO appro
 ### 11.2 Token cost per RM per use case
 
 1. APIM `llm-emit-token-metric` emits prompt and completion tokens with dimensions `deployment`, `use_case`,
-   `environment` and `rm_pid` (pseudonymous RM id: HMAC-SHA256 of the `oid` with a key in Key Vault, stable for the
-   reporting year).
+   `caller` and `environment` only (no RM dimension: cardinality and privacy, 02 §7.1). Per-RM token counts come from
+   the restricted audit table (`metrics.tokens_in`, `metrics.tokens_out` per request, keyed by `actor.oid`).
 2. A monthly KQL job multiplies tokens by the **price table** held in configuration (updated from the agreement, never
    hard-coded) and adds a per-request share of the variable AI services (AI Language, Content Safety, semantic ranker,
    news feed).
@@ -587,7 +594,7 @@ audit content for investigation uses the audited break-glass role with DPO appro
 
 | # | Item | Owner |
 |---|---|---|
-| 1 | APIM pilot unit count (1 vs 2) for zone resilience | Architecture (plan v3) |
+| 1 | ~~APIM pilot unit count~~ Resolved in plan v2.2 (2 units across zones) | Closed |
 | 2 | Microsoft support plan and Sev A response commitment | Vendor management |
 | 3 | Custom Azure Policy aliases for deployment SKU and APIM body logging | Cloud platform |
 | 4 | GitOps (Flux) vs push deployment from private runners: Bank standard | Cloud platform |

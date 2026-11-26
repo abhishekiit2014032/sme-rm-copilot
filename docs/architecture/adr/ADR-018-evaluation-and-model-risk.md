@@ -138,14 +138,14 @@ Risks and mitigations
 
 - Foundry risk-and-safety evaluators or the AI Red Teaming Agent become available with an in-region back end
   (§10 item 7).
-- The Bank publishes or revises its MRM standard for generative AI (§10 item 8).
+- The Bank publishes or revises its MRM standard for generative AI (§10 item 12).
 - Arabic GA (Phase 2): Arabic golden set sized to its own gate.
 - A judge-versus-SME agreement drop below the agreed threshold.
 
 ## Related
 
 - Plan: §2 (Phase 0 golden set, Phase 1 evals as a CI job), §3.2 (`eval-runner`), §5 quality gates, §6 C12, C13,
-  C23, §10 items 7 and 8.
+  C23, §10 items 7 and 12.
 - ADR-011 (what the gate measures), ADR-012 (PII recall), ADR-013 (lineage and content store for online sampling),
   ADR-014 (operational metrics), ADR-020 (kill switch and rollback), ADR-021 (CI pipeline and synthetic data), ADR-004 (model pins, upgrade runbook,
   content filter tuning), ADR-006 (retrieval metrics), ADR-005 (deterministic workflows under test).

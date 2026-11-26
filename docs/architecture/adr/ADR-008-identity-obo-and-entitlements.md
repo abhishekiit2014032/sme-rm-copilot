@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted |
+| Status | Accepted; amended 26 Nov 2026 for plan v2.1 and v2.4 (step-up via authentication context `acrs`, entitlement cache 50 s + 10 s) |
 | Date | 26 Nov 2026 |
 | Deciders | Solution architecture, identity and access management, information security, CRM owner |
 | Plan references | §3.2 (`web-bff`, `orchestrator`, `tool-gateway`), §3.3 Identity, §3.4, §4.1 step 4, §6 C4, C9, C15, C22 |
@@ -57,7 +57,9 @@ Adopt **option 1**, exactly as plan §3.4:
 
 1. RM signs in (CRM sidebar: MSAL; Teams tab: Teams SSO); token audience = `web-bff`.
 2. `web-bff` validates it and performs **OBO** for audience `tool-gateway`, scope `Tools.Read`; `Tools.Write` is
-   requested only on approve, with fresh authentication (`auth_time` ≤ 10 min, step-up otherwise).
+   requested only on approve, with fresh authentication: Conditional Access authentication context
+   `approve-write` (Entra id `c1`), checked as `acrs` contains `c1`, with the ID token's `auth_time` ≤ 10 min as the
+   fallback, step-up otherwise (plan §3.4, amended for v2.1 and v2.4).
 3. `orchestrator` forwards the OBO token **unchanged** and authenticates itself with its **AKS workload identity**
    token.
 4. `tool-gateway` validates both (`iss`, `aud`, `tid`, `scp`, signature, expiry; caller client id on an allow-list).
@@ -67,7 +69,8 @@ Adopt **option 1**, exactly as plan §3.4:
    always enforced in `tool-gateway`**, regardless of the downstream.
 
 Entitlements: checked **first** on every customer-scoped tool, from CRM portfolio and delegation records (with
-expiry) and app roles (team lead read-only); cached ≤ 60 s and invalidated on portfolio change events; denial
+expiry) and app roles (team lead read-only); cached ≤ 60 s (50 s in Cosmos + 10 s in-process) and invalidated on
+portfolio change events (CRM → APIM → Event Hub `crm-portfolio-events`, plan §4.1 step 4); denial
 returns 403 `NOT_ENTITLED` and no data moves (plan §4.1 step 4). Repeated `NOT_ENTITLED` feeds Sentinel analytics
 (C15).
 

@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (Phase 1); Service Bus Premium for Phase 2 is Proposed |
+| Status | Accepted (Phase 1); Service Bus Premium for Phase 2 is Proposed; amended 26 Nov 2026 (external reference format and Event Hubs ack before writes, aligned with `02-lld.md` §5) |
 | Date | 26 Nov 2026 |
 | Deciders | Solution architecture, CRM integration team, operations |
 | Critical issues | C7 (double posting, non-atomic writes), C14 (system of record protection) |
@@ -18,7 +18,7 @@ CRM through the APIM system API facade (plan §4.2 step 9). Forces:
 - **Unknown outcomes.** A timeout or a 5xx after the request reached the CRM leaves the outcome unknown. A blind
   retry can double-post a call report, which is visible to auditors and to the customer's relationship history
   (C7).
-- **CRM idempotency support is unconfirmed.** Plan §10 item 8 lists "CRM idempotency / external reference
+- **CRM idempotency support is unconfirmed.** Plan §10 items 11 and 12 list "CRM idempotency / external reference
   support" as a Bank confirmation. This ADR depends on it.
 - **Latency.** Commit p95 ≤ 2 s (§5) for the RM to see a per-item status. Tool cap 2 s; per-call timeout =
   min(cap, remaining deadline minus reserve) (§5 deadlines).
@@ -26,7 +26,7 @@ CRM through the APIM system API facade (plan §4.2 step 9). Forces:
   must not depend on the token (C7: verdict persisted).
 - **Phase 1 simplification.** No Service Bus in the pilot (§2): the outbox lives in Cosmos DB, delivered by
   `outbox-worker` from the change feed (§3.2).
-- **CRM support hours and SLAs** are per system and unknown today (§10 item 8); retries must respect them and must
+- **CRM support hours and SLAs** are per system and unknown today (§10 item 12); retries must respect them and must
   not hammer a recovering CRM (C14).
 
 ## Options considered
@@ -66,8 +66,9 @@ Adopt **option 2**.
 
 1. **Atomic hand-off.** After verification, `tool-gateway` writes one Cosmos transactional batch in the
    `approvals` container, partition key = `jti` (ADR-019): the `jti` marker (create, 409 = replay), the verdict
-   (ADR-009), the saga document and one item document per write (`status: pending`, `ext_ref: <jti>:report`,
-   `<jti>:task:1`, ...). Item order is the order in the canonical draft, so references are stable.
+   (ADR-009), the saga document and one item document per write (`state: pending`, external reference `<jti>:cr` for the
+   call report and `<jti>:t1` to `<jti>:t10` for tasks, `02-lld.md` §5.1). `approval_verified` must be acknowledged by
+   Event Hubs before the first CRM call (ADR-013). Item order is the order in the canonical draft, so references are stable.
 2. **First attempt inline.** Items are written in parallel (bounded to 4 concurrent calls), except where the CRM
    requires a task to reference the call report id; then the saga runs report first, tasks after. Each call
    carries the external reference (CRM field or idempotency header, whichever the CRM supports) and a timeout
@@ -138,7 +139,7 @@ Risks and mitigations
 ## Related
 
 - Plan: §2 (Phase 1 simplifications), §3.2 (`tool-gateway`, `outbox-worker`), §4.2 steps 8 to 10, §5 (commit
-  ≤ 2 s, deadlines), §6 C7, C14, §10 item 8.
+  ≤ 2 s, deadlines), §6 C7, C14, §10 items 11 and 12.
 - ADR-009 (verdict that the saga relies on), ADR-013 (audit events), ADR-015 (circuit breakers and deadlines),
   ADR-019 (`approvals` container, partition key, per-item TTL), ADR-020 (write kill switch), ADR-003 (APIM system API facade and per-consumer quotas), ADR-008 (entitlement
   re-check on retry).

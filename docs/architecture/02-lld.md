@@ -1,6 +1,6 @@
 # SME RM Copilot on Azure: low-level design (LLD)
 
-Status: **v1 (workstream B1)** · Contract: [`00-plan.md`](00-plan.md) v2 · Date: 26 Nov 2026 · Audience: engineering, security, platform, MRM
+Status: **v1.1 (workstream B1, aligned to plan v2.4 after the ARB review, `07-review-log.md`)** · Contract: [`00-plan.md`](00-plan.md) v2.4 · Date: 26 Nov 2026 · Audience: engineering, security, platform, MRM
 
 This document is the build specification for the services in `00-plan.md` §3.2. It uses the plan's names,
 numbers and decisions. Where the plan is silent the LLD makes a decision and labels it **[LLD decision]**; where
@@ -65,12 +65,13 @@ Contents
 | Header | Direction | Set by | Rule |
 |---|---|---|---|
 | `Authorization: Bearer <jwt>` | request | caller | RM-facing calls: the RM's Entra token (audience `web-bff`). Service to service: the **caller's workload identity token** (audience = the callee). See §1.5 |
-| `x-rm-token` | request (internal) | `web-bff` | The RM's **OBO token for the `tool-gateway` audience**, forwarded unchanged by `orchestrator` to `tool-gateway` and to the APIM AI gateway (quota key only). Never logged |
+| `x-rm-token` | request (internal) | `web-bff` | The RM's **OBO token for the `tool-gateway` audience**, forwarded unchanged by `orchestrator` to `tool-gateway`, which forwards it to the APIM system API facade on interactive calls. It is **not** sent to the AI gateway. Never logged |
+| `x-rm-oid` | request (internal) | `orchestrator` (AI gateway calls); `tool-gateway` (deferred facade writes) | The RM's `oid`, used by the AI gateway only as the per-RM token-quota key and accepted only when the caller's workload token is the orchestrator's (`azp`); on the facade it is accepted only on deferred writes with role `SystemApi.DeferredWrite` (plan §3.3 Gateway, §4.2 step 9). Cost control, not access control. Stripped by APIM before any backend |
 | `traceparent`, `tracestate` | both | `web-bff` creates if absent | W3C Trace Context. A client-supplied `traceparent` is accepted only as a link (`rmc.client_trace_id`), never as the parent, to stop trace spoofing |
 | `x-request-id` | both | `web-bff` | UUIDv7. A client value is recorded as `client_request_id` only. Echoed on every response, in every log line, span and audit event |
 | `x-deadline-ms` | request | `web-bff`, then each hop | **Remaining budget in milliseconds at send time** (relative, like `grpc-timeout`), so pod clock skew does not matter. The receiver computes `deadline_at = receive_time + value`. See §1.6 |
 | `x-use-case` | request (internal) | `web-bff` | `uc1` / `uc2` / `uc3_draft` / `uc3_commit` / `meetings` / `eval` / `ingest`. Used for budgets, APIM per-use-case limits and metric labels |
-| `Idempotency-Key` | request | client (approve), `orchestrator` (commit) | Required on `POST .../approve` and `POST /internal/v1/commits`. UUIDv4. Same key + same body hash returns the stored response; same key + different body returns `409 IDEMPOTENCY_CONFLICT`. Stored 24 h |
+| `Idempotency-Key` | request | client (approve), `orchestrator` (commit) | Required on `POST .../approve` and `POST /internal/v1/commits`. UUIDv4. Same key + same body hash returns the stored response; same key + different body returns `409 IDEMPOTENCY_CONFLICT`. Stored 7 days (plan §7) |
 | `If-Match` | request | client | Required on `PUT /v1/followups/drafts/{id}`; value = draft `etag`. Mismatch returns `412 DRAFT_CONFLICT` |
 | `x-csrf-token` | request | client | Required on every state-changing RM call. Bound to the session (§2.1). Missing or wrong returns `403 CSRF_FAILED` |
 | `Origin` | request | browser | Must be in `rmc:web-bff:allowed_origins`. Otherwise `403 ORIGIN_REJECTED` |
@@ -110,7 +111,7 @@ downstream error text. Upstream errors are mapped, never passed through.
 | `VALIDATION_FAILED` | 400 | no | any | Body or parameter fails schema. `details.field` = JSON pointer. Reasons: `SCHEMA`, `UNKNOWN_FIELD`, `TOO_LARGE`, `BAD_DATE`, `WEEKEND_DATE`, `POLICY_VIOLATION` (a task asks to approve, price or change a limit), `UNSUPPORTED_CONTRACT_VERSION` |
 | `UNAUTHENTICATED` | 401 | no | any | Missing, expired or invalid token. Reasons: `MISSING_TOKEN`, `INVALID_TOKEN`, `WRONG_AUDIENCE`, `WRONG_TENANT`, `WORKLOAD_TOKEN_MISSING`, `WORKLOAD_NOT_ALLOWED`. Client re-acquires a token silently once |
 | `SESSION_EXPIRED` | 401 | no | `web-bff` | Session document gone (24 h TTL) or idle > 8 h **[LLD decision]**. Client reloads the session |
-| `STEP_UP_REQUIRED` | 401 | no | `web-bff` | Approve needs `auth_time` ≤ 10 min and auth context `c1`. Response carries `WWW-Authenticate: Bearer error="insufficient_claims", claims="<base64 claims challenge>"`. Client runs MSAL interactive with the claims, then retries the same request with the same `Idempotency-Key` |
+| `STEP_UP_REQUIRED` | 401 | no | `web-bff` | Approve needs the authentication context `approve-write` (`acrs` contains `c1`; fallback: ID token `auth_time` ≤ 10 min, plan §3.4). Response carries `WWW-Authenticate: Bearer error="insufficient_claims", claims="<base64 claims challenge>"`. Client runs MSAL interactive with the claims, then retries the same request with the same `Idempotency-Key` |
 | `INSUFFICIENT_SCOPE` | 403 | no | `tool-gateway`, `web-bff` | Token lacks `Tools.Read` / `Tools.Write` or an app role. Not shown to RMs as a normal path |
 | `ORIGIN_REJECTED` | 403 | no | `web-bff` | `Origin` not allowed |
 | `CSRF_FAILED` | 403 | no | `web-bff` | CSRF token missing or wrong |
@@ -124,7 +125,7 @@ downstream error text. Upstream errors are mapped, never passed through.
 | `RATE_LIMITED` | 429 | yes | `web-bff`, APIM | Request-rate limit hit (per RM: 30 requests/min **[LLD decision]**; per backend at the facade). `Retry-After` set |
 | `BUDGET_EXCEEDED` | 429 | no (until reset) | `orchestrator` (mapping APIM), APIM | Token budget exhausted. Reasons: `RM_DAILY` (400k tokens/RM/day), `USE_CASE` (per-use-case limit), `REQUEST_STEPS` (> 6 tool steps), `REQUEST_TOKENS` (> 12k input or 1.5k output). `details.resets_at` for `RM_DAILY` (midnight GST **[confirm APIM daily window is UTC or configurable]**) |
 | `FEATURE_DISABLED` | 503 | no | `web-bff`, `orchestrator`, `tool-gateway`, `outbox-worker` | Kill switch or feature flag off (`details.flag`). UI shows a banner and hides the action. Not counted against the SLO when set by an operator (counted separately) |
-| `DEPENDENCY_UNAVAILABLE` | 503 | yes | any | Circuit open or dependency down and no degraded path exists (for example Cosmos down during commit). Reasons: `CIRCUIT_OPEN`, `AUDIT` (the audit stream did not acknowledge, so nothing was released), `ENTITLEMENT_SOURCE`, `KEY_VAULT`, `STATE_STORE`. `Retry-After` set |
+| `DEPENDENCY_UNAVAILABLE` | 503 | yes | any | Circuit open or dependency down and no degraded path exists (for example Cosmos down during commit). Reasons: `CIRCUIT_OPEN`, `AUDIT` (neither Event Hubs nor the Cosmos `audit-spool` acknowledged, or Event Hubs did not acknowledge `approval_verified` on a commit, so nothing was released or written), `ENTITLEMENT_SOURCE`, `KEY_VAULT`, `STATE_STORE`. `Retry-After` set |
 | `DEPENDENCY_TIMEOUT` | 504 | yes | any | A required dependency did not answer within its deadline-derived timeout and no degraded path exists |
 | `DEADLINE_EXCEEDED` | 504 | yes | any | The request's own deadline (`x-deadline-ms`) had expired on arrival or before work started (fail fast, no downstream call) |
 | `INTERNAL` | 500 | yes | any | Unexpected. Message generic; exception text scrubbed (C5) |
@@ -169,9 +170,9 @@ Token on each hop:
 | client → `web-bff` | RM token, `aud=api://rm-copilot-web-bff`, `scp` contains `Copilot.Use`, role `RmCopilot.RM` or `RmCopilot.TeamLead` | n/a |
 | `web-bff` → `orchestrator` | `web-bff` workload token, `aud=api://rm-copilot-orchestrator`, role `Orchestrator.Invoke` | OBO token, `aud=api://rm-copilot-tool-gateway`, `scp=Tools.Read` (approve: `Tools.Read Tools.Write`) |
 | `orchestrator` → `tool-gateway` | `orchestrator` workload token, `aud=api://rm-copilot-tool-gateway`, role `Tools.Invoke` | forwarded unchanged |
-| `orchestrator` → APIM AI gateway | `orchestrator` workload token, `aud=api://rm-copilot-ai-gateway`, role `AiGateway.Generate` | forwarded unchanged (quota key = `oid`) |
+| `orchestrator` → APIM AI gateway | `orchestrator` workload token, `aud=api://rm-copilot-ai-gateway`, role `AiGateway.Generate` | not sent; `x-rm-oid` = RM `oid` (quota key, accepted only from the orchestrator's `azp`) |
 | `tool-gateway` → APIM system API facade | `tool-gateway` workload token, `aud=api://rm-copilot-system-api` | forwarded unchanged on interactive calls; absent on outbox deliveries (`SystemApi.DeferredWrite`) |
-| `tool-gateway` → Graph | OBO token (second hop) for Graph, `Calendars.ReadBasic` only (C20) | n/a |
+| `tool-gateway` → Graph | OBO token (second hop, from the validated `x-rm-token`) for Graph, `Calendars.ReadBasic` only (C20); `tool-gateway` owns the call (plan v2.3) | n/a |
 | `outbox-worker` → `tool-gateway` | `outbox-worker` workload token, role `Outbox.Deliver` | absent (RM not present; authority = persisted verdict, §5) |
 
 `tool-gateway` derives the RM **only** from the `oid` of a validated `x-rm-token` (checks `iss`, `aud`, `tid`,
@@ -221,13 +222,14 @@ UC3 commit budget (p95, ms; the plan gives only the 2,000 ms target) **[LLD deci
 
 | Step | p95 |
 |---|---|
-| Edge + `web-bff` checks (Origin, CSRF, session, flags, `auth_time`) | 60 |
+| Edge + `web-bff` checks (Origin, CSRF, session, flags, `acrs` / `auth_time`) | 60 |
 | OBO for `Tools.Read Tools.Write` (usually a cache miss on approve) | 150 |
 | Schema validation, RFC 8785 canonicalisation, SHA-256 | 10 |
 | Key Vault `sign` | 100 |
 | `orchestrator` hop | 30 |
 | `tool-gateway` verify (entitlement cached, signature, claims, hash) | 30 |
-| Cosmos: `jti` create, `approvals` create, outbox batch | 90 |
+| Cosmos: one transactional batch in `approvals` (`jti` marker, verdict and saga, outbox items) | 60 |
+| Event Hubs ack of `approval_verified` (required before CRM writes) | 30 |
 | CRM writes in parallel (timeout `min(1,000, remaining − 250)`, else queued) | 900 |
 | Responses back to the RM | 60 |
 | **Total** | **≈ 1,430 (target 2,000)** |
@@ -260,7 +262,7 @@ Common App Configuration conventions: key prefix `rmc:<service>:`, label = envir
 in ≤ 30 s **[LLD decision]**. Feature flags use the App Configuration feature-flag schema
 (`.appconfig.featureflag/<name>`). If App Configuration is unreachable at start, the pod is not ready; if it
 becomes unreachable later, the last loaded values stay in force, except that the **write kill switch fails
-closed**: if `writes` has not been refreshed for > 5 min, writes are treated as disabled.
+closed**: if `writes` has not been refreshed for > 15 min, writes are treated as disabled (plan §3.3 Config).
 
 | Feature flag | Default (prod) | Checked by |
 |---|---|---|
@@ -269,6 +271,7 @@ closed**: if `writes` has not been refreshed for > 5 min, writes are treated as 
 | `outbox_delivery` | on | `outbox-worker` |
 | `degraded_force` (per use case filter) | off | `orchestrator` |
 | `news` | on | `tool-gateway` |
+| `facts_first` (UC1 early release of tool-only sections) | on | `web-bff`, `orchestrator` |
 | `arabic` | off (pilot: evaluated only) | `orchestrator` |
 | `model_canary` (targeting filter by RM group) | off | `orchestrator` (§8.5) |
 | `online_eval` | off | `orchestrator`, `eval-runner` |
@@ -279,7 +282,7 @@ closed**: if `writes` has not been refreshed for > 5 min, writes are treated as 
 **Responsibilities.** Single backend for the CRM sidebar and the Teams personal tab (C1). Validates the RM token,
 creates the session, issues CSRF tokens, enforces Origin and CSRF, sets `x-request-id`, `traceparent` and the
 deadline, gets OBO tokens for `tool-gateway`, applies per-RM request rate limits, checks feature flags, enforces
-step-up on approve (`auth_time` ≤ 10 min), canonicalises and hashes the approved draft and mints the ES256 approval
+step-up on approve (authentication context `approve-write`, `acrs` contains `c1`), canonicalises and hashes the approved draft and mints the ES256 approval
 token with Key Vault `sign` (§4). Sets security headers: strict CSP (`default-src 'self'; img-src 'self';
 connect-src 'self'; frame-ancestors <CRM origin> https://teams.microsoft.com https://*.teams.microsoft.com
 https://*.cloud.microsoft` **[confirm current Teams frame-ancestors list]**), `X-Content-Type-Options: nosniff`,
@@ -338,6 +341,13 @@ Teams; the CSRF token (stored hashed in the session document) is therefore manda
   "audit_event_id": "01937a4e-9000-7b55-8c11-aa0000000001"
 }
 ```
+
+**Facts first (plan §4.1 step 10).** With flag `facts_first` on and `Accept: text/event-stream`, `POST /v1/briefs`
+returns a short event stream of **verified sections, never model tokens** (C18, ADR-022): `event: progress` (step
+names only), `event: facts` (the `customer`, `snapshot`, `watch` and `opportunities` fields, built by code from
+`get_brief_inputs` output, sent as soon as plan step 6 completes, about 1.7 s at p95), then `event: brief` (the
+full body above, after step 9 checks) or `event: error`. Clients without event-stream support (or with the flag off)
+get the single JSON body. The SLO latency is measured on the final `brief` event.
 
 `POST /v1/policy-questions` (UC2)
 
@@ -429,11 +439,12 @@ Errors: `401 STEP_UP_REQUIRED`, `403 APPROVAL_INVALID`, `409 REPLAYED`, `412 DRA
 **Approve algorithm in `web-bff`** (detail of `00-plan.md` §4.2 steps 5 and 6):
 
 1. Check `Origin`, CSRF, session, `If-Match`, flag `writes` and `uc3`.
-2. Read the RM token: require `auth_time` ≥ `now − 600 s` and `acrs` contains `c1` (Conditional Access
-   authentication context "approve customer write", MFA, sign-in frequency every time) **[confirm authentication
-   context id and Teams tab popup support]**. Else `401 STEP_UP_REQUIRED` with the claims challenge
-   `{"access_token":{"acrs":{"essential":true,"value":"c1"}}}`.
-3. Load the draft (Cosmos `drafts`, point read), check `rm_oid` = token `oid` and `etag`.
+2. Read the RM token: require `acrs` contains `c1` (Conditional Access authentication context `approve-write`, MFA,
+   sign-in frequency 10 min). Fallback where `acrs` is not issued on the access token: the ID token presented with
+   the approve request has `auth_time` ≥ `now − 600 s` (plan §3.4) **[confirm `acrs` on access tokens, the
+   authentication context id and Teams tab popup support, plan §10 item 8]**. Else `401 STEP_UP_REQUIRED` with the
+   claims challenge `{"access_token":{"acrs":{"essential":true,"value":"c1"}}}`.
+3. Load the draft (Cosmos `drafts`, point read with partition key `rm_oid` = token `oid`), check `etag`.
 4. Server-side schema validation of the draft (`followup/1`), then RFC 8785 canonicalisation and SHA-256 (§4.2).
 5. OBO for `api://rm-copilot-tool-gateway/Tools.Read Tools.Write` using the fresh RM token.
 6. Mint the approval token (§4.3) with Key Vault `sign` (timeout `min(400, remaining − 150)`); record
@@ -455,7 +466,7 @@ custom role with `keys/sign/action` and `keys/read` on key `approval-signing` on
 | `orchestrator` | `remaining − 150` | 0 | default | map error envelope through |
 | Key Vault `sign` | `min(400, remaining − 150)` | 1 on 429/503 if `remaining ≥ 800` | default | `503 DEPENDENCY_UNAVAILABLE`; no token minted |
 | Cosmos (`sessions`, `drafts`) | 300 ms | SDK retry on 429 within deadline | default | `503 DEPENDENCY_UNAVAILABLE` |
-| App Configuration | background refresh | n/a | n/a | last known values; writes fail closed after 5 min stale |
+| App Configuration | background refresh | n/a | n/a | last known values; writes fail closed after 15 min stale |
 
 **Scaling.** 3 replicas minimum (one per zone), HPA max 6 (pilot) / 12 (scale) on CPU 60% or KEDA Prometheus
 trigger `sum(rmc_http_server_inflight_requests{service="web-bff"}) / replicas > 20`. Illustrative resources:
@@ -478,7 +489,7 @@ Key Vault down: approve fails closed (no unsigned path, ever). Session store dow
 placeholder fill; UC2 RAG with groundedness, retry once and decline; UC3 extraction and validation; deadline and
 budget enforcement (≤ 6 tool steps, ≤ 12k input and 1.5k output tokens per request); guardrails (§9); degraded
 mode (C3); calls `tool-gateway` with the RM token unchanged; emits use-case audit events through `tool-gateway`'s
-audit endpoint (it holds no Event Hubs or Key Vault rights) **[LLD decision, see §14]**. Holds no keys and no
+audit endpoint (it holds no Event Hubs or Key Vault rights; plan v2.3: `tool-gateway` is the only audit producer). Holds no keys and no
 customer data beyond request scope (no cache of tool output across requests).
 
 **Endpoints (internal, ClusterIP only, callable only by `web-bff` per network policy).**
@@ -514,12 +525,13 @@ identity; plus `x-rm-token` present and syntactically a JWT (the orchestrator do
 it on; it reads `oid` only for metric hashing). Outbound: its workload token to `tool-gateway` (role
 `Tools.Invoke`, `Audit.Append`) and to APIM AI gateway (role `AiGateway.Generate`); managed identity to Content
 Safety and AI Language (Cognitive Services User role scoped to those resources), App Configuration Data Reader.
+On AI gateway calls it sends `x-rm-oid` (the `oid` of `x-rm-token`) as the per-RM quota key, never the RM token.
 
 **Dependencies.**
 
 | Dependency | Timeout | Retries | Breaker | On failure |
 |---|---|---|---|---|
-| `tool-gateway` read tools | `get_brief_inputs` (UC1): `min(2,000, remaining − 2,800)`; other tools: `min(2,000, remaining − reserve − min_gen)` | per §1.7 | per tool | non-critical source (news, KYC, signals): section flagged, `mode=partial`; critical source (profile, facilities): `503`/`504` mapped |
+| `tool-gateway` read tools | `get_brief_inputs` (UC1): `min(2,000, remaining − 2,800)`; other tools: `min(2,000, remaining − reserve − min_gen)` | per §1.7 | per tool | non-critical source (LOS facilities, ODS transactions, KYC, news): section flagged, `mode=partial`; the only critical source is the CRM profile: `503`/`504` mapped (plan §4.1 step 5) |
 | `tool-gateway` `search_policies` | `min(1,000, remaining − 2,500)` | 0 | yes | UC2 `503 DEPENDENCY_UNAVAILABLE` (no answer without retrieval) |
 | APIM AI gateway `gen-large` | `remaining − post_reserve` (≥ min viable budget, else skip) | 0 in client; APIM retries to backend 2 only if ≥ 4 s remain | client breaker 20 s | degraded mode |
 | APIM AI gateway `gen-small` (router, rewrite, extract) | rewrite: `min(1,000, ...)`; extract: `remaining − 300` | 0 | yes | UC2 rewrite failure: use the raw masked question; UC3 extract failure: degraded (manual call report) |
@@ -550,8 +562,9 @@ call; budget exceeded → `429 BUDGET_EXCEEDED`; nothing unverified is ever retu
 (cache ≤ 60 s); calls systems of record through the APIM system API facade; minimises and masks fields; returns
 facts with source references; policy search (query embedding via APIM AI gateway, AI Search hybrid query with
 mandatory filters); write API that verifies the approval token with the public key only; jti replay store;
-saga and outbox; audit producer (Event Hubs, waits for ack); consumes portfolio change events to invalidate the
-entitlement cache.
+saga and outbox; the **only** audit producer (Event Hubs, waits for ack; Cosmos `audit-spool` as fallback, §6.4);
+owns the Graph calendar call (`get_upcoming_meetings`) and the UC1 fan-out (`get_brief_inputs`); consumes portfolio
+change events to invalidate the entitlement cache.
 
 **Endpoints.**
 
@@ -605,8 +618,9 @@ commits, audit), `Outbox.Deliver` (deliver only); `azp` must match the expected 
 user token with role `Ops.Outbox` and `acrs` contains `c1`, reached only through the private admin ingress.
 Outbound: workload token to APIM facade (`SystemApi.Read`, `SystemApi.Write`, `SystemApi.DeferredWrite`) and AI
 gateway (`AiGateway.Embed`); OBO to Graph (`Calendars.ReadBasic`); AI Search `Search Index Data Reader` on the
-policy index; Cosmos data-plane RBAC (custom role, containers `entitlements`, `jti`, `approvals`, `outbox`,
-`idempotency`; no access to `drafts` or `sessions`); Event Hubs `Azure Event Hubs Data Sender` on `audit-events` and `audit-content`; Key
+policy index; Cosmos data-plane RBAC (custom role, containers `entitlements`, `approvals`, `idempotency`,
+`audit-spool` (create only); no access to `drafts` or `sessions`); Event Hubs `Azure Event Hubs Data Sender` on `audit-events` and `audit-content`, `Azure Event Hubs Data Receiver` on
+`crm-portfolio-events` (consumer group `tool-gateway`); Key
 Vault custom role with `keys/read` only on `approval-signing` (public key).
 
 **Entitlement check (first step of every customer-scoped tool and of commits).**
@@ -623,9 +637,10 @@ entitled(rm_oid, customer_id, mode):          # mode = read | write
 ```
 
 Maximum staleness: 50 s (Cosmos) + 10 s (in-process) = 60 s (plan C22). Portfolio change events: CRM publishes
-`portfolio.changed {rm_oid, customer_id, change}` and `delegation.changed` to Event Hub `crm-portfolio-events`
-(same namespace) **[LLD decision; confirm CRM can emit events]**; consumer group `tool-gateway` deletes the
-Cosmos document. If entitlements cannot be resolved (CRM down and no cache) the answer is **deny** with
+`portfolio.changed {rm_oid, customer_id, change}` and `delegation.changed` to the APIM API `rmc-crm-events`, which
+forwards them to Event Hub `crm-portfolio-events` in the audit namespace (plan §4.1 step 4, §7.3) **[confirm CRM can
+emit events, plan §10 item 17]**; consumer group `tool-gateway` deletes the Cosmos document and broadcasts an
+in-process invalidation. Lag is measured as `rmc_portfolio_event_lag_seconds` (event time to consumption). If entitlements cannot be resolved (CRM down and no cache) the answer is **deny** with
 `503 DEPENDENCY_UNAVAILABLE` (never allow on failure).
 
 **Dependencies.**
@@ -635,14 +650,14 @@ Cosmos document. If entitlements cannot be resolved (CRM down and no cache) the 
 | APIM facade → CRM (reads, entitlements) | `min(1,500, remaining − 100)` | 1 on 503/reset per §1.7 | yes, 60 s open | entitlement: deny (503); profile: 503 |
 | APIM facade → CRM (writes) | `min(1,000, remaining − 250)` | 0 | 3 consecutive | item → outbox `queued` |
 | APIM facade → ODS | `min(1,500, remaining − 100)` | per §1.7 | yes | signals section flagged |
-| APIM facade → LOS | `min(1,500, remaining − 100)` | per §1.7 | yes | facilities: critical → 503 |
+| APIM facade → LOS | `min(1,500, remaining − 100)` | per §1.7 | yes | facilities section flagged (partial) |
 | APIM facade → KYC | `min(1,200, remaining − 100)` | per §1.7 | yes | KYC section flagged (partial) |
 | APIM facade → news feed | `min(1,000, remaining − 100)` | 0 | yes | news section flagged (partial) |
 | Graph (calendar) | `min(800, remaining − 100)` | 0 | yes | empty meeting list with warning |
 | APIM AI gateway `embed` | `min(300, remaining − 100)` | 0 | yes | UC2: keyword-only (BM25 + semantic ranker) search, flagged `retrieval_mode=keyword` |
 | AI Search | `min(600, remaining − 100)` | 0 | yes | 503 |
 | Cosmos | 300 ms point ops | SDK 429 retry within deadline | yes | reads: entitlement deny; commit: 503 before jti create, or saga recovery after (§5.5) |
-| Event Hubs (audit) | 300 ms, waits for ack | 1 within deadline | yes | **fail closed**: a tool result is not released without its audit event; `503 DEPENDENCY_UNAVAILABLE` **[confirm with Risk; see §14]** |
+| Event Hubs (audit) | 300 ms, waits for ack | 1 within deadline | yes | write the event to Cosmos `audit-spool` (create, 300 ms) and continue; if the spool write also fails: **fail closed**, nothing is released, `503 DEPENDENCY_UNAVAILABLE/AUDIT`. Exception: `approval_verified` on a commit must be acknowledged by Event Hubs itself before any CRM write (ADR-013); otherwise `503` and the draft stays saved |
 | Key Vault (public key) | cached per `kid` for 10 min, refreshed on unknown `kid` | 1 | yes | known `kid`s keep verifying from cache; unknown `kid` → `APPROVAL_INVALID/UNKNOWN_KID` |
 
 **Scaling.** 3 to 6 replicas (pilot), 3 to 12 (scale), HPA CPU 60% plus KEDA Prometheus trigger on in-flight
@@ -656,15 +671,16 @@ requests > 30 per pod. Illustrative resources: requests `500m` / `768Mi`, limits
 `rmc:tool-gateway:search:top_k` (5), `rmc:tool-gateway:search:candidates` (50),
 `rmc:tool-gateway:contracts:{tool}` (active version), `rmc:tool-gateway:crm_write_timeout_ms` (1000).
 
-**Failure behaviour.** Fails closed on identity, entitlement, approval and audit. Fails partial on non-critical
-sources. Writes never fail silently: every item ends in `committed`, `queued`, `failed` or `cancelled` with an
+**Failure behaviour.** Fails closed on identity, entitlement, approval and audit (audit = neither Event Hubs nor the
+spool acknowledged). Fails partial on non-critical sources. Writes never fail silently: every item ends in `committed`, `queued`, `failed` or `cancelled` with an
 audit event.
 
 ### 2.4 `outbox-worker`
 
-**Responsibilities.** Delivers queued CRM writes from the Cosmos `outbox` container. Picks up new items via the
-change feed processor (lease container `leases`) and due retries via a scheduler query every 15 s
-(`state IN ("queued","retry_wait") AND next_attempt_at <= now`), because the change feed fires only on writes
+**Responsibilities.** Delivers queued CRM writes from the outbox item documents in the Cosmos `approvals` container
+(ADR-019). Picks up new items via the change feed processor (lease container `leases`, filtered to
+`type = "outbox_item"`) and due retries via a scheduler query every 15 s
+(`type = "outbox_item" AND state IN ("queued","retry_wait") AND next_attempt_at <= now`, cross-partition), because the change feed fires only on writes
 **[LLD decision]**. For each item: read-before-retry by external reference, then deliver through
 `tool-gateway POST /internal/v1/outbox/deliver`. Applies the backoff schedule and poison rules (§5.3). Also runs
 the **saga recovery sweep** (§5.5) and the **unused-approval sweep** (minted tokens never presented: emits
@@ -679,9 +695,9 @@ the **saga recovery sweep** (§5.5) and the **unused-approval sweep** (minted to
 {"state": "committed", "crm_ref": "TSK-55102", "found_by_read_before_retry": false}
 ```
 
-**Auth.** Workload token to `tool-gateway`, role `Outbox.Deliver`. Cosmos data-plane role on `outbox`,
-`leases`, `approvals` (read, conditional replace) and `jti` (read, state update for the sweeps). No access to Key Vault or Event Hubs (audit via
-`tool-gateway`).
+**Auth.** Workload token to `tool-gateway`, role `Outbox.Deliver`. Cosmos data-plane role on `approvals` (read,
+conditional replace), `leases`, and read-only on `drafts` metadata for the unused-approval sweep. No access to Key
+Vault or Event Hubs (audit via `tool-gateway`).
 
 **Dependencies.** `tool-gateway` deliver: timeout 5,000 ms (no RM waiting; CRM cap inside `tool-gateway` 3,000 ms
 for deferred writes); breaker per CRM endpoint opens after 3 consecutive failures, 60 s. Cosmos: 1,000 ms.
@@ -740,23 +756,25 @@ together with `superseded` on the previous version.
 ### 2.6 `audit-writer`
 
 **Responsibilities.** Consumes `audit-events` (metadata) and `audit-content` (envelope-encrypted content) from
-Event Hubs; validates schema; appends metadata to the per-partition **hash chain** in immutable Blob (WORM, GZRS);
+Event Hubs, and **drains the Cosmos `audit-spool`** (§6.4); validates schema; appends metadata to the per-partition **hash chain** in immutable Blob (WORM, GZRS);
 writes content to the content store encrypted with a per-customer key; sends metadata to the restricted Log
-Analytics table `RmCopilotAudit_CL` via the Logs Ingestion API (DCR); writes hourly signed chain anchors (§6.5).
+Analytics table `RmCopilotAudit_CL` via the Logs Ingestion API (DCR); writes a signed **seal** every 5 minutes to
+the seal store in the separately administered subscription (§6.5, plan §3.3).
 Serves auditor verification and the erasure (crypto-shred) operation.
 
 **Endpoints (admin, private admin ingress).**
 
 | Method and path | Role | Purpose |
 |---|---|---|
-| `POST /admin/v1/chain/verify` | `Audit.Verify` | `{"chain_id": "p2", "from": "2026-11-01T00:00:00Z", "to": "2026-11-26T00:00:00Z"}` → `{"verified": 18233, "breaks": [], "anchors_ok": true}` |
+| `POST /admin/v1/chain/verify` | `Audit.Verify` | `{"chain_id": "p2", "from": "2026-11-01T00:00:00Z", "to": "2026-11-26T00:00:00Z"}` → `{"verified": 18233, "breaks": [], "seals_ok": true}` |
 | `POST /admin/v1/erasure` | `Audit.Erase` (PIM) + second approver | `{"customer_id": "crescent", "legal_basis_ref": "DPO-2026-114"}` → `{"state": "pending_second_approval"}`, then crypto-shred (§6.6) |
 | `GET /admin/v1/erasure/{id}` | `Audit.Erase` | status |
 
 **Auth.** Event Hubs Data Receiver (consumer group `audit-writer`); Storage: data-plane write to `audit-worm`
 (append only by immutability policy) and `audit-content`; Key Vault: `unwrapKey` on `audit-transport`, `wrapKey`
-/ `unwrapKey` / `create` on per-customer keys in vault `kv-rmc-cust-<env>`, `sign` on `audit-anchor`; Logs
-Ingestion `Monitoring Metrics Publisher` on the DCR.
+/ `unwrapKey` / `create` on per-customer keys in vault `kv-rmc-cust-<env>`, `sign` on `audit-seal`; Cosmos
+`audit-spool` (read, delete) and `audit-chain-heads`; seal store container `audit-seals` (create only, granted by
+the seal subscription's owner); Logs Ingestion `Monitoring Metrics Publisher` on the DCR.
 
 **Dependencies.** Event Hubs (checkpoint every 100 events or 10 s in Blob `eh-checkpoints`); Blob append 2 s,
 retry 5 with backoff; Key Vault 1 s, retry 3; Log Analytics ingestion 5 s, retry with backoff, buffered (the WORM
@@ -767,18 +785,19 @@ A failure to append to WORM stops the partition consumer (no skipping); alert `A
 resources: `250m` / `512Mi`, limits `1` / `1Gi`.
 
 **Configuration keys.** `rmc:audit-writer:chain:blob_container` (`audit-worm`),
-`rmc:audit-writer:chain:anchor_interval_min` (60), `rmc:audit-writer:content:retention_days` (365),
+`rmc:audit-writer:chain:seal_interval_min` (5), `rmc:audit-writer:content:retention_days` (365),
 `rmc:audit-writer:la:dcr_id`, `rmc:audit-writer:schema_version` (`audit/1`).
 
 **Failure behaviour.** Schema-invalid event: written to the chain as `invalid_event` with its hash (never dropped)
 and alerted. Event Hubs retention (3 days for `audit-events`, 1 day for `audit-content`) is the buffer during
-outages; lag alert at 5 min.
+outages; lag alert at 5 min. Spool drain: oldest spooled event > 15 min raises `RmcAuditSpoolBacklog`. Seal store
+unreachable: seals are retried and the gap raises `RmcAuditSealStale` (seals are never skipped silently).
 
 ### 2.7 `eval-runner`
 
 **Responsibilities.** CI job and nightly job (Kubernetes `CronJob` in the eval environment, plus a GitHub
-Actions/Azure DevOps job for the release gate). Runs the golden set (≥ 300 items: QA, brief, extraction, access,
-restricted, superseded, injection, Arabic, false-positive banking language) against a deployed stack or against
+Actions/Azure DevOps job for the release gate). Runs the golden set (≥ 300 UC2 items plus ≥ 50 UC1 briefs and ≥ 50 UC3 note sets: QA, brief, extraction,
+access, restricted, superseded, injection, Arabic, false-positive banking language; plan §5) against a deployed stack or against
 a candidate model deployment; computes gates (`00-plan.md` §5); writes a signed report; publishes `rmc_eval_metric`.
 Online sampling (flag `online_eval`) judges a sample of production outputs with an in-region judge
 (`gen-large` in the same environment, use case `eval`) using only already-masked content from the audit content
@@ -800,7 +819,7 @@ Report schema (excerpt):
   "lineage": {"gen-large": {"deployment": "gen-large-2026-08", "model_version": "[pinned]"}, "prompt_hashes": {"uc2.answer": "sha256:..."}, "guardrail_version": "guardrails/2026.11.2", "index_version": "policies-v3"},
   "gates": [
     {"metric": "groundedness", "observed": 0.981, "lower_bound_95": 0.958, "threshold": 0.95, "pass": true},
-    {"metric": "citation_accuracy", "observed": 0.977, "lower_bound_95": 0.953, "threshold": 0.95, "pass": true},
+    {"metric": "citation_accuracy", "observed": 0.977, "lower_bound_95": 0.954, "threshold": 0.95, "pass": true},
     {"metric": "entitlement_leaks", "observed": 0, "threshold": 0, "pass": true},
     {"metric": "injection_success", "observed": 0, "threshold": 0, "pass": true},
     {"metric": "numeric_mismatches", "observed": 0, "threshold": 0, "pass": true},
@@ -810,8 +829,9 @@ Report schema (excerpt):
 }
 ```
 
-Confidence bound: one-sided 95% Wilson lower bound (z = 1.645). With 300 items, groundedness needs ≥ 292 of 300
-passing (observed ≥ 97.3%) to clear 0.95 **[LLD decision; agree method with MRM]**.
+Confidence bound: the 95% Wilson lower bound as in plan §5 (lower limit of the two-sided 95% interval,
+z = 1.96). With 300 scored UC2 answers, groundedness needs ≥ 293 of 300 passing (observed ≥ 97.7%) to clear 0.95;
+the example above (306 and 305 of 312) gives 0.959 and 0.954 **[agree method with MRM]**.
 
 **Auth.** Workload identity `id-rmc-eval-runner` (federated to the CI OIDC subject or the CronJob service
 account): `AiGateway.Generate`, `AiGateway.Embed`, `AiGateway.Judge`; `Orchestrator.Invoke` in the eval
@@ -820,7 +840,7 @@ data outside prod; online sampling reads only masked content.
 
 **Dependencies, scaling, configuration.** Concurrency 4 requests; per-item timeout = the use case deadline plus
 2 s; judge calls 20 s. Runs as a Job (`1` CPU / `2Gi`). Keys: `rmc:eval:golden_set_version`,
-`rmc:eval:gates:*` (thresholds above), `rmc:eval:online:sample_rate` (0.02), `rmc:eval:online:max_per_day` (200).
+`rmc:eval:gates:*` (thresholds above), `rmc:eval:online:sample_rate` (0.05, ADR-018), `rmc:eval:online:max_per_day` (200).
 
 **Failure behaviour.** A gate failure blocks the release pipeline and the model pin change (§8.5). A run error
 (not a gate failure) also blocks; it never passes by default.
@@ -854,7 +874,7 @@ data outside prod; online sampling reads only masked content.
 
 | Tool | Version | Kind | Source system (via APIM facade unless noted) | Entitlement rule | Used by |
 |---|---|---|---|---|---|
-| `get_brief_inputs` (composite) | 1.0.0 | read | fans out to the five UC1 read tools below, in parallel, inside `tool-gateway` | one entitlement check for the customer | UC1 |
+| `get_brief_inputs` (composite) | 1.0.0 | read | fans out to the five UC1 read tools below, in parallel, inside `tool-gateway`; only `get_customer_profile` is critical | one entitlement check for the customer | UC1 |
 | `get_customer_profile` | 1.2.0 | read | CRM | owner, delegate, team lead (read) | UC1, UC3 |
 | `get_facilities` | 1.1.0 | read | LOS (limits), core banking ODS (balances) | owner, delegate, team lead | UC1 |
 | `get_transaction_signals` (transaction summary) | 1.0.0 | read | core banking ODS (aggregates) | owner, delegate, team lead | UC1 |
@@ -883,8 +903,10 @@ tool's output envelope plus a per-source status. Input `{"customer_id": string}`
  "critical_ok": true}
 ```
 
-`status` per source: `ok`, `unavailable` (timeout, breaker open, 5xx), `disabled` (flag). `critical_ok` is false if
-the profile or facilities failed; the orchestrator then returns `503`/`504` instead of a brief. The prototype exposes
+`status` per source: `ok`, `unavailable` (timeout, breaker open, 5xx), `disabled` (flag). `critical_ok` is false only
+if the CRM profile failed (plan §4.1 step 5); the orchestrator then returns `503`/`504` instead of a brief. Any other
+failed source gives `mode=partial` with a `SOURCE_UNAVAILABLE` warning for its section (`facilities`, `transactions`,
+`kyc`, `news`). The prototype exposes
 this as `GET /tools/customers/{id}/brief-inputs` (§14.3).
 
 Write tools have **no** `POST /v1/tools/{tool}` route: they run only inside the commit saga (§5), so no code path
@@ -954,8 +976,9 @@ Output:
 
 `utilisation_pct = round(used / limit × 100)` computed in `tool-gateway` (deterministic, half-up). Ordered by
 `utilisation_pct` descending; at most 5. **Removed**: account numbers, collateral details, pricing and margins
-(the model must never discuss pricing), covenant text, internal risk grade, limit approval history. Critical for
-UC1.
+(the model must never discuss pricing), covenant text, internal risk grade, limit approval history. Non-critical
+(plan §4.1 step 5): LOS or ODS balance failure → the facilities section is flagged as a whole (the schema keeps `used`
+mandatory, so no half-filled facility is shown).
 
 ### 3.5 `get_transaction_signals` 1.0.0 (read, core banking ODS; "transaction summary")
 
@@ -1061,7 +1084,7 @@ by ranking.
 
 ### 3.9 `get_upcoming_meetings` 1.0.0 (read, Graph) [added by LLD]
 
-Needed for UC1 entry from the Teams tab; the plan names Graph `Calendars.ReadBasic` (C20) but no owning service.
+Needed for UC1 entry from the Teams tab; `tool-gateway` owns the Graph call (plan v2.3, C20).
 Input `{"days": 1..5}`. Output ≤ 20 items `{meeting_id (hashed Graph id), start, end, subject_masked,
 customer_id|null, match: "crm_contact_email"|"crm_customer_name"|"none"}`. Matching to CRM customers happens in
 `tool-gateway` against the RM's entitled portfolio only. **Removed**: body (not available with ReadBasic),
@@ -1195,7 +1218,7 @@ verify]`, exportable false, purge protection on, Key Vault RBAC. `web-bff` ident
        else 401 UNAUTHENTICATED/WORKLOAD_NOT_ALLOWED
  2. Authenticate RM: x-rm-token valid (iss, aud=api://rm-copilot-tool-gateway, tid, exp, nbf), scp contains Tools.Write.
        rm_oid = token.oid                      else 401 UNAUTHENTICATED or 403 INSUFFICIENT_SCOPE
- 3. Feature flags: writes and uc3 on (writes fresh within 5 min)   else 503 FEATURE_DISABLED
+ 3. Feature flags: writes and uc3 on (writes fresh within 15 min)  else 503 FEATURE_DISABLED
  4. Schema-validate the request body and the draft against followup/1 (NFC applied)
        else 400 VALIDATION_FAILED (reason SCHEMA or POLICY_VIOLATION)
  5. Entitlement first (write mode): entitled(rm_oid, draft.customer_id, write)   else 403 NOT_ENTITLED
@@ -1222,9 +1245,12 @@ verify]`, exportable false, purge protection on, Key Vault RBAC. `web-bff` ident
     schema == draft.schema and schema in supported_schemas               else SCHEMA_MISMATCH
 14. h = hex(SHA-256(JCS(NFC(draft)))); constant_time_equal(h, draft_sha256)  else DRAFT_HASH_MISMATCH
 15. Idempotency-Key: if a stored response exists for (rm_oid, key): same body hash -> return it; else 409 IDEMPOTENCY_CONFLICT
-16. Atomic jti create (4.5)                                              else 409 REPLAYED (or idempotent return)
-17. Create the approval document (verdict + saga state, 4.6) and the outbox item documents (5.2, 5.5);
-    emit audit approval_issued + approval_verified
+16. Emit audit approval_issued + approval_verified; Event Hubs must acknowledge approval_verified (no spool)
+                                                                         else 503 DEPENDENCY_UNAVAILABLE/AUDIT
+                                                                         (nothing written; the draft stays saved)
+17. One transactional batch in `approvals` (partition key = jti): jti marker create (4.5), approval document
+    (verdict + saga state, 4.6), one outbox item document per item (5.2)  else 409 REPLAYED (or idempotent return;
+    a replay also emits approval_rejected REPLAYED)
 18. Run the saga (5) and return 200/202 with per-item status
 Any failure in 6 to 14: emit audit approval_rejected {reason, kid, jti if parseable, token_sha256}; increment
 rmc_approval_tokens_rejected_total{reason}; respond 403 APPROVAL_INVALID with that reason.
@@ -1235,22 +1261,24 @@ Libraries: a maintained JOSE library configured with an explicit algorithm allow
 
 ### 4.5 Atomic `jti` create
 
-Cosmos container `jti` (partition key `/id`). `CreateItem` (not upsert) is atomic per item id within its logical
-partition, so two concurrent commits with the same token cannot both succeed:
+Cosmos container `approvals` (partition key `/jti`, ADR-019). The `jti` marker is the document with `id = jti`. It is
+created with `CreateItem` (not upsert) inside the same **transactional batch** as the approval document and the
+outbox items; an existing id in the same logical partition fails the whole batch with 409, so two concurrent commits
+with the same token cannot both succeed and a replay can never produce a verdict:
 
 ```json
-{"id": "Xq3v9Kd2Q0yB5nT1ZsPq8w", "sub": "6b1f8a2e-...", "draft_id": "01937a50-...", "draft_sha256": "9f2c...e41a",
- "idem_key_sha256": "c1d2...", "state": "reserved", "created_at": "2026-11-26T05:40:12.031Z", "ttl": 86400}
+{"id": "Xq3v9Kd2Q0yB5nT1ZsPq8w", "jti": "Xq3v9Kd2Q0yB5nT1ZsPq8w", "type": "jti", "sub": "6b1f8a2e-...", "draft_id": "01937a50-...",
+ "draft_sha256": "9f2c...e41a", "idem_key_sha256": "c1d2...", "created_at": "2026-11-26T05:40:12.031Z", "ttl": 86400}
 ```
 
 On `409 Conflict`: read the existing document. If `sub` and `draft_sha256` equal the current request's (a client
 or network retry of the same approval), return the existing saga's status with `200` and `"replay_of_same_request":
 true`, performing no new writes. Otherwise return `409 REPLAYED` with `details.saga_id` only if the caller is the
-same RM. After the saga is created, `state` becomes `bound`. TTL 1 day (> token life of 300 s + skew, plan §7).
+same RM. TTL 1 day (> token life of 300 s + skew, plan §7).
 
 ### 4.6 Verdict persistence
 
-Written as a new document in the `approvals` container (`id = jti`, `CreateItem`) before any CRM call, so that
+Written in the `approvals` container (`id = <jti>:approval`, partition `jti`, in the batch of §4.5) before any CRM call, so that
 outbox retries after `exp` are authorised by the persisted verdict and never re-verify an expired token (C7). The
 document holds the verdict, the approved snapshot of the draft ("verdict persisted with the draft", plan §4.2) and
 the saga state. Only `tool-gateway` and `outbox-worker` can write `approvals`; `web-bff` (the signer) cannot write
@@ -1258,12 +1286,12 @@ or alter a verdict **[LLD decision]**.
 
 ```json
 {
-  "id": "Xq3v9Kd2Q0yB5nT1ZsPq8w", "type": "approval", "draft_id": "01937a50-1111-7000-8000-000000000abc", "customer_id": "harbourline",
+  "id": "Xq3v9Kd2Q0yB5nT1ZsPq8w:approval", "type": "approval", "draft_id": "01937a50-1111-7000-8000-000000000abc", "customer_id": "harbourline",
   "verdict": "valid", "jti": "Xq3v9Kd2Q0yB5nT1ZsPq8w", "kid": "approval-signing/3f9c...", "sub": "6b1f8a2e-...",
   "op": "crm.commit_followup", "schema": "followup/1", "draft_sha256": "9f2c...e41a",
   "iat": 1795665600, "exp": 1795665900, "verified_at": "2026-11-26T05:40:12.044Z", "verifier": "tool-gateway@sha256:ab12...",
   "token_sha256": "77aa...", "approved_snapshot": {"...": "the canonical draft object"}, "auth_time": 1795665420,
-  "saga": {"state": "created", "items": []}, "ttl": 2592000
+  "saga": {"state": "created", "items": []}, "ttl": -1
 }
 ```
 
@@ -1309,7 +1337,7 @@ One approval = one saga (`saga_id = jti`). Items: the call report (`item_id = "c
 (`t1`..`t10`). Items are independent CRM records; the saga uses **forward recovery** (retry until committed or
 poison), never compensating deletes, because a partially written follow-up is still correct and every item is
 visible to the RM with its state **[LLD decision]**. External reference per item: `"<jti>:<item_id>"`, sent to
-CRM as the idempotency / external reference field **[confirm CRM support, plan §10.8]**.
+CRM as the idempotency / external reference field **[confirm CRM support, plan §10 item 11]**.
 
 ### 5.2 State machines
 
@@ -1380,20 +1408,17 @@ with `mode=deferred`, §7.2); audits `write_committed` / `write_queued` / `write
 
 ### 5.5 Crash recovery
 
-Each step is idempotent and ordered: (1) jti `reserved` → (2) approval document (verdict, snapshot, saga state
-`created`) created in `approvals` → (3) one item document per item created in state `pending` with a single
-`TransactionalBatch` in the `outbox` container (same partition key `saga_id`) → (4) jti `bound` → (5) inline
-writes. Outbox item documents are the source of truth for item state; `approvals.saga.items` is a denormalised
-summary updated after each transition. The
-worker selects only `queued` and due `retry_wait` items, so `pending` items are never double-sent. The
-`outbox-worker` recovery sweep runs every 60 s:
+The hand-off is atomic (ADR-019, ADR-010): (1) Event Hubs ack of `approval_verified` (§4.4 step 16) → (2) one
+`TransactionalBatch` in `approvals` (partition `jti`) creates the `jti` marker, the approval document (verdict,
+snapshot, saga state `created`) and one item document per item in state `pending`, or nothing → (3) inline writes. A
+crash between (1) and (2) leaves an audited verification with no verdict and no write; the RM approves again. Outbox item documents are
+the source of truth for item state; the approval document's `saga.items` is a denormalised summary updated after
+each transition. The worker selects only `queued` and due `retry_wait` items, so `pending` items are never
+double-sent. The `outbox-worker` recovery sweep runs every 60 s:
 
-- jti `reserved` > 60 s old, approval document present, item documents missing: create what is missing with every
-  item `queued` (writes still happen, via the outbox), set jti `bound`, audit `saga_recovered`.
 - items `pending` > 60 s old (the `tool-gateway` pod died before the inline write): set `queued` with
-  `outcome_unknown=true`.
-- jti `reserved` > 60 s old, no approval document: set jti `abandoned`, audit `approval_abandoned`; the RM sees "approval not
-  completed, approve again" (a new token, new `jti`).
+  `outcome_unknown=true` and audit `saga_recovered` (`approval_verified` was acknowledged before the batch).
+- a batch can never leave a marker without a verdict, so the earlier "reserved" and "abandoned" states are gone.
 - items `in_flight` with `lease_until < now`: back to `queued` (read-before-retry protects against double posting).
 
 ### 5.6 Poison handling and operator actions
@@ -1415,22 +1440,23 @@ is not shown in the admin API.
 
 ### 5.7 Cosmos documents
 
-Saga state (the `saga` part of the `approvals` document, partition key `/id`, TTL 30 days):
+Saga state (the `saga` part of the approval document in `approvals`, partition key `/jti`; `ttl` = -1 while any item
+is open, set to 30 days when the last item reaches a final state, plan §7):
 
 ```json
-{"id": "Xq3v9Kd2Q0yB5nT1ZsPq8w", "type": "approval", "op": "crm.commit_followup", "sub": "6b1f8a2e-...",
+{"id": "Xq3v9Kd2Q0yB5nT1ZsPq8w:approval", "jti": "Xq3v9Kd2Q0yB5nT1ZsPq8w", "type": "approval", "op": "crm.commit_followup", "sub": "6b1f8a2e-...",
  "customer_id": "harbourline", "draft_id": "01937a50-...", "verdict": "valid", "...": "verdict fields as in §4.6",
  "saga": {"state": "partially_queued", "items": [{"item_id": "cr", "kind": "call_report", "state": "committed", "crm_ref": "CR-77120"},
            {"item_id": "t1", "kind": "task", "state": "committed", "crm_ref": "TSK-55101"},
            {"item_id": "t2", "kind": "task", "state": "queued"}]},
  "idempotency_key_sha256": "c1d2...", "created_at": "2026-11-26T05:40:12.050Z", "updated_at": "2026-11-26T05:40:13.310Z",
- "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736", "ttl": 2592000}
+ "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736", "ttl": -1}
 ```
 
-Outbox item (`outbox`, partition key `/saga_id`; `ttl` set to 30 days only when terminal, `-1` while open):
+Outbox item (`approvals`, `type = "outbox_item"`, partition key `/jti`; `ttl` set to 30 days only when terminal, `-1` while open):
 
 ```json
-{"id": "Xq3v9Kd2Q0yB5nT1ZsPq8w:t2", "saga_id": "Xq3v9Kd2Q0yB5nT1ZsPq8w", "kind": "task", "external_ref": "Xq3v9Kd2Q0yB5nT1ZsPq8w:t2",
+{"id": "Xq3v9Kd2Q0yB5nT1ZsPq8w:t2", "jti": "Xq3v9Kd2Q0yB5nT1ZsPq8w", "type": "outbox_item", "saga_id": "Xq3v9Kd2Q0yB5nT1ZsPq8w", "kind": "task", "external_ref": "Xq3v9Kd2Q0yB5nT1ZsPq8w:t2",
  "state": "retry_wait", "attempts": 2, "next_attempt_at": "2026-11-26T05:41:05Z", "outcome_unknown": true,
  "last_error": {"class": "timeout", "http_status": null, "at": "2026-11-26T05:40:35Z"},
  "lease_owner": null, "lease_until": null, "crm_ref": null, "poison_reason": null,
@@ -1446,22 +1472,22 @@ All updates use `If-Match` on `_etag` (optimistic concurrency), so two workers c
 ### 6.1 Cosmos DB for NoSQL
 
 Account `cosmos-rmc-<env>` (UAE North, zone-redundant, single write region, Session consistency default,
-customer-managed key, `disableLocalAuth: true`, public network access disabled, continuous backup with
-point-in-time restore plus periodic backup copies to the BCP vault **[confirm backup redundancy options in UAE
-North]**). Database `rmcopilot`, shared autoscale throughput 1,000 RU/s max in pilot, dedicated 1,000 to 4,000 RU/s
-autoscale for `outbox` and `jti` at scale. Indexing policy per container excludes `/*` and includes only the
+customer-managed key, `disableLocalAuth: true`, public network access disabled, **periodic backup mode with
+geo-redundant backup storage** (an account runs either periodic or continuous backup, not both; continuous backup
+does not survive region loss; restore of a periodic backup is a support request) **[confirm interval, retention
+and backup storage location in UAE North, plan §10 item 13]**). Database `rmcopilot`, shared autoscale throughput
+1,000 RU/s max in pilot, dedicated 1,000 to 4,000 RU/s autoscale for `approvals` at scale. Indexing policy per container excludes `/*` and includes only the
 queried paths, so content fields are never indexed.
 
 | Container | Partition key | Default TTL | Per-item TTL | Indexed paths | Writers | Readers |
 |---|---|---|---|---|---|---|
 | `sessions` | `/id` (SHA-256 of the session cookie) | 86,400 s (24 h, plan §7) | n/a | none | `web-bff` | `web-bff` |
-| `drafts` | `/id` (`draft_id`) | 2,592,000 s (30 days) | n/a | `/rm_oid/?` | `web-bff` | `web-bff` |
-| `jti` | `/id` (`jti`) | 86,400 s (1 day) | n/a | `/state/?`, `/created_at/?` | `tool-gateway`, `outbox-worker` (sweep) | same |
-| `idempotency` [LLD] | `/id` (SHA-256 of `rm_oid:key`) | 86,400 s | n/a | none | `web-bff`, `tool-gateway` | same |
-| `approvals` (verdicts, approved snapshot, saga state) | `/id` (`jti` = `saga_id`) | 2,592,000 s (30 days, plan §7) | n/a | `/sub/?`, `/saga/state/?` | `tool-gateway`, `outbox-worker` | `tool-gateway`, `outbox-worker` |
-| `outbox` | `/saga_id` | -1 (TTL on, no default) | 2,592,000 s once terminal (mock: 30-day default) | `/state/?`, `/next_attempt_at/?`, `/lease_until/?` | `tool-gateway`, `outbox-worker` | same |
+| `drafts` | `/rm_oid` (ADR-019: a bug cannot read another RM's draft without the wrong partition key) | 2,592,000 s (30 days) | n/a | `/rm_oid/?` | `web-bff` | `web-bff`, `outbox-worker` (metadata, unused-approval sweep) |
+| `idempotency` [LLD] | `/id` (SHA-256 of `rm_oid:key`) | 604,800 s (7 days, plan §7) | n/a | none | `web-bff`, `tool-gateway` | same |
+| `approvals` (ADR-019: `jti` marker, verdict with approved snapshot and saga state, outbox items) | `/jti` | -1 (TTL on, no default) | `jti` marker 86,400 s (1 day); approval and item documents -1 while open, 2,592,000 s once the last item is final (plan §7) | `/type/?`, `/sub/?`, `/state/?`, `/next_attempt_at/?`, `/lease_until/?`, `/saga/state/?` | `tool-gateway`, `outbox-worker` | `tool-gateway`, `outbox-worker` |
 | `leases` | `/id` | none | n/a | default | `outbox-worker` (change feed + scheduler lease) | same |
 | `entitlements` | `/id` (`rm_oid`) | 50 s (+ 10 s in-process = 60 s, plan §7) | n/a | none | `tool-gateway` | `tool-gateway` |
+| `audit-spool` (ADR-013, ADR-019) | `/producer_pod` | none (each document deleted when drained) | n/a | `/occurred_at/?` | `tool-gateway` (create only) | `audit-writer` (read, delete) |
 | `audit-chain-heads` [LLD] | `/id` (`chain_id`) | none | n/a | none | `audit-writer` (ETag-guarded) | `audit-writer` |
 
 Example `sessions`:
@@ -1496,9 +1522,9 @@ Example `entitlements`:
  "fetched_at": "2026-11-26T05:39:59Z", "source": "crm", "ttl": 50}
 ```
 
-Example `jti`, `approvals` and `outbox`: §4.5, §4.6 and §5.7. The plan's "saga state" container is realised
-as the `saga` part of the `approvals` document, which removes one crash window (verdict and saga state are written
-atomically) **[LLD decision; matches the prototype's container set]**.
+Examples of the three `approvals` document types (`jti`, `approval`, `outbox_item`): §4.5, §4.6 and §5.7. One
+logical partition per `jti` makes the hand-off a single transactional batch (plan §3.3, ADR-019); the prototype's
+separate `jti` and `outbox` containers are a mock simplification (§14.3).
 
 ### 6.2 Azure AI Search index (`policies-v{n}`)
 
@@ -1604,16 +1630,23 @@ on `@search.score` applies (`retrieval_mode=keyword` only when embeddings are do
 
 ### 6.4 Audit event schema (`audit/1`)
 
-Producers: `tool-gateway` (all events, including those posted by `orchestrator` via `POST /internal/v1/audit`).
-Metadata goes to Event Hub `audit-events` (partition key = `request_id`, so a request's events stay ordered);
-content (masked prompts, model outputs, drafts) goes to Event Hub `audit-content`, envelope-encrypted by the
-producer (§6.6).
+Producer: `tool-gateway` only (all events, including those posted by `orchestrator` and `web-bff` via
+`POST /internal/v1/audit`; plan v2.3). Metadata goes to Event Hub `audit-events` (partition key = `request_id`, so a
+request's events stay ordered); content (masked prompts, model outputs, drafts) goes to Event Hub `audit-content`,
+envelope-encrypted by the producer (§6.6).
+
+**Spool.** If Event Hubs does not acknowledge within the timeout, `tool-gateway` writes the same envelope (metadata
+and encrypted content) to Cosmos `audit-spool` and treats the spool create as the acknowledgement. The one exception
+is `approval_verified` on a commit, which needs the Event Hubs ack before any CRM write (ADR-013). `audit-writer`
+drains the spool every 10 s in `occurred_at` order into a dedicated chain `s0` (§6.5), deletes each document only
+after the WORM append and head update, and alerts if the oldest spooled event is older than 15 min.
 
 Event types: `tool_called`, `entitlement_denied`, `guardrail_triggered`, `brief_built`, `answer_released`,
 `declined`, `degraded`, `followup_drafted`, `approval_issued`, `approval_verified`, `approval_rejected`,
 `approval_unused`, `approval_abandoned`, `write_committed`, `write_queued`, `write_failed`, `saga_recovered`,
 `outbox_operator_action`, `kill_switch_changed`, `model_pin_changed`, `erasure_executed`, `invalid_event`,
-`chain_anchor`.
+`chain_seal`. Guardrail fallbacks (Content Safety or AI Language unavailable) are recorded in the `guardrails[]`
+entries of the use-case event with `result: "fallback_local"`, not as a separate event type.
 
 ```json
 {
@@ -1631,7 +1664,7 @@ Event types: `tool_called`, `entitlement_denied`, `guardrail_triggered`, `brief_
   "use_case": "uc1",
   "outcome": {"status": "ok", "mode": "partial", "error_code": null, "reason": null, "warnings": ["SOURCE_UNAVAILABLE:kyc"]},
   "lineage": {
-    "model": {"alias": "gen-large", "deployment": "gen-large-2026-08", "model_name": "[pinned GPT-class model]", "model_version": "[pinned]", "backend": "aoai-uaen-01"},
+    "model": {"alias": "gen-large", "deployment": "gen-large-2026-08", "model_name": "[pinned GPT-class model]", "model_version": "[pinned]", "backend": "aoai-primary"},
     "prompt": {"template_id": "uc1.brief", "template_version": 3, "template_sha256": "5d1e9c..."},
     "tool_catalogue_version": "tools/1.2",
     "tool_contracts": {"get_brief_inputs": "1.0.0", "get_customer_profile": "1.2.0", "get_facilities": "1.1.0", "get_transaction_signals": "1.0.0", "get_kyc_status": "1.0.0", "get_news": "1.0.0"},
@@ -1658,7 +1691,8 @@ for accountability; kept in the restricted table and WORM store).
 ### 6.5 Hash-chain format
 
 - One chain per Event Hubs partition (`chain_id = "p<partition>"`, 4 chains), because the writer processes
-  partitions in parallel and a single global chain would serialise them.
+  partitions in parallel and a single global chain would serialise them, plus chain `s0` for events drained from
+  the Cosmos `audit-spool` (§6.4).
 - `hash_n = SHA-256( prev_hash_n || 0x0A || JCS(event_without_chain.hash) )`, hex. `prev_hash_0` for a new chain is
   the SHA-256 of the chain's genesis record (`{"chain_id","created_at","environment","schema"}`).
 - Storage: append blobs in container `audit-worm` (immutable, time-based retention 7 years, `allowProtectedAppendWrites`
@@ -1666,10 +1700,12 @@ for accountability; kept in the restricted table and WORM store).
   `<env>/<chain_id>/<yyyy>/<mm>/<dd>/<hh>.jsonl`, one JSON line per event.
 - Chain head (`seq`, `hash`, blob path) in Cosmos `audit-chain-heads`, updated with `If-Match`; a second writer for the
   same partition fails the ETag check and stops (no forks).
-- **Anchors**: every 60 minutes per chain, `audit-writer` appends a `chain_anchor` event containing the head hash
-  and signs it with Key Vault key `audit-anchor` (ES256); the anchor is also written to the restricted Log
-  Analytics table, giving an independent witness. Verification (`POST /admin/v1/chain/verify`) recomputes hashes
-  and checks anchor signatures.
+- **Seals** (plan §3.3, ADR-013): every 5 minutes `audit-writer` appends a `chain_seal` record holding the head
+  `seq` and hash of every chain and the previous seal's hash, signs it with Key Vault key `audit-seal` (ES256), and
+  copies it to the **seal store**: container `audit-seals` (immutable, 7 years) in a storage account in a separately
+  administered subscription owned by IT risk, where `audit-writer` can only create blobs. The seal is also written to
+  the restricted Log Analytics table. Verification (`POST /admin/v1/chain/verify`) recomputes hashes and checks seal
+  signatures against both copies.
 - Erasure never edits the chain (C21): only the content key is destroyed.
 
 ### 6.6 Audit content store and per-customer keys (C21)
@@ -1682,7 +1718,8 @@ for accountability; kept in the restricted table and WORM store).
   key `cust-<customer_ref>` (RSA-HSM 3072 in vault `kv-rmc-cust-<env>`, created on first use), and stores
   `{header: {key_id, wrapped_dek, alg: "A256GCM", iv}, ciphertext, tag}` in container `audit-content`
   (`c/<customer_ref>/<yyyy>/<mm>/<dd>/<event_id>.bin`), CMK on the account as a second layer. Lifecycle policy
-  deletes after 365 days (plan §7). Content without a customer (UC2 policy questions) uses key `cust-none-<yyyy-mm>`
+  deletes after 365 days (plan §7). Key hierarchy (plan §3.3): one Key Vault key per customer wraps per-event DEKs;
+  erasure deletes that key. Content without a customer (UC2 policy questions) uses key `cust-none-<yyyy-mm>`
   rotated monthly.
 - **Crypto-shred on erasure**: `POST /admin/v1/erasure` (role `Audit.Erase`, PIM, four-eyes) → audit
   `erasure_executed` → delete key `cust-<customer_ref>` (all versions) → purge after the vault's soft-delete
@@ -1697,22 +1734,24 @@ for accountability; kept in the restricted table and WORM store).
 
 ## 7. APIM policies (illustrative)
 
-APIM Premium, internal VNet mode, UAE North (pilot 1 unit, production ≥ 2 units across zones **[confirm]**). Two
-APIs groups: the **AI gateway** (`/ai/...`, Azure OpenAI chat completions and embeddings) and the **system API
-facade** (`/crm/api/...`, `/ods/api/...`, `/los/api/...`, `/kyc/api/...`, `/news/api/...`). All XML below is
+APIM Premium, internal VNet mode, UAE North (2 units across zones from the pilot, 3 at scale **[confirm]**, plan
+§3.3). Three API groups: the **AI gateway** (`/ai/...`, Azure OpenAI chat completions and embeddings) and the **system API
+facade** (`/crm/api/...`, `/ods/api/...`, `/los/api/...`, `/kyc/api/...`, `/news/api/...`), and the inbound **CRM
+events** API (`/crm-events/...`, §7.3). All XML below is
 **illustrative**: element and attribute names, expression support and limits must be checked against current APIM
 documentation **[confirm]**. Named values in `{{...}}` are Key Vault-backed where secret.
 
 ### 7.1 AI gateway API (`rmc-ai-gateway`)
 
 Backends (Bicep, illustrative **[confirm resource API version and property names]**): two Foundry / Azure OpenAI
-resources, **both in UAE North** (separate quota; no cross-border failover, plan §3.1), combined in priority
-pools per alias.
+resources, **both in UAE North, both Regional Standard** (separate quota; no cross-border failover, plan §3.1),
+named `aoai-primary` (priority 1, resource `aoai-rmc-uaen-01`) and `aoai-secondary` (priority 2, resource
+`aoai-rmc-uaen-02`) as in plan v2.3 and the prototype, combined in priority pools per alias.
 
 ```bicep
-resource aoai01GenLarge 'Microsoft.ApiManagement/service/backends@2024-06-01-preview' = {
+resource aoaiPrimary 'Microsoft.ApiManagement/service/backends@2024-06-01-preview' = {
   parent: apim
-  name: 'aoai-uaen-01'
+  name: 'aoai-primary'
   properties: {
     url: 'https://aoai-rmc-uaen-01.openai.azure.com/openai'
     protocol: 'http'
@@ -1724,13 +1763,13 @@ resource aoai01GenLarge 'Microsoft.ApiManagement/service/backends@2024-06-01-pre
     }
   }
 }
-// aoai-uaen-02 identical, url https://aoai-rmc-uaen-02.openai.azure.com/openai
+// aoai-secondary identical, url https://aoai-rmc-uaen-02.openai.azure.com/openai
 resource poolAoai 'Microsoft.ApiManagement/service/backends@2024-06-01-preview' = {
   parent: apim
   name: 'pool-aoai'
   properties: {
     type: 'Pool'
-    pool: { services: [ { id: aoai01GenLarge.id, priority: 1 }, { id: aoai02GenLarge.id, priority: 2 } ] }
+    pool: { services: [ { id: aoaiPrimary.id, priority: 1 }, { id: aoaiSecondary.id, priority: 2 } ] }
   }
 }
 ```
@@ -1774,18 +1813,18 @@ API-scope policy:
       </when>
     </choose>
 
-    <!-- 4. RM identity for per-RM quota: validated, never trusted from a plain header -->
+    <!-- 4. RM identity for per-RM quota (plan §3.3): x-rm-oid is accepted ONLY when the validated caller is the
+         orchestrator's workload identity; it is a cost-control key, not an access control -->
+    <set-variable name="callerAzp" value="@(((Jwt)context.Variables["caller"]).Claims.GetValueOrDefault("azp", "none"))" />
     <choose>
-      <when condition="@(context.Request.Headers.ContainsKey("x-rm-token"))">
-        <validate-jwt header-name="x-rm-token" failed-validation-httpcode="401" output-token-variable-name="rm">
-          <openid-config url="https://login.microsoftonline.com/{{tenant-id}}/v2.0/.well-known/openid-configuration" />
-          <audiences><audience>api://rm-copilot-tool-gateway</audience></audiences>
-          <issuers><issuer>https://login.microsoftonline.com/{{tenant-id}}/v2.0</issuer></issuers>
-        </validate-jwt>
-        <set-variable name="quotaKey" value="@("rm:" + ((Jwt)context.Variables["rm"]).Claims.GetValueOrDefault("oid", "none"))" />
+      <when condition="@(context.Request.Headers.ContainsKey("x-rm-oid") &amp;&amp; (string)context.Variables["callerAzp"] != "{{orchestrator-client-id}}")">
+        <return-response><set-status code="403" reason="Forbidden" /></return-response>
+      </when>
+      <when condition="@(context.Request.Headers.ContainsKey("x-rm-oid"))">
+        <set-variable name="quotaKey" value="@("rm:" + context.Request.Headers.GetValueOrDefault("x-rm-oid", "none"))" />
       </when>
       <when condition="@(new[] { "uc1", "uc2", "uc3_draft" }.Contains((string)context.Variables["useCase"]))">
-        <!-- RM use cases must carry the RM token -->
+        <!-- RM use cases must carry x-rm-oid from the orchestrator -->
         <return-response><set-status code="401" reason="Unauthorized" /></return-response>
       </when>
       <otherwise>
@@ -1806,7 +1845,9 @@ API-scope policy:
     }</set-body>
 
     <!-- 7. Token limits: per RM per day (RM traffic only; service callers such as ingest are bounded by their use-case TPM),
-         and per use case per minute [confirm two llm-token-limit policies in one scope; else move one to product scope] -->
+         per use case per minute, and a per-caller ceiling so a compromised orchestrator cannot exceed the global budget
+         (plan §3.3) [confirm several llm-token-limit policies in one scope; else move some to product scope] -->
+    <llm-token-limit counter-key="@("caller:" + (string)context.Variables["callerAzp"])" tokens-per-minute="150000" estimate-prompt-tokens="true" />
     <choose>
       <when condition="@(((string)context.Variables["quotaKey"]).StartsWith("rm:"))">
         <llm-token-limit counter-key="@((string)context.Variables["quotaKey"])"
@@ -1842,6 +1883,7 @@ API-scope policy:
 
     <!-- 9. Route to the regional pool and authenticate with APIM's managed identity -->
     <set-backend-service backend-id="pool-aoai" />
+    <set-header name="x-rm-oid" exists-action="delete" />
     <set-header name="x-rm-token" exists-action="delete" />
     <authentication-managed-identity resource="https://cognitiveservices.azure.com" />
     <!-- traceparent and x-request-id pass through unchanged (default); never add body or token headers -->
@@ -2014,6 +2056,20 @@ the facade too. `HMACSHA256` in policy expressions and the per-backend key distr
 HMAC key is shared only between APIM and one legacy backend (it is not an approval mechanism; approvals use ES256,
 §4).
 
+### 7.3 CRM events API (`rmc-crm-events`)
+
+Inbound interface for entitlement invalidation (plan §4.1 step 4, `04` IF-01). Owner: copilot product team (API and
+policy), CRM platform team (publisher).
+
+| Aspect | Rule |
+|---|---|
+| Operation | `POST /crm-events/v1/portfolio` with a batch of `portfolio.changed` / `delegation.changed` events `{event_id, occurred_at, rm_oid, customer_id, change}` (no customer data beyond ids) |
+| Caller authentication | `validate-jwt` on the CRM integration identity (app role `CrmEvents.Publish`), or mutual TLS where the CRM cannot obtain Entra tokens **[confirm, plan §10 item 17]** |
+| Forwarding | APIM managed identity (`Azure Event Hubs Data Sender` on `crm-portfolio-events` only) posts to the Event Hubs REST endpoint over the private endpoint **[confirm policy pattern]**; APIM returns `202` only after Event Hubs accepts |
+| Limits | `rate-limit-by-key` 20 calls/s; body ≤ 64 KiB; schema validation (`validate-content`) |
+| Failure | Event Hubs unavailable: `503` to the CRM, which retries; the 60 s cache TTL bounds staleness meanwhile |
+| Monitoring | `rmc_portfolio_event_lag_seconds` (consumer side), APIM 4xx/5xx on the API; alert lag > 5 min (P3) |
+
 ---
 
 ## 8. Prompt and model management
@@ -2055,8 +2111,8 @@ Per-request totals stay inside the plan's budget (≤ 12k input, ≤ 1.5k output
 
 Each deployment: model version pinned, version upgrade option "no auto upgrade" **[confirm property name]**,
 content filter configuration `cf-rmc-v<n>` attached (harm categories block at medium on input and output; Prompt
-Shields jailbreak and indirect attack on, block), same deployment names on both backend resources (`aoai-uaen-01`,
-`aoai-uaen-02`). The alias → deployment map is `rmc:orchestrator:model:<alias>:deployment`; the API version is
+Shields jailbreak and indirect attack on, block), same deployment names on both backend resources (`aoai-primary`,
+`aoai-secondary`). The alias → deployment map is `rmc:orchestrator:model:<alias>:deployment`; the API version is
 pinned in `rmc:orchestrator:model:api_version` **[confirm]**.
 
 ### 8.3 Call parameters (every call)
@@ -2227,8 +2283,10 @@ sequenceDiagram
         ORC->>SAFE: PII masking and Prompt Shields on free text (300 ms)
     end
     Note over ORC: remaining about 6000 ms, above the 2500 ms minimum, generation timeout = remaining minus 300
-    ORC->>AIG: chat gen-large, x-rm-token, x-use-case uc1, x-deadline-ms 5700
-    Note over AIG: validate-jwt, llm-token-limit per RM and per use case, emit token metric, store false
+    ORC-->>BFF: facts first, event facts (snapshot, watch list, opportunities from tool output)
+    BFF-->>RM: facts sections shown (about 1700 ms p95)
+    ORC->>AIG: chat gen-large, x-rm-oid, x-use-case uc1, x-deadline-ms 5700
+    Note over AIG: validate-jwt, x-rm-oid only from orchestrator, llm-token-limit per RM, per use case and per caller, emit token metric, store false
     AIG->>LLM: masked facts, placeholders only
     LLM-->>AIG: talking points with placeholders (about 4300 ms)
     AIG-->>ORC: response, token usage
@@ -2236,7 +2294,7 @@ sequenceDiagram
     ORC->>TG: POST audit brief_built with lineage
     TG->>EH: brief_built (wait for ack)
     ORC-->>BFF: verified brief, mode full
-    BFF-->>RM: plain text brief with sources (about 6500 ms p95)
+    BFF-->>RM: event brief, plain text brief with sources (about 6500 ms p95)
 ```
 
 ### 10.2 UC1 entitlement denied
@@ -2306,6 +2364,9 @@ sequenceDiagram
     Note over BFF: UI shows KYC section as unavailable, counted as available for the SLO
 ```
 
+The same path applies to LOS facilities, ODS transactions and news: only a CRM profile failure sets
+`critical_ok = false` (plan §4.1 step 5).
+
 ### 10.4 UC2 with retry and decline
 
 ```mermaid
@@ -2373,9 +2434,9 @@ sequenceDiagram
     RM->>BFF: PUT draft with edits, If-Match
     BFF->>COS: replace draft
     RM->>BFF: POST approve, Idempotency-Key, CSRF token
-    Note over BFF: Origin and CSRF ok, auth_time older than 10 minutes
+    Note over BFF: Origin and CSRF ok, acrs lacks c1 (auth_time fallback older than 10 minutes)
     BFF-->>RM: 401 STEP_UP_REQUIRED with claims challenge
-    RM->>ENTRA: MSAL interactive sign-in with MFA (auth context c1)
+    RM->>ENTRA: MSAL interactive sign-in with MFA (authentication context approve-write, id c1)
     ENTRA-->>RM: fresh token
     RM->>BFF: POST approve again, same Idempotency-Key
     Note over BFF: canonicalise draft (RFC 8785), SHA-256, OBO with Tools.Write
@@ -2385,10 +2446,8 @@ sequenceDiagram
     BFF->>ORC: uc3 commit, draft and approval token, x-deadline-ms 1700
     ORC->>TG: POST commits (cannot mint or alter the token)
     Note over TG: entitlement (write), verify signature with cached public key, claims, draft hash
-    TG->>COS: create jti document (atomic, 201)
-    TG->>COS: create approvals document (verdict, snapshot, saga created)
-    TG->>COS: transactional batch, outbox items cr, t1, t2 pending
-    TG->>EH: approval_issued and approval_verified
+    TG->>EH: approval_issued and approval_verified (Event Hubs ack required, no spool)
+    TG->>COS: transactional batch in approvals, jti marker, verdict and saga, items cr t1 t2 pending
     par inline writes, each timeout min(1000, remaining minus 250)
         TG->>FAC: create call report, external ref jti cr
         FAC->>CRM: POST
@@ -2439,8 +2498,8 @@ sequenceDiagram
     participant ORC as orchestrator
     participant TG as tool-gateway
     participant AIG as APIM AI gateway
-    participant B1 as aoai-uaen-01 (priority 1)
-    participant B2 as aoai-uaen-02 (priority 2)
+    participant B1 as aoai-primary (priority 1)
+    participant B2 as aoai-secondary (priority 2)
     BFF->>ORC: uc1 brief, x-deadline-ms 7850
     ORC->>TG: get_brief_inputs
     TG-->>ORC: facts (1500 ms)
@@ -2526,7 +2585,7 @@ sequenceDiagram
 | `tool-gateway` | `HTTP POST /v1/tools/{tool}` (server); `entitlement.check`; `sor.{system}.{operation}` (client, via APIM); `search.query`; `approval.verify`; `jti.create`; `approval.persist`; `saga.execute`; `saga.item.write`; `outbox.deliver`; `audit.publish` (producer, Event Hubs) |
 | `outbox-worker` | `outbox.poll`; `outbox.deliver` (with a span **link** to the originating commit trace, stored as `trace_id` on the item); `outbox.read_before_retry`; `outbox.sweep` |
 | `ingestion-worker` | `ingest.document`; `ingest.layout`; `ingest.pii_scan`; `ingest.shield_scan`; `ingest.chunk`; `ingest.embed`; `ingest.index` |
-| `audit-writer` | `audit.consume` (consumer); `audit.chain.append`; `audit.content.seal`; `audit.anchor`; `audit.la.ingest` |
+| `audit-writer` | `audit.consume` (consumer); `audit.chain.append`; `audit.content.seal`; `audit.chain.seal`; `audit.spool.drain`; `audit.la.ingest` |
 | `eval-runner` | `eval.run`; `eval.item`; `eval.judge` |
 
 ### 11.3 Span and log attributes
@@ -2596,6 +2655,11 @@ Names carry the `rmc_` prefix in production; the prototype emits the same names 
 | `rmc_audit_records_total` | counter | `event` | appended to the chain |
 | `rmc_audit_consumer_lag_events` | gauge | `partition` | |
 | `rmc_audit_content_sealed_total` | counter | (none) | |
+| `rmc_audit_spool_writes_total` | counter | `event_type` | events written to Cosmos `audit-spool` because Event Hubs did not acknowledge |
+| `rmc_audit_spool_oldest_age_seconds` | gauge | (none) | age of the oldest undrained spool document |
+| `rmc_audit_seal_age_seconds` | gauge | (none) | time since the last seal reached the seal store |
+| `rmc_portfolio_event_lag_seconds` | gauge | (none) | CRM event time to consumption by `tool-gateway` |
+| `rmc_approval_kids_loaded` | gauge | `kid` | 1 when the pod holds the public key for that `kid` (rotation runbook RB-04) |
 | `rmc_audit_chain_verify_failures_total` | counter | `chain_id` | |
 | `rmc_feature_flag_state` | gauge | `flag` | 1 on, 0 off |
 | `rmc_config_refresh_age_seconds` | gauge | `service` | |
@@ -2615,7 +2679,7 @@ No metric has an RM, customer or free-text label (cardinality and privacy).
 | **Guardrails and quality** | guardrail actions by check and use case, lines dropped per brief, UC2 decline rate by reason, groundedness score distribution, fallback-to-local count, nightly eval metrics vs gates, false-positive review queue size |
 | **Dependencies and breakers** | per system of record: rate, error %, p95, breaker state timeline, bulkhead saturation, facade rate-limit hits |
 | **Writes and outbox** | approvals verified vs rejected by reason, replays, commit p95, first-attempt outcome, outbox pending by state, oldest age, deliveries by outcome, poison count, paused flag |
-| **Audit pipeline** | events published vs appended, consumer lag per partition, chain anchors per hour, verify failures, content sealed, Log Analytics ingestion lag |
+| **Audit pipeline** | events published vs appended, consumer lag per partition, spool writes and oldest spooled age, seal age, verify failures, content sealed, Log Analytics ingestion lag |
 | **Security signals** | entitlement denials, approval rejections, injection blocks, kill-switch states, config staleness, key age |
 
 ### 11.6 Alert rules (PromQL-style, illustrative)
@@ -2642,7 +2706,7 @@ available; a decline is the correct behaviour); `client_error` (for example `NOT
 | Alert | Expression (illustrative) | For | Severity | Tied to |
 |---|---|---|---|---|
 | `RmcAvailabilityFastBurn` | `rmc:sli_errors:ratio_rate1h > (14.4 * 0.01) and rmc:sli_errors:ratio_rate5m > (14.4 * 0.01) and on() rmc:business_hours and on() sum(increase(rmc_usecase_requests_total[1h])) > 20` | 2m | page | 2% of the 30-day budget in 1 h; minimum volume guard for pilot traffic |
-| `RmcAvailabilitySlowBurn` | `sum(rate(rmc_usecase_requests_total{outcome="server_error"}[6h])) / clamp_min(sum(rate(rmc_usecase_requests_total{outcome!~"client_error\|disabled"}[6h])),1e-9) > (6 * 0.01) and on() rmc:business_hours` | 15m | ticket | 5% of budget in 6 h |
+| `RmcAvailabilitySlowBurn` | `sum(rate(rmc_usecase_requests_total{outcome="server_error"}[6h])) / clamp_min(sum(rate(rmc_usecase_requests_total{outcome!~"client_error\|disabled"}[6h])),1e-9) > (6 * 0.01) and on() rmc:business_hours` | 15m | page (P2, as `04` §8.3 medium burn) | 5% of budget in 6 h |
 | `RmcUC1LatencyP95` | `histogram_quantile(0.95, sum by (le) (rate(rmc_usecase_duration_seconds_bucket{use_case="uc1"}[30m]))) > 8 and on() rmc:business_hours` | 30m | ticket | UC1 ≤ 8 s |
 | `RmcUC2LatencyP95` | same with `use_case="uc2"` and `> 7` | 30m | ticket | UC2 ≤ 7 s |
 | `RmcUC3DraftLatencyP95` | same with `use_case="uc3_draft"` and `> 10` | 30m | ticket | UC3 ≤ 10 s |
@@ -2654,12 +2718,15 @@ available; a decline is the correct behaviour); `client_error` (for example `NOT
 | `RmcOutboxPoison` | `sum(rmc_outbox_pending_items{state="failed"}) > 0` | 0m | ticket (RM operations) | C7 |
 | `RmcOutboxStale` | `max(rmc_outbox_oldest_item_age_seconds) > 3600 and on() rmc:business_hours and on() (max(rmc_outbox_paused) == 0)` | 10m | ticket | C7 |
 | `RmcAuditLag` | `max(rmc_audit_consumer_lag_events) > 1000` | 5m | page | audit RPO 0 |
-| `RmcAuditPublishFailing` | `sum(rate(rmc_audit_events_published_total{outcome="error"}[5m])) > 0` | 5m | page | fail-closed reads and writes |
+| `RmcAuditPublishFailing` | `sum(rate(rmc_audit_events_published_total{outcome="error"}[5m])) > 0` | 5m | page | Event Hubs not acknowledging: reads on the spool, commits fail closed |
+| `RmcAuditSpoolBacklog` | `max(rmc_audit_spool_oldest_age_seconds) > 900` | 0m | page | spool not draining (plan §7) |
+| `RmcAuditSealStale` | `max(rmc_audit_seal_age_seconds) > 900` | 0m | page (security) | seal store unreachable or writer stuck |
+| `RmcPortfolioEventLag` | `max(rmc_portfolio_event_lag_seconds) > 300 and on() rmc:business_hours` | 5m | ticket | entitlement invalidation slow (TTL 60 s still bounds staleness) |
 | `RmcAuditChainBreak` | `sum(increase(rmc_audit_chain_verify_failures_total[1h])) > 0` | 0m | page (security) | tamper evidence |
 | `RmcApprovalForgery` | `sum(increase(rmc_approval_tokens_rejected_total{reason=~"BAD_SIGNATURE\|ALG_NOT_ALLOWED\|UNKNOWN_KID\|WRONG_TYPE"}[15m])) > 0` | 0m | page (security) | C6 |
 | `RmcApprovalReplay` | `sum(increase(rmc_approval_tokens_rejected_total{reason="REPLAYED"}[15m])) > 0` | 0m | ticket (security) | C6 |
 | `RmcEntitlementDenialsSpike` | `sum(increase(rmc_entitlement_denials_total[15m])) > 10` | 0m | ticket (security) | C15 (per-RM detail in Sentinel) |
-| `RmcConfigStale` | `max(rmc_config_refresh_age_seconds) > 300` | 2m | page | writes fail closed after 5 min |
+| `RmcConfigStale` | `max(rmc_config_refresh_age_seconds) > 300` | 2m | page | early warning; writes fail closed after 15 min (plan §3.3) |
 | `RmcWritesKillSwitchOn` | `max(rmc_feature_flag_state{flag="writes"}) == 0` | 0m | info (notify RM ops) | C15 playbook |
 | `RmcTokenSpend80` | `sum(increase(rmc_llm_cost_aed_total[1d])) > 0.8 * <daily AED budget>` | 0m | ticket | C10 (Azure budgets alert too) |
 | `RmcNightlyEvalGate` | `min(rmc_eval_metric{suite="nightly", metric=~"groundedness_lb\|citation_accuracy_lb"}) < 0.95 or max(rmc_eval_metric{suite="nightly", metric=~"entitlement_leaks\|injection_success\|numeric_mismatches"}) > 0` | 0m | ticket (MRM) | C23 |
@@ -2696,7 +2763,7 @@ named exactly.
 | # | Control | Implemented in | How tested |
 |---|---|---|---|
 | 1 | RM authentication (Entra SSO, MFA, Conditional Access, correct tenant and audience) | Entra ID; `web-bff` token validation | `test_bff_rejects_wrong_audience`, `test_bff_rejects_other_tenant`, `test_bff_rejects_expired_token` |
-| 2 | Step-up on approve (`auth_time` ≤ 10 min, auth context `c1`) | `web-bff` approve | `test_approve_requires_fresh_auth` (11-minute-old token → `401 STEP_UP_REQUIRED` with claims challenge) |
+| 2 | Step-up on approve (`acrs` contains `c1`; ID token `auth_time` ≤ 10 min fallback) | `web-bff` approve | `test_approve_requires_acrs_c1` (token without `c1` → `401 STEP_UP_REQUIRED` with claims challenge), `test_approve_auth_time_fallback` (11-minute-old ID token rejected), Conditional Access policy test in pre-prod |
 | 3 | Origin and CSRF checks; framed only by CRM and Teams | `web-bff` | `test_csrf_missing_rejected`, `test_foreign_origin_rejected`, `test_csp_frame_ancestors` |
 | 4 | Identity chain: OBO + workload identity; RM only from the token's `oid` | `web-bff`, `orchestrator`, `tool-gateway` (§1.5) | `test_tool_gateway_ignores_rm_id_in_body`, `test_user_token_rejected_as_workload_token`, `test_tool_call_without_rm_token_rejected` |
 | 5 | Entitlement first; deny on failure; delegation expiry; team lead read-only | `tool-gateway` entitlement module | `test_entitlement_enforced_in_tool_layer` (existing), `test_entitlement_denied_makes_no_downstream_call`, `test_entitlement_source_down_denies`, `test_delegation_expiry`, `test_team_lead_cannot_write`, `test_entitlement_cache_max_staleness_60s` |
@@ -2715,7 +2782,7 @@ named exactly.
 | 18 | Kill switches (per use case, all writes), fail closed when stale | App Configuration; `web-bff`, `orchestrator`, `tool-gateway`, `outbox-worker` | `test_writes_kill_switch_blocks_commit_and_pauses_outbox`, `test_uc_flag_off_returns_feature_disabled`, `test_stale_config_fails_writes_closed` |
 | 19 | Token and cost budgets | `orchestrator` budget; APIM `llm-token-limit`; Azure budgets | `test_rm_daily_quota_returns_budget_exceeded`, `test_step_budget_enforced`, `test_backend_429_degrades_not_budget` |
 | 20 | Telemetry metadata only | allow-list processors; APIM diagnostics; Azure Policy; DCR | `test_telemetry_contains_no_content` (canary values), `test_apim_diagnostics_body_bytes_zero` (IaC lint) |
-| 21 | Audit completeness (fail closed) and tamper evidence | `tool-gateway` producer; `audit-writer` chain and anchors | `test_audit_unavailable_fails_closed`, `test_chain_verify_detects_modification`, `test_chain_anchor_signature_valid` |
+| 21 | Audit completeness (spool, then fail closed) and tamper evidence | `tool-gateway` producer; `audit-writer` chain, spool drain and seals | `test_event_hubs_down_spools_reads`, `test_spool_and_event_hubs_down_fails_closed`, `test_commit_requires_event_hubs_ack`, `test_spool_drained_into_chain_s0`, `test_chain_verify_detects_modification`, `test_chain_seal_signature_valid`, `test_seal_store_write_only`; pre-prod drill: block the Event Hubs private endpoint |
 | 22 | Crypto-shredding of audit content | `audit-writer`, Key Vault `kv-rmc-cust` | `test_erasure_makes_content_unreadable_chain_intact` |
 | 23 | Semantic cache off; `store=false` | APIM policy; orchestrator call parameters | `test_apim_policy_lint_no_semantic_cache`, `test_store_false_forced` |
 | 24 | Network isolation (private endpoints, default-deny Cilium, egress allow-list) | AKS, Azure Firewall, Azure Policy | policy-as-code tests `test_netpol_orchestrator_cannot_reach_key_vault`, Azure Policy compliance scan |
@@ -2779,11 +2846,19 @@ named exactly.
 12. Outlook compose deeplink format and maximum URL length for the Bank's Outlook clients.
 13. CRM: external reference search, idempotency on create, ability to emit portfolio and delegation change events.
 14. Compliance: exclusion of sanctions and PEP screening results from the copilot (tipping-off).
-15. Risk: audit fail-closed on reads (no tool result released without an audit ack) versus availability.
+15. Risk: audit semantics (Event Hubs ack or Cosmos `audit-spool` on reads; Event Hubs ack required for commits).
+18. CRM events API: CRM integration identity or mTLS, and the APIM-to-Event-Hubs forwarding pattern (§7.3).
+19. Cosmos periodic backup with geo-redundant backup storage in UAE North; transactional batch operation limit
+    (≤ 10 tasks plus the call report, marker and approval documents per batch).
 16. MRM: one-sided Wilson lower bound method for gates; online sampling of masked audit content by the judge.
 17. OpenTelemetry GenAI attribute names and content-capture switches for the SDK versions in use.
 
 ### 14.2 Inconsistencies and gaps found in `00-plan.md`
+
+Status: items 1 to 15 were resolved in plan v2.1 to v2.4 (item 1 kept as written in v2.3; items 2 to 6, 12 and
+13 adopted in v2.3; item 7 in v2.3; item 8 in v2.3 with idempotency records at **7 days**, not 1 day; item 10 in
+v2.2 with **2 APIM units**; item 11 in v2.3; item 15 in v2.3 with the backends named `aoai-primary` and
+`aoai-secondary`). The table is kept as the record of why the plan changed.
 
 | # | Plan text | Issue | LLD resolution (proposed plan change) |
 |---|---|---|---|
@@ -2806,8 +2881,8 @@ named exactly.
 ### 14.3 Prototype alignment (workstream C, `code/azmock/`, `code/services/`)
 
 The mock stack was partially present while this LLD was written. Names this LLD adopted from it: feature flag ids
-`uc1`, `uc2`, `uc3`, `writes`; Cosmos database `rmcopilot` with containers `sessions`, `drafts`, `jti`, `approvals`,
-`outbox`, `leases`; facade path shape `/{system}/api/...`; AI gateway path
+`uc1`, `uc2`, `uc3`, `writes`; Cosmos database `rmcopilot` with containers `sessions`, `drafts`, `approvals`,
+`leases` (the prototype's extra `jti` and `outbox` containers are folded into `approvals` here, ADR-019); facade path shape `/{system}/api/...`; AI gateway path
 `/openai/deployments/{deployment}/chat/completions`; breaker gauge encoding (0 closed, 1 open, 2 half-open); metric
 names (with `rmc_` prefix here); guardrail version `guardrails/2026.11.2`; tool catalogue version `tools/1.2`;
 `typ` `approval+jwt`; `kid` in header and payload. Remaining differences, for workstream C to align or document as
@@ -2818,12 +2893,12 @@ mock simplifications (the plan and this LLD win):
 | App ID URIs | `api://rm-copilot-apim` for all of APIM | separate `api://rm-copilot-ai-gateway` and `api://rm-copilot-system-api` (different callers and roles) |
 | `iss` / `aud` claim values | app ID URIs (`api://rm-copilot-web-bff`, `api://rm-copilot-tool-gateway`) | literal `web-bff` / `tool-gateway` as in plan §4.2 (either is safe if the verifier compares exactly; pick one in the contract library) |
 | Draft hash scope | `followup_payload` = call report text + task title and due only | whole `followup/1` draft incl. customer, meeting date, task type and item ids, and the email (so the compose link carries only approved text) |
-| Per-RM quota key at APIM | `x-rm-oid` header set by the orchestrator | `oid` from the RM token validated at APIM (`x-rm-token`) |
+| Per-RM quota key at APIM | `x-rm-oid` header set by the orchestrator | Same (plan v2.1): `x-rm-oid`, accepted only from the orchestrator's identity, plus a per-caller ceiling |
 | Signed RM header | `x-apim-rm-sig` over (oid, method, path, ts) | `x-rm-assertion` (oid, mode, request id, audience, iat, exp), HMAC per backend |
 | Audit stream | one hub `audit`, content inline | `audit-events` (metadata) and `audit-content` (envelope-encrypted) |
 | Error envelope | `{"error": {"code", "message"}}`, codes such as `AUDIT_UNAVAILABLE` | adds mandatory `request_id`, `retryable`, `reason`; `AUDIT_UNAVAILABLE` maps to `503 DEPENDENCY_UNAVAILABLE/AUDIT` |
 | Tool routes | resource style (`/tools/customers/{id}/profile`, `/tools/customers/{id}/brief-inputs`, `/tools/policies/search`, `/tools/writes/{jti}`) | `/v1/tools/{tool}`, `/internal/v1/commits` (either shape is acceptable if versioned under `/v1`; contracts and schemas are what must match) |
 | Index name | `policies-2026-11-26` (date) | `policies-v{n}` (version); either works if pinned in config and recorded as `index_version` |
-| Containers | no `entitlements`, `idempotency`, `audit-chain-heads` | present (plan §3.3 lists the entitlement cache) |
-| AOAI backends | `aoai-ptu` (1), `aoai-paygo` (2) | `aoai-uaen-01` (1), `aoai-uaen-02` (2), both Regional Standard in the pilot |
+| Containers | separate `jti` and `outbox`; no `entitlements`, `idempotency`, `audit-spool`, `audit-chain-heads` | ADR-019 set: one `approvals` container (partition `/jti`) for marker, verdict, saga and outbox items; plus `entitlements`, `idempotency`, `audit-spool`, `audit-chain-heads` |
+| AOAI backends | `aoai-primary` (1), `aoai-secondary` (2) | Same, both Regional Standard (plan v2.3) |
 

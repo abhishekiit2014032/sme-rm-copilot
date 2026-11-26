@@ -1,6 +1,6 @@
 # SME RM Copilot on Azure: high-level design
 
-Status: **Draft for ARB** · Workstream A1 · Owner: solution architecture · Date: 26 Nov 2026 · Baseline: `00-plan.md` v2
+Status: **Draft for ARB** · Workstream A1 · Owner: solution architecture · Date: 26 Nov 2026 · Baseline: `00-plan.md` v2.4 (aligned after the ARB review, `07-review-log.md`)
 
 This document is the high-level design (HLD) for the SME RM Copilot on Microsoft Azure. It is derived from
 `00-plan.md` (the contract) and uses its service names, flows, step numbers, targets and phases unchanged. Where
@@ -35,7 +35,7 @@ record beyond the interface agreements in `04-interfaces-and-slas.md`.
 
 **Assumptions.** The Bank operates an Azure landing zone with a hub VNet, ExpressRoute and Azure Firewall; the Bank
 standardises on AKS with an existing platform team (plan C11); the CRM supports an external reference for
-idempotent writes **[confirm]** (plan §10.8); the residency and outsourcing approvals and the modified abuse
+idempotent writes **[confirm]** (plan §10 items 11 and 12); the residency and outsourcing approvals and the modified abuse
 monitoring approval (plan §3.5, C17) are obtained before real data is used.
 
 ## 2. Architecture principles
@@ -72,8 +72,9 @@ compliance, information security / SOC, internal audit, the regulator (via the B
 files).
 
 Volumes (plan §5): pilot 30 RMs; scale 300 RMs; peak 0.5 requests/s; about 5,400 requests/day at scale. Availability
-SLO: pilot 99.0% in business hours (Mon to Fri 07:00 to 20:00 GST), scale 99.5%; "available" means a correct answer
-or a clearly flagged degraded answer.
+SLO: pilot 99.0% in business hours (Mon to Fri 07:00 to 20:00 GST), scale 99.5% committed only after 3 months of
+pilot measurements (plan §5); "available" means a correct answer, a clearly flagged degraded answer, a partial
+brief or a UC2 decline (composite maths in `04-interfaces-and-slas.md` §9).
 
 ## 4. System context view
 
@@ -190,9 +191,10 @@ flowchart LR
     COSMOS["Cosmos DB for NoSQL"]
     SEARCH["AI Search Standard"]
     DOCS["Blob: document store and chunks"]
-    EH["Event Hubs Standard<br/>audit stream"]
+    EH["Event Hubs<br/>Standard pilot, Premium at scale<br/>audit-events, audit-content, crm-portfolio-events"]
     WORM["Blob immutable GZRS<br/>audit hash chain"]
     ACS["Audit content store<br/>per-customer key"]
+    SEAL["Seal store<br/>separate subscription, IT risk"]
   end
 
   subgraph Platform["Platform services"]
@@ -220,7 +222,6 @@ flowchart LR
   BFF -->|"OBO exchange"| ENTRA
   BFF -->|"sign approval token"| KV
   BFF -->|"sessions, drafts"| COSMOS
-  BFF -->|"calendar, OBO"| GRAPH
   BFF -->|"intent, RM OBO token, deadline"| ORCH
   ORCH -->|"RM token plus workload token"| TG
   ORCH -->|"completions, workload identity"| AIGW
@@ -232,6 +233,10 @@ flowchart LR
   TG -->|"hybrid query"| SEARCH
   TG -->|"entitlement cache, jti, outbox, saga"| COSMOS
   TG -->|"audit events, wait for ack"| EH
+  TG -.->|"audit-spool if no ack"| COSMOS
+  TG -->|"Calendars.ReadBasic, chained OBO"| GRAPH
+  SYSF -.->|"CRM portfolio events"| EH
+  EH -.->|"cache invalidation"| TG
   TG -->|"public key only"| KV
   AIGW -->|"managed identity"| AOAI
   SYSF -->|"ExpressRoute, or firewall for news"| SOR
@@ -247,6 +252,8 @@ flowchart LR
   AW -.->|"encrypted content"| ACS
   AW -.->|"per-customer keys"| KV
   AW -.->|"restricted audit table"| LAW
+  AW -.->|"drain audit-spool"| COSMOS
+  AW -.->|"5-minute seals"| SEAL
   EVAL -.->|"golden set runs"| AIGW
   EVAL -.->|"evaluation runs"| FPROJ
   PODS -.->|"OTel traces, metadata only"| AI_INS
@@ -264,7 +271,8 @@ Responsibilities are exactly as in plan §3.2; the points an ARB reviewer usuall
 | Where is the security boundary? | `tool-gateway`. It validates the RM token (`iss`, `aud`, `tid`, `scp`; RM = `oid`) and the caller's workload token, runs the entitlement check first, minimises and masks fields, and verifies approval tokens. The orchestrator is treated as potentially manipulated by model output. |
 | Who can sign an approval? | Only `web-bff` (Key Vault `sign`). `tool-gateway` holds the public key only; the orchestrator holds no key (plan §3.3 Keys). |
 | Where do model calls go? | Only through the APIM AI gateway, from `orchestrator`, `tool-gateway` (embeddings), `ingestion-worker` (embeddings) and `eval-runner`. |
-| Where do system-of-record calls go? | Only from `tool-gateway`, through the APIM system API facade. |
+| Where do system-of-record calls go? | Only from `tool-gateway`, through the APIM system API facade. `tool-gateway` also owns the Graph calendar call (`get_upcoming_meetings`) and the UC1 fan-out (`get_brief_inputs`). |
+| Who produces audit events? | Only `tool-gateway` (plan v2.3). `orchestrator` and `web-bff` post use-case events to its internal audit endpoint. If Event Hubs does not acknowledge, events go to the Cosmos `audit-spool`, which `audit-writer` drains; a commit needs the Event Hubs ack of `approval_verified` before any CRM write (ADR-013). |
 | Why separate `outbox-worker` and `audit-writer`? | Different scaling, failure and privilege profiles: the outbox worker needs CRM write paths; the audit writer needs storage and key access but no business APIs. |
 
 ## 6. Network topology view
@@ -401,8 +409,9 @@ sequenceDiagram
 Identity design points:
 - Every service authenticates to Azure resources with AKS workload identity (federated credentials); no client
   secrets in pods. Secrets exist only for non-Entra APIs, in Key Vault (plan §3.3 Keys).
-- Approval requires a fresh authentication (`auth_time` ≤ 10 min, step-up otherwise) and Entra authentication
-  context (plan §3.3 Identity) **[confirm which token carries `auth_time` in the chosen flow; see §15 item 5]**.
+- Approval requires the Conditional Access authentication context `approve-write` (Entra id `c1`, sign-in
+  frequency 10 min): `web-bff` checks that `acrs` contains `c1`, else returns a claims challenge (step-up); the ID
+  token's `auth_time` ≤ 10 min is the fallback (plan §3.4) **[confirm `acrs` on the access token, plan §10 item 8]**.
 - PIM for all admin roles; no standing access to production data planes.
 - Graph is called with `Calendars.ReadBasic` via OBO only (plan C20).
 
@@ -444,21 +453,24 @@ sequenceDiagram
       TG->>SYSF: 5. CRM, ODS, LOS, KYC, news calls
       SYSF->>SOR: 5. forward over ExpressRoute or firewall
       SOR-->>SYSF: 5. records, or timeout for a non-critical source
-      SYSF-->>TG: 5. responses (partial brief flag if news or KYC fails)
+      SYSF-->>TG: 5. responses (only the CRM profile is critical, LOS, ODS, KYC or news failure gives a flagged partial brief)
       TG->>TG: 6. minimise and mask fields, no national ID, aggregate transactions
-      TG->>EH: 6. one audit event per tool call, wait for ack
+      TG->>EH: 6. one audit event per tool call, wait for ack (audit-spool if no ack)
       TG-->>ORCH: 6. facts with source references
     and 7. runs while the slowest tool calls are still open
       ORCH->>SAFE: 7. mask PII, Prompt Shields on fetched free text
       SAFE-->>ORCH: 7. masked text, shield verdicts
     end
+    ORCH-->>BFF: 10. facts first, snapshot and watch list built from tool output only
+    BFF-->>RM: 10. facts sections shown (about 1.7 s at p95)
     ORCH->>AIGW: 8. masked facts, request wording with placeholders
     AIGW->>AOAI: 8. managed identity, token limits, breaker
     AOAI-->>AIGW: 8. wording with placeholders
     AIGW-->>ORCH: 8. completion plus token metrics
     ORCH->>ORCH: 9. fill placeholders from tool output
     ORCH->>ORCH: 9. numeric check (digits, number words, EN and AR) and policy check, drop failing lines
-    ORCH->>EH: 10. audit brief_built with lineage
+    ORCH->>TG: 10. audit brief_built with lineage (internal audit endpoint)
+    TG->>EH: 10. brief_built, wait for ack
     ORCH-->>BFF: 10. verified brief with sources
     BFF-->>RM: 10. plain text with sources, nothing unverified streamed
   end
@@ -501,9 +513,10 @@ sequenceDiagram
   BFF-->>RM: 4. drafts and email text shown, nothing written yet
   RM->>RM: 4. edits drafts
   RM->>BFF: 5. Approve
-  BFF->>BFF: 5. Origin and CSRF check, auth_time at most 10 min
-  opt auth_time older than 10 min
-    BFF->>ENTRA: 5. step-up, fresh sign-in
+  BFF->>BFF: 5. Origin and CSRF check, acrs contains c1 (auth_time at most 10 min as fallback)
+  opt no fresh approve-write authentication
+    BFF-->>RM: 5. claims challenge for authentication context c1
+    RM->>ENTRA: 5. step-up, fresh sign-in with MFA
   end
   BFF->>BFF: 6. canonicalise draft (RFC 8785), SHA-256 hash
   BFF->>KV: 6. sign approval token ES256 (iss, aud, sub, customer_id, op, draft_sha256, schema, iat, exp, jti, kid)
@@ -512,8 +525,8 @@ sequenceDiagram
   ORCH->>TG: 7. commit, orchestrator cannot mint or alter the token
   TG->>TG: 8. verify signature for kid, aud, exp with 30 s skew, sub equals RM oid
   TG->>TG: 8. customer_id and op match, hash of canonical submitted draft matches
-  TG->>COS: 8. atomic create of jti (409 means replay)
-  TG->>COS: 8. persist verdict with draft
+  TG->>EH: 8. approval_verified, Event Hubs ack required before any CRM write
+  TG->>COS: 8. one transactional batch in approvals, jti marker (409 means replay), verdict, saga, outbox items
   loop 9. saga, each item with its own external reference
     TG->>SYSF: 9. write call report or task
     SYSF->>CRM: 9. forward over ExpressRoute
@@ -536,8 +549,8 @@ abbreviates that hop. The persisted verdict makes retries valid after the token'
 
 ### 8.3 UC2 policy question (plan §4.3)
 
-Plan §4.3 is written as one chain without step numbers. The numbers below follow its order one-for-one and are
-proposed for adoption in the plan so the deck and prototype can cite them (§15 item 4).
+The step numbers below are plan §4.3 steps 1 to 11 (adopted in plan v2.1). At p95 the first attempt ends near
+5.8 s, so the step 10 retry rule (at least 4 s left) usually declines instead of retrying (plan v2.3).
 
 ```mermaid
 sequenceDiagram
@@ -590,7 +603,8 @@ sequenceDiagram
 Degraded mode for all three flows (plan C3): when the model path is unavailable or the deadline does not allow a
 second backend (at least 4 s must remain), UC1 returns a data-only brief (facts, no wording), UC2 returns ranked
 passages without a generated answer, UC3 offers a manual call report. Degraded answers are flagged in the UI and
-counted as degraded (ADR-015).
+counted as degraded (ADR-015). Only the CRM profile is critical for UC1; LOS facilities, ODS transactions, KYC and
+news failures produce a flagged partial brief (plan §4.1 step 5).
 
 ## 9. Trust boundaries and data classification
 
@@ -665,6 +679,8 @@ environment (plan §3.3 Delivery). Promotion and runbooks are in `06-deployment-
 | Voice (AI Speech) | No | Yes, UC3 voice memos | Plan §2 |
 | Cache | In-process plus Cosmos DB | Re-evaluated on measured latency; Managed Redis only if available in UAE North **[confirm]** | Plan §2, §10.5 |
 | Async messaging | Cosmos outbox | Service Bus Premium | Plan §2 |
+| Audit stream | Event Hubs Standard with the Cosmos `audit-spool` fallback | Event Hubs Premium (SLA, CMK, geo-replication) | Plan §3.3, ADR-013 |
+| APIM | Premium, 2 units across zones | Premium, 3 units **[confirm]** | Plan §3.3, ADR-003 |
 | Audit query | Log Analytics restricted table | ADX if audit volume needs it | Plan §2 |
 | Resilience | Zone redundancy, BCP for region loss | Re-evaluate warm standby if UAE Central offers the services **[confirm]** | Plan §3.1 |
 | Brief prefetch (C9) | No | After risk sign-off | Plan C9 |
@@ -700,8 +716,8 @@ illustrative and is sized in `06-deployment-and-operations.md`. No prices are gi
 |---|---|---|---|---|
 | Identity, SSO, OBO, step-up | Microsoft Entra ID | Bank tenant; Conditional Access; authentication context for approve; PIM | Same; Entra Private Access for remote RMs **[confirm licensing]** | Only identity provider that gives OBO, Teams SSO and workload identity natively (ADR-008) |
 | Ingress and WAF | Application Gateway WAF v2 (internal) | Autoscale, minimum 2 instances across zones (illustrative) | Minimum sized on peak | Internal L7 ingress with OWASP rules; no public listener (ADR-017) |
-| Compute | AKS private cluster | Standard tier; system pool 3 nodes and user pool 3 nodes, one per zone (illustrative) | User pool autoscaled; KEDA for workers | Bank standard; network policy, workload identity, PodMonitor (ADR-002) |
-| AI gateway and system API facade | API Management Premium, internal VNet | 1 unit **[confirm]** (see §15 item 2) | ≥ 2 units across zones **[confirm]** | Token limits and metrics, backend pools with breaker, one facade for systems of record (ADR-003) |
+| Compute | AKS private cluster | Standard tier; four pools (`system`, `signer`, `verifier`, `core`), 3 nodes each, one per zone (illustrative, `05` §2.7) | `signer`, `verifier` and `core` autoscaled; KEDA for workers | Bank standard; network policy, workload identity, PodMonitor (ADR-002) |
+| AI gateway and system API facade | API Management Premium, internal VNet | 2 units across zones (plan v2.2) | 3 units across zones **[confirm]** | Token limits and metrics, backend pools with breaker, one facade for systems of record (ADR-003) |
 | Generation and extraction | Azure OpenAI in Azure AI Foundry | `gen-large`, `gen-small` Regional Standard | PTU only if measured volume justifies it | In-region inference with enterprise data terms (ADR-004) |
 | Embeddings | Azure OpenAI `embed` (text-embedding-3-large) | Regional Standard | Regional Standard | Multilingual embeddings; availability in UAE North **[confirm]** (ADR-004, ADR-006) |
 | Prompt and document attack detection | Azure AI Content Safety | Standard (S0) | Standard (S0) | Prompt Shields where available in UAE North **[confirm]**; local rules always on (ADR-011) |
@@ -709,10 +725,10 @@ illustrative and is sized in `06-deployment-and-operations.md`. No prices are gi
 | Policy retrieval | Azure AI Search Standard | S1, 2 replicas (read SLA), 1 partition (tier illustrative) | 3 replicas | Hybrid plus semantic ranker plus filters in one managed service (ADR-006) |
 | Document parsing | Azure AI Document Intelligence | S0, layout model | S0 | Tables, headings, Arabic, scans; results deleted after processing **[confirm retention]** |
 | Speech to text | Azure AI Speech | Not deployed | S0 | UC3 voice memos, audio deleted after transcription |
-| Operational state | Azure Cosmos DB for NoSQL | Zone-redundant, autoscale throughput (max RU/s illustrative, sized in `06`), CMK | Same, raised maximum | Atomic create for jti, TTLs, change feed for the outbox (ADR-019) |
+| Operational state | Azure Cosmos DB for NoSQL | Zone-redundant, autoscale throughput (max RU/s illustrative, sized in `06`), CMK, periodic backup with geo-redundant backup storage **[confirm]**, `audit-spool` container | Same, raised maximum | Atomic create for jti, TTLs, change feed for the outbox (ADR-019) |
 | Feature flags and kill switches | Azure App Configuration | Standard **[confirm zone redundancy option]** | Same | Audited flag changes, Sentinel playbook can flip switches (ADR-020) |
-| Audit stream | Azure Event Hubs | Standard, zone-redundant, throughput units sized in `06` | Standard with auto-inflate; Premium if isolation is needed | Durable, acknowledged audit ingestion (ADR-013) |
-| Audit hash chain | Blob Storage, immutable time-based retention, GZRS | Same | Same | WORM evidence, in-country geo copy (ADR-013) |
+| Audit stream | Azure Event Hubs | Standard, zone-redundant, throughput units sized in `06`; Cosmos `audit-spool` fallback | **Premium** (SLA, CMK, geo-replication **[confirm]**), plan §3.3 | Durable, acknowledged audit ingestion (ADR-013) |
+| Audit hash chain | Blob Storage, immutable time-based retention, GZRS; 5-minute seals copied to a seal store in a separately administered subscription | Same | Same | WORM evidence, in-country geo copy (ADR-013) |
 | Audit content | Encrypted content store, per-customer key | Separate storage account, keys in Key Vault (detail in ADR-013) | Same | Crypto-shredding on erasure without breaking the chain (C21) |
 | Asynchronous write delivery | Cosmos DB outbox plus `outbox-worker` | Cosmos outbox | Service Bus Premium if needed | Avoids a second messaging platform in the pilot (ADR-010) |
 | Keys and secrets | Azure Key Vault Premium (HSM-backed keys) | Premium | Premium | ES256 approval key with sign/verify split, CMKs, per-customer keys (ADR-009) |
@@ -729,11 +745,11 @@ illustrative and is sized in `06-deployment-and-operations.md`. No prices are gi
 
 | Attribute | Target (plan §5) | How the architecture achieves it | Residual risk / where detailed |
 |---|---|---|---|
-| Availability | Pilot 99.0% business hours; scale 99.5%; degraded counted as available | Every stateful and gateway service zone-redundant across 3 zones; AKS Standard tier; ≥ 3 replicas per service; per-source circuit breakers; partial brief when non-critical sources fail; degraded mode per use case when models fail; region loss handled as BCP (RTO 24 h best effort) | Pilot APIM single unit (§15 item 2); no in-country model DR (C3). Composite maths in `05` |
+| Availability | Pilot 99.0% business hours; scale 99.5%; degraded counted as available | Every stateful and gateway service zone-redundant across 3 zones; AKS Standard tier; ≥ 3 replicas per service; per-source circuit breakers; partial brief when non-critical sources fail; degraded mode per use case when models fail; region loss handled as BCP (RTO 24 h best effort) | No in-country model DR (C3); scale 99.5% depends on CRM ≥ 99.9%, the application tier ≥ 99.85% and Event Hubs Premium. Composite maths in `04` §9: pilot UC1 99.31%, UC2 99.41%, UC3 draft 99.31%, commit 99.25% |
 | Latency | UC1 ≤ 8 s, UC2 ≤ 7 s, UC3 draft ≤ 10 s, commit ≤ 2 s (p95) | Deadline set at `web-bff` and propagated; hop timeout = min(own cap, remaining deadline − reserve); tool cap 2 s; parallel fan-out; PII and shields overlapped with tool calls; no router call when launched from a CRM record; `gen-small` for extraction and routing; failover only if ≥ 4 s remain | Buffer-then-release adds perceived wait (C18); Regional Standard has no latency guarantee, PTU is the post-pilot lever (ADR-004). Budget table in plan §5 |
 | Security | Entitlement leaks = 0; injection success = 0 | Entitlements in `tool-gateway` with dual token validation; signed draft-bound approvals with sign/verify key split; Prompt Shields plus local rules; plain-text rendering with strict CSP; private endpoints and egress allow-list; signed images and admission policy; PIM | STRIDE and threat model in `05`; ADR-008, ADR-009, ADR-011, ADR-017 |
 | Privacy | No PII to models beyond need; data stays in the UAE | Live reads, no customer index (ADR-007); field minimisation; PII masking before every model call; `store=false`; Regional deployments; modified abuse monitoring as a go-live gate; Document Intelligence and Speech results deleted | Masking is imperfect (C21): content store is per-customer-key encrypted and crypto-shreddable. Arabic PII coverage **[confirm]** |
-| Auditability | Every call, approval and write traceable to an RM and a model version | One audit event per tool call; `brief_built`, `approval_issued`, `write_*` with lineage (model version, prompt hash, tool contract versions, guardrail version); hash chain in immutable GZRS Blob; Event Hubs producers wait for the ack; CRM records marked "AI-assisted, RM-approved" | Audit query in Log Analytics in Phase 1; ADX in Phase 2 if needed. ADR-013 |
+| Auditability | Every call, approval and write traceable to an RM and a model version | One audit event per tool call; `brief_built`, `approval_issued`, `write_*` with lineage (model version, prompt hash, tool contract versions, guardrail version); hash chain in immutable GZRS Blob with 5-minute seals; `tool-gateway` (the only producer) waits for the Event Hubs ack, with the Cosmos `audit-spool` as fallback; CRM records marked "AI-assisted, RM-approved" | Audit query in Log Analytics in Phase 1; ADX in Phase 2 if needed. ADR-013 |
 | Cost | Per request ≤ 6 tool steps, ≤ 12k input and 1.5k output tokens; 400k tokens per RM per day | APIM `llm-token-limit` per RM and per use case; `gen-small` for high-volume steps; deterministic UC1 workflow without a router call; Phase 1 cuts (no PTU, Redis, Service Bus, ADX, warm DR, bot); Azure budgets per environment with 80% alerts | Fixed platform cost (APIM Premium, Firewall, AKS) dominates at pilot scale; model and capacity in `05`/`06` |
 | Evolvability | Model upgrades about yearly; Phase 2 and 3 additions without rewrite | Model access only via APIM with version pins and auto-upgrade off; eval gate before upgrade (C12); typed tool contracts with versions; feature flags per use case; mock-Azure prototype with identical REST shapes; Bicep AVM modules | Framework lock-in avoided by thin orchestrator (ADR-005) at the price of owning more code |
 
@@ -780,8 +796,8 @@ Full index: [`adr/README.md`](adr/README.md).
 
 ## 15. Open points for the lead
 
-These are places where the plan is, in this author's view, incomplete or open to challenge. The HLD follows the plan
-as written in every case; the lead decides whether to change §3 to §6 and log it in §11.
+These were raised against plan v2. **All nine are resolved** in plan v2.1 to v2.4 (status after each item); they
+are kept as the record of why the plan changed.
 
 1. **Per-RM token limits have no RM identity at APIM.** Plan §3.3 says `llm-token-limit` applies per RM (§5 token
    budget, C10), but the orchestrator calls the AI gateway with its own workload identity (§3.2, §3.4), so APIM
@@ -789,32 +805,41 @@ as written in every case; the lead decides whether to change §3 to §6 and log 
    from the orchestrator's identity and uses as the counter key (cost control, not access control), or (b)
    `web-bff` obtains a second OBO token for an APIM audience. Recommendation: (a), stated explicitly in §3.4, with
    a separate per-caller ceiling so a compromised orchestrator cannot exceed the global budget.
+   *Status: resolved in v2.1 (option a, `x-rm-oid` accepted only from the orchestrator's identity; `02` §7.1).*
 2. **Pilot APIM is a single unit on every critical path.** §3.1 states zone redundancy across 3 zones, but §3.3
    sets APIM Premium at 1 unit in the pilot. One unit cannot span zones, so a zone loss takes down all three use
    cases (the AI gateway and system facade are both on it). Recommendation: 2 units in the pilot, or record the
    single unit as an accepted pilot risk and include it in the composite availability maths in `05`.
+   *Status: resolved in v2.2 (2 units across zones from the pilot).*
 3. **Source of portfolio-change events in Phase 1.** §4.1 step 4 invalidates the entitlement cache on portfolio
    change events, but Phase 1 has no Service Bus and §3.2 names no consumer. Proposal: CRM publishes changes via
    an APIM-fronted webhook into `tool-gateway`, or `tool-gateway` consumes a dedicated Event Hubs consumer group;
    the 60 s TTL remains the backstop. Needs a line in §3.2 and an interface in `04`.
+   *Status: resolved in v2.3 (Event Hub `crm-portfolio-events` fed through APIM; `04` IF-01, `02` §7.3).*
 4. **§4.3 has no step numbers.** The deck and prototype must "match these numbers" but UC2 has none. Proposal:
    adopt the 1 to 11 numbering used in HLD §8.3.
+   *Status: resolved in v2.1.*
 5. **`auth_time` source for step-up.** Entra access tokens do not reliably carry `auth_time` **[confirm]**. The
    fresh-authentication rule (§3.2 `web-bff`, §4.2 step 5) should state whether it uses the ID token from a
    forced interactive sign-in, or an authentication context (`acrs` claim) bound to a Conditional Access
    sign-in-frequency policy. Affects ADR-009.
+   *Status: resolved in v2.1 and v2.4 (`acrs` contains `c1`, ID token `auth_time` fallback, plan §10 item 8).*
 6. **Region-loss backup mechanics are under-specified.** §3.1 says "Cosmos DB backup copies": Cosmos continuous
    backup restores within the account's own regions, so surviving loss of UAE North needs periodic backup with
    geo-redundant backup storage or a second region **[confirm]**. GZRS replication has no RPO guarantee by default,
    so "audit RPO ≤ 15 min" should be stated as a target unless geo priority replication is used **[confirm
    availability in UAE North]**.
+   *Status: resolved in v2.1 and v2.4 (periodic geo-redundant backup, RPO stated as a target; plan §10 items 13, 15).*
 7. **The audit content store has no named Azure service.** §3.2 and §7 reference a "separate per-customer-key
    encrypted store" but §3.3 does not list it. Proposal: name it in §3.3 (a separate Storage account, GZRS, keys
    in Key Vault Premium) so the container view, network view and cost model are complete.
+   *Status: resolved in v2.1.*
 8. **Platform items missing from §3.3.** DNS forwarding for on-premises resolution of private names (Azure DNS
    Private Resolver or the Bank's forwarders) and self-hosted CI runners in the spoke (required to deploy to a
    private AKS cluster and an internal APIM) are needed but not listed. Proposal: add both to the Platform and
    Delivery rows.
+   *Status: resolved in v2.1.*
 9. **Key Vault Premium vs Managed HSM.** If the Bank's cryptographic standard requires single-tenant HSMs, the
    approval-signing key and CMKs move to Key Vault Managed HSM. No structural change; flag for ADR-009 and plan
-   §10.8.
+   §10 item 12.
+   *Status: resolved in v2.1 (Managed HSM option in plan §3.3 Keys).*

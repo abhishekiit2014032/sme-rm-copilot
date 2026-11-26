@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted |
+| Status | Accepted; amended 26 Nov 2026 for plan v2.3 and v2.4 (snake_case partition keys as in `02-lld.md` §6.1, entitlement TTL 50 s, `idempotency` and `audit-chain-heads` added, periodic backup) |
 | Date | 26 Nov 2026 |
 | Deciders | Solution architecture, platform operations, InfoSec |
 | Critical issues | C6 (atomic `jti`), C7 (outbox, saga, persisted verdict), C22 (entitlement cache) |
@@ -17,8 +17,9 @@ The services are stateless pods on AKS (§3.2) but the platform needs durable, z
 | Sessions (`web-bff`) | Point read and write per request, by session id | 24 h TTL |
 | Drafts (UC3) | Read and update by draft id for one RM; list an RM's open drafts; optimistic concurrency on edit and approve (ADR-009) | 30 days TTL |
 | `jti` replay markers | Atomic create; 409 on duplicate | 1 day TTL |
-| Approval verdicts and saga state | Written once at verification, updated per item | 30 days TTL |
-| Outbox items | Created with the verdict; consumed by `outbox-worker` from the change feed | 30 days TTL |
+| Approval verdicts and saga state | Written once at verification, updated per item | 30 days after the last item is final |
+| Outbox items | Created with the verdict; consumed by `outbox-worker` from the change feed | 30 days after the last item is final |
+| Idempotency records | Point read and create by key | 7 days |
 | Entitlement cache | Read per tool call, by RM; invalidated on portfolio change events | ≤ 60 s |
 | Audit spool (ADR-013) | Append when Event Hubs is unavailable, drained later | Until drained |
 
@@ -69,16 +70,18 @@ Containers and partition keys:
 
 | Container | Partition key | Documents | TTL | Writers | Readers |
 |---|---|---|---|---|---|
-| `sessions` | `/sessionId` | Session state | 24 h (container default) | `web-bff` | `web-bff` |
-| `drafts` | `/rmOid` | Draft, versions (ETag), reference to the approval `jti` | 30 days | `web-bff`, `orchestrator` | `web-bff`, `orchestrator` |
-| `approvals` | `/jti` | `jti` marker (per-item TTL 1 day), verdict, saga document, outbox items (per-item TTL 30 days) | Per item | `tool-gateway`, `outbox-worker` | `tool-gateway`, `outbox-worker`, `web-bff` (status) |
+| `sessions` | `/id` (hash of the session cookie) | Session state | 24 h (container default) | `web-bff` | `web-bff` |
+| `drafts` | `/rm_oid` | Draft, versions (ETag), reference to the approval `jti` | 30 days | `web-bff` (the orchestrator holds no state, `02-lld.md` §2.2) | `web-bff`; `outbox-worker` reads metadata for the unused-approval sweep |
+| `approvals` | `/jti` | `jti` marker (per-item TTL 1 day), approval document with verdict, approved snapshot and saga state, outbox items (TTL -1 while open, 30 days once the last item is final) | Per item | `tool-gateway`, `outbox-worker` | `tool-gateway`, `outbox-worker` |
+| `idempotency` | `/id` (hash of `rm_oid:key`) | Stored responses for `Idempotency-Key` | 7 days | `web-bff`, `tool-gateway` | same |
 | `leases` | `/id` | Change feed processor leases | none | `outbox-worker` | `outbox-worker` |
-| `entitlements` | `/rmOid` | Cached portfolio and delegation records (C22) | 60 s | `tool-gateway` | `tool-gateway` |
-| `audit-spool` | `/producerPod` | Audit events spooled during an Event Hubs outage | none (deleted when drained) | producers | `audit-writer` |
+| `entitlements` | `/id` (`rm_oid`) | Cached portfolio and delegation records (C22) | 50 s (+ 10 s in-process = 60 s) | `tool-gateway` | `tool-gateway` |
+| `audit-spool` | `/producer_pod` | Audit events spooled during an Event Hubs outage | none (deleted when drained) | `tool-gateway` (the only producer) | `audit-writer` (drains into chain `s0`) |
+| `audit-chain-heads` | `/id` (`chain_id`) | Hash-chain heads, ETag-guarded | none | `audit-writer` | `audit-writer` |
 
 Rationale for the keys:
 
-- **`/rmOid` for drafts**: every access is by an authenticated RM whose `oid` is known from the token, so reads are
+- **`/rm_oid` for drafts**: every access is by an authenticated RM whose `oid` is known from the token, so reads are
   point reads, listing is a single-partition query, and a bug cannot return another RM's draft without also
   using the wrong partition key. Logical partitions stay tiny (an RM has tens of drafts at most), far below the
   20 GB logical partition limit.
@@ -87,15 +90,15 @@ Rationale for the keys:
   the batch on the marker's 409 and writes nothing. Per-item TTL keeps the marker for 1 day and the rest for 30
   days, matching §7, in one container. This is an LLD refinement of the plan's "jti replay store" and
   "outbox" rows: same retention, one container.
-- **`/sessionId`** and **`/rmOid`** for the cache spread load evenly across a few hundred keys; volume is too
+- **`/id`** for sessions and the entitlement cache spreads load evenly across a few hundred keys; volume is too
   small for hot partitions to matter.
 
 Throughput: autoscale with the lowest maximum per container (or shared database throughput for the small
 containers), sized from the load test in workstream C. Consistency: Session (default) for the account; the `jti`
-check does not depend on read consistency because it uses a conditional create. Backups: continuous backup for
-point-in-time restore inside the region; backup storage redundancy that keeps copies in the UAE for region loss
-(ADR-015) **[confirm backup redundancy options and whether serverless supports zone redundancy; this ADR assumes
-provisioned throughput]**.
+check does not depend on read consistency because it uses a conditional create. Backups: **periodic backup mode
+with geo-redundant backup storage** so copies survive region loss (plan §3.3; continuous backup restores only within
+the account's regions, and an account uses one mode) (ADR-015) **[confirm interval, retention, copy location in the
+UAE and whether serverless supports zone redundancy; this ADR assumes provisioned throughput; plan §10 item 13]**.
 
 In-process caches in `tool-gateway` (entitlements ≤ 60 s, request-scoped tool results) sit in front of Cosmos;
 portfolio change events invalidate both.
@@ -115,7 +118,7 @@ Negative
   draft, for example 20).
 - NoSQL modelling and RU sizing are less familiar to many bank DBAs; RU throttling (429) must be handled with
   retries inside deadlines.
-- Cross-container queries (for example "all approvals by an RM") need either the `rmOid` duplicated in approval
+- Cross-container queries (for example "all approvals by an RM") need either the `rm_oid` duplicated in approval
   documents or the audit store; operational reporting should come from audit, not from Cosmos.
 
 Risks and mitigations

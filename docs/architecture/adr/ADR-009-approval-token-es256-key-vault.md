@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted |
+| Status | Accepted; amended 26 Nov 2026 for plan v2.1 to v2.4 (step-up via `acrs`, claim set and `jti` format, canonical draft scope, rotation overlap, aligned with `02-lld.md` §4) |
 | Date | 26 Nov 2026 |
 | Deciders | Solution architecture, InfoSec (application security), CRM product owner |
 | Critical issues | C6 (approval forgery and under-binding), C7 (retries after expiry), C4 (identity chain) |
@@ -35,7 +35,8 @@ Forces and constraints from the plan:
   only, `orchestrator` holds no key material (§3.3 Key Vault row).
 - Identity chain (§3.4): the RM is the `oid` of the OBO token for the `tool-gateway` audience; `tool-gateway`
   never trusts an RM id in a body or a header.
-- Freshness: approval requires `auth_time` ≤ 10 min, otherwise step-up (§3.2 `web-bff`).
+- Freshness: approval requires the authentication context `approve-write` (`acrs` contains `c1`; ID token
+  `auth_time` ≤ 10 min as the fallback), otherwise step-up (§3.4).
 - Latency: commit p95 ≤ 2 s end to end (§5), which includes signature, verification, the `jti` write and the
   first CRM attempt.
 - Residency: keys and signing operations stay in UAE North (§3.1).
@@ -86,38 +87,40 @@ Adopt **option 1**.
    key). `orchestrator` has no role on the vault. Admin roles are PIM-eligible only.
 2. **Token format.** Compact JWS, header `{alg: "ES256", typ: "approval+jwt", kid: "<key version>"}`, claims
    `{iss: "web-bff", aud: "tool-gateway", sub: <RM oid>, customer_id, op: "crm.commit_followup", schema:
-   "followup/1", draft_sha256, iat, exp: iat + 300, jti: <UUIDv4>}` (plan §4.2 step 6). `web-bff` computes the
+   "followup/1", draft_sha256, iat, exp: iat + 300, jti: <16 random bytes, base64url, 22 characters>, kid}` (plan
+   §4.2 step 6); `kid` is in both the header and the payload and must match (`02-lld.md` §4.1). `web-bff` computes the
    SHA-256 of the JWS signing input and calls Key Vault `sign` with `ES256`; the returned 64-byte `r||s` value is
    the JWS signature **[confirm signature encoding in the Key Vault SDK used]**.
-3. **Canonicalisation.** The draft payload `{schema, customer_id, call_report, tasks[]}` is canonicalised with
-   RFC 8785 (JCS) and hashed with SHA-256. Three rules close the known gaps in JCS: strings are normalised to
+3. **Canonicalisation.** The whole `followup/1` draft (schema, customer, meeting date, call report, tasks with item
+   ids, and the email, so the compose link carries only approved text) is canonicalised with RFC 8785 (JCS) and
+   hashed with SHA-256 (`02-lld.md` §4.2). Three rules close the known gaps in JCS: strings are normalised to
    Unicode NFC at the `web-bff` boundary when the draft is saved (Arabic text can arrive in different
    normalisation forms); the schema contains no floating-point numbers (dates as ISO strings, amounts, if ever
    added, as strings or integers in minor units); the same JCS implementation version is pinned in both services
    and a shared set of test vectors (English, Arabic, emoji, escaped characters) runs in CI for both.
-4. **Approve endpoint.** `web-bff` checks Origin, a CSRF token (double submit) and authentication freshness:
-   `auth_time` ≤ 10 min, else it returns a claims challenge for a Conditional Access authentication context that
-   forces re-authentication **[confirm which claim carries freshness on the token type `web-bff` receives
-   (`auth_time` on the ID token, `acrs` on the access token) and whether sign-in frequency "every time" applies to
-   the chosen authentication context]**. The approve request carries the draft id and its Cosmos ETag, so an RM
+4. **Approve endpoint.** `web-bff` checks Origin, a CSRF token (double submit) and authentication freshness: the
+   access token's `acrs` contains `c1` (authentication context `approve-write`, sign-in frequency 10 min), with the
+   ID token's `auth_time` ≤ 10 min as the fallback; otherwise it returns a claims challenge for `c1` that forces
+   re-authentication (plan §3.4) **[confirm `acrs` on the access token `web-bff` receives, plan §10 item 8]**. The approve request carries the draft id and its Cosmos ETag, so an RM
    approves the version they saw; a concurrent edit returns 412 and the UI re-renders.
 5. **Verification in `tool-gateway`**, in this order, failing closed on the first error: `alg` must equal
    `ES256` (reject everything else, including `none` and HS256); `kid` in the allow-list (current and previous
    key version, read from App Configuration, ADR-020); signature; `iss`, `aud`; `exp` with 30 s skew and `iat`
    not in the future; `sub` equals the `oid` of the RM token on the same call (§3.4); `customer_id`, `op` and
    `schema` equal the request; entitlement for `customer_id` re-checked; SHA-256 of the canonical submitted draft
-   equals `draft_sha256`; then an **atomic create** of the `jti` document in Cosmos DB, where HTTP 409 means
-   replay. Verification and the `jti` create are written in one Cosmos transactional batch together with the
-   verdict and the saga items (ADR-010, ADR-019), so a replay can never produce a verdict.
-6. **Verdict persisted.** `{jti, sub, customer_id, op, draft_sha256, kid, verified_at, result}` is stored with the
-   draft (30-day TTL, §7). Saga retries after `exp` (ADR-010) rely on the persisted verdict and never re-verify
+   equals `draft_sha256`; then an **atomic create** of the `jti` marker in Cosmos DB, where HTTP 409 means replay.
+   The marker is written in one Cosmos transactional batch with the verdict, the saga state and the outbox items
+   (`approvals`, partition `/jti`; ADR-010, ADR-019), so a replay can never produce a verdict.
+6. **Verdict persisted.** `{jti, sub, customer_id, op, draft_sha256, kid, verified_at, result}` and the approved
+   snapshot of the draft are stored in `approvals` (30 days after the last item is final, §7). Saga retries after `exp` (ADR-010) rely on the persisted verdict and never re-verify
    the token. The token itself, the verdict and the `kid` go into the `approval_issued` and `write_*` audit
    events (ADR-013).
-7. **Rotation.** New key version every 90 days. `tool-gateway` accepts the previous `kid` for 24 h after rotation
-   (token life is 300 s, so the overlap is generous). Emergency revocation disables the key version in Key Vault
+7. **Rotation.** New key version every 90 days. The new `kid` is added to the verifier allow-list 1 h after
+   creation, the signer switches at 24 h, and the previous `kid` stays allowed until day 8 (`02-lld.md` §4.7; token
+   life is 300 s, so the overlap is generous). Emergency revocation disables the key version in Key Vault
    and removes the `kid` from the allow-list; outstanding tokens die within the App Configuration refresh interval.
-8. **Failure behaviour.** If Key Vault `sign` fails or times out (budget 500 ms of the 2 s commit), approve fails
-   closed with a retryable message; the draft stays saved. No fallback signing path exists.
+8. **Failure behaviour.** If Key Vault `sign` fails or times out (cap 400 ms, p95 budget 100 ms of the 2 s commit,
+   `02-lld.md` §1.6), approve fails closed with a retryable message; the draft stays saved. No fallback signing path exists.
 
 The prototype's `ApprovalService` stays HMAC-based for offline demos, with a comment stating it is not the
 production control; the mock-Azure prototype (workstream C) implements the ES256 flow against a mocked Key Vault

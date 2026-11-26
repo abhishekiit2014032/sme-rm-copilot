@@ -2,10 +2,10 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (conditional on the residency and outsourcing approvals in plan §10.8) |
+| Status | Accepted (conditional on the residency and outsourcing approvals in plan §10 item 12) |
 | Date | 26 Nov 2026 |
 | Deciders | Solution architecture, information security, data protection officer, technology risk |
-| Plan references | §1, §3.1, §3.5, §5 (RPO/RTO), §6 C2, C3, C17, §10 items 1, 2, 4, 8 |
+| Plan references | §1, §3.1, §3.5, §5 (RPO/RTO), §6 C2, C3, C17, §10 items 1, 2, 4, 12 |
 
 ## Context
 
@@ -24,7 +24,7 @@ models. The forces are:
   **[confirm whether any data zone covers the UAE]**); Regional (Standard or Provisioned) deployments process in
   the resource's region. Not every model is offered as Regional in UAE North, and the newest models typically
   arrive there later (plan C2).
-- **Availability.** Pilot SLO 99.0% in business hours, scale 99.5%, with a flagged degraded answer counted as
+- **Availability.** Pilot SLO 99.0% in business hours, scale 99.5% (conditional, plan §5), with a flagged degraded answer counted as
   available (plan §5). RPO/RTO for zone failure: audit RPO 0, RTO minutes; for region loss: audit RPO ≤ 15 min,
   app RTO best effort 24 h.
 - **Business tolerance.** The copilot is an assistive tool. If it is unavailable, RMs fall back to existing CRM

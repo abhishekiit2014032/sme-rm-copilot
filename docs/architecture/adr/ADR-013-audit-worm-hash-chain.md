@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted |
+| Status | Accepted; amended 26 Nov 2026 for plan v2.2 to v2.4 (single producer, Event Hubs Premium at scale, spool drain, seals, key hierarchy, aligned with `02-lld.md` §6.4 to §6.6) |
 | Date | 26 Nov 2026 |
 | Deciders | Solution architecture, internal audit (third line), records management, InfoSec, data protection officer |
 | Critical issues | C5 (customer data in prompts), C21 (immutability vs erasure), C23 (lineage for MRM) |
@@ -20,7 +20,7 @@ passed, who approved which write (governance slide: "replay any answer from the 
 - **Erasure and imperfect masking (C21).** Prompts and outputs are masked (ADR-012) but masking is imperfect, so
   stored content can still contain personal data. A WORM store cannot delete a record when an erasure request
   is valid. Banking record-keeping obligations may override erasure for some data, and not for others **[confirm
-  with legal: PDPL banking scope, CBUAE, DIFC/ADGM where relevant, §10 item 8]**.
+  with legal: PDPL banking scope, CBUAE, DIFC/ADGM where relevant, §10 item 12]**.
 - **Residency.** Audit data stays in the UAE. GZRS replicates to the paired region (UAE Central), which is
   in-country.
 - **RPO.** Zone failure: audit RPO 0. Region loss: audit RPO ≤ 15 min (§5).
@@ -64,11 +64,13 @@ needs outgrow Log Analytics (§2).
 
 Adopt **option 1**.
 
-1. **Producers.** `web-bff`, `orchestrator` and `tool-gateway` emit audit events to Event Hubs (Standard,
-   zone-redundant, private endpoint, managed identity, `disableLocalAuth`). Producers wait for the
-   acknowledgement. **Writes fail closed**: `tool-gateway` does not call the CRM until `write_intent` is
-   acknowledged. **Reads** spool to a bounded Cosmos `audit-spool` container if Event Hubs is unavailable,
-   drained by `audit-writer` later, with an alert; if both are unavailable the request fails.
+1. **Producer.** `tool-gateway` is the only producer (plan v2.3); `orchestrator` and `web-bff` post their events to
+   its internal audit endpoint. Event Hubs is Standard in the pilot and **Premium at scale** (SLA, CMK,
+   geo-replication), zone-redundant, private endpoint, managed identity, `disableLocalAuth`. The producer waits for
+   the acknowledgement. **Writes fail closed**: `tool-gateway` does not call the CRM until `approval_verified` is
+   acknowledged by Event Hubs. **Reads, drafts and post-write status events** spool to the Cosmos `audit-spool`
+   container if Event Hubs is unavailable; `audit-writer` drains the spool into a dedicated chain `s0`, with an
+   alert if the oldest spooled event is older than 15 min; if both are unavailable the request fails.
 2. **Event schema.** Metadata only: `seq`, `ts`, `event`, `request_id`, `trace_id`, actor (`oid`), customer
    reference (keyed hash of the CRM id, HMAC key in Key Vault), use case, tool names and contract versions,
    lineage (model deployment and version, prompt hash, guardrail version, index version), outcome and reason
@@ -79,12 +81,13 @@ Adopt **option 1**.
    time-based retention policy** (7 years, §7) and protected append writes allowed **[confirm feature
    combination with GZRS and append blobs]**. Every 5 minutes a **seal** record with all partition heads and the
    previous seal hash is written to the same container and copied to an independently administered location
-   (a separate subscription's immutable container whose administrators are not the platform team, and Sentinel
-   as a secondary copy). A nightly verifier job recomputes the chains and seals and alerts on any break.
+   (the seal store: an immutable container in the separate subscription `sub-rmc-audit-seal` administered by IT
+   risk, not by the platform or copilot teams; plus the restricted Log Analytics table as a secondary copy). A nightly verifier job recomputes the chains and seals and alerts on any break.
 4. **Content store.** Masked prompts, tool facts and outputs go to a separate Blob account (GZRS, private
-   endpoint, not immutable, lifecycle delete at 1 year, §7). Each object is encrypted client-side with
-   AES-256-GCM using a **per-customer data key**, wrapped by an HSM key encryption key in a dedicated Key Vault
-   (C21). Erasure = delete the customer's wrapped data key and append a `content_shredded` event to the chain.
+   endpoint, not immutable, lifecycle delete at 1 year, §7). Each object is encrypted with AES-256-GCM under a
+   per-event data key, wrapped by the **per-customer Key Vault key** `cust-<customer_ref>` (RSA-HSM) in a dedicated
+   vault (plan §3.3, C21; `02-lld.md` §6.6). Erasure = delete the customer key and append an `erasure_executed`
+   event to the chain.
    With purge protection on, the deleted key is unrecoverable only after the soft-delete retention period
    (minimum 7 days), so the erasure statement to the customer reflects that delay.
 5. **Query copy.** `audit-writer` also sends the metadata to a custom table in a dedicated Log Analytics workspace
@@ -123,10 +126,10 @@ Risks and mitigations
 
 | Risk | Mitigation |
 |---|---|
-| `audit-writer` lag exceeds Event Hubs retention | Lag alert at 15 min; Standard tier retention covers days **[confirm current maximum]**; KEDA scaling on lag |
+| `audit-writer` lag exceeds Event Hubs retention | Lag alert at 5 min (`02-lld.md` §2.6); Standard tier retention covers days **[confirm current maximum]**; KEDA scaling on lag |
 | Insider rewrites the unsealed tail | Seals every 5 min to an independently administered store; nightly verification; PIM for storage roles |
 | Region loss loses events not yet replicated | GZRS asynchronous replication (RPO ≤ 15 min target); CRM holds the business record of writes; accepted residual |
-| Per-customer key sprawl in Key Vault | Data keys are stored wrapped (one secret per customer), unwrapped keys cached in memory for minutes; Key Vault operation limits reviewed **[confirm]** |
+| Per-customer key sprawl in Key Vault | One HSM key per customer in a dedicated vault; per-vault key count and operation limits reviewed, Managed HSM at scale if needed **[confirm]** |
 | Logs Ingestion API or workspace outage | Query copy is best effort; WORM path unaffected; backfill from the chain |
 
 ## Review trigger
@@ -140,7 +143,7 @@ Risks and mitigations
 ## Related
 
 - Plan: §3.2 (`audit-writer`), §3.3 (Audit stream, Audit store, Keys rows), §4.1 step 10, §4.2 step 10, §5 RPO,
-  §6 C5, C21, C23, §7 retention, §10 item 8.
+  §6 C5, C21, C23, §7 retention, §10 item 12.
 - ADR-009 (approval events), ADR-010 (write events), ADR-012 (masked content), ADR-014 (telemetry carries no
   content), ADR-015 (GZRS and region loss), ADR-018 (lineage for MRM), ADR-019 (`audit-spool` container), ADR-001 (in-country GZRS secondary).
 - Code: `code/rm_copilot/tools.py` (`audit`, `AUDIT_LOG`, an in-memory list in the prototype).

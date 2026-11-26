@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (unit count for the pilot Proposed, see Consequences) |
+| Status | Accepted; amended 26 Nov 2026 for plan v2.1 (per-RM quota key) and v2.2 (2 units from the pilot) |
 | Date | 26 Nov 2026 |
 | Deciders | Solution architecture, integration platform team, information security |
 | Plan references | §3.2, §3.3 Gateway, §3.4 step 5, §5 (token budget, deadlines), §6 C8, C10, C14, §10 item 6 |
@@ -63,7 +63,10 @@ Adopt **option 1**. One **APIM Premium** instance, **internal VNet mode**, in UA
 - **System API facade** product: one API per system of record; `validate-jwt`; per-consumer quotas and rate limits
   (C14); for legacy systems, the RM `oid` added as an APIM-signed header (plan §3.4 step 5); routing over
   ExpressRoute, and to the news feed through the firewall allow-list.
-- Sizing: pilot **1 unit [confirm]**, production **≥ 2 units across zones [confirm]** (plan §3.3).
+- Sizing: **2 units across zones from the pilot**, 3 at scale **[confirm unit rules and the zone-redundant SLA,
+  plan §10 item 6]** (plan §3.3, v2.2).
+- Per-RM token limit keyed on an `x-rm-oid` header that APIM accepts only from the orchestrator's workload identity,
+  plus a per-caller ceiling (plan §3.3, v2.1; `02-lld.md` §7.1).
 
 ## Consequences
 
@@ -75,17 +78,18 @@ Adopt **option 1**. One **APIM Premium** instance, **internal VNet mode**, in UA
 **Negative**
 - APIM Premium is a high fixed cost for a 30-RM pilot and provisioning and scaling are slow (tens of minutes to
   hours).
-- The gateway is on every critical path. With **1 unit in the pilot it is not zone-redundant**, which conflicts with
-  the zone-redundancy statement in plan §3.1 (raised as an open point in `01-hld.md` §15 item 2).
+- The gateway is on every critical path; 2 zone-spread units from the pilot remove the single-zone dependency (the
+  earlier 1-unit pilot was a conflict with plan §3.1, `01-hld.md` §15 item 2, resolved in plan v2.2) at the price
+  of a second Premium unit in the pilot.
 - Policy XML is a specialised skill and harder to unit-test than code.
-- `llm-token-limit` sees only the calling workload identity unless the RM identity is supplied; the counter key
-  design is an open point (`01-hld.md` §15 item 1).
+- `llm-token-limit` sees only the calling workload identity unless the RM identity is supplied; resolved with the
+  orchestrator-only `x-rm-oid` header (cost control, not access control) and a per-caller ceiling.
 
 **Risks and mitigations**
 
 | Risk | Mitigation |
 |---|---|
-| APIM outage stops all use cases | ≥ 2 zone-spread units in production; pilot risk accepted or 2 units (lead decision); degraded mode cannot help here, so this is counted in the composite availability in `05` |
+| APIM outage stops all use cases | 2 zone-spread units from the pilot; APIOps rollback for bad policies; degraded mode cannot help here, so APIM is a hard dependency in the composite availability (`04` §9) |
 | Body logging or diagnostic settings accidentally capture prompts | Azure Policy denying non-zero body bytes; CI test on exported APIM configuration (plan §3.3 Telemetry) |
 | Token quota semantics differ across units or reset unexpectedly | Confirm with Microsoft (§10.6); orchestrator also enforces per-request token budgets locally (plan §5) |
 | Policy misconfiguration blocks traffic after a change | APIOps pipeline with pre-prod tests; revision and release model in APIM |

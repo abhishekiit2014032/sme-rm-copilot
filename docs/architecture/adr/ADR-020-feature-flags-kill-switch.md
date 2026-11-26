@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted |
+| Status | Accepted; amended 26 Nov 2026 (flag names, 15 s refresh and `FEATURE_DISABLED` behaviour aligned with `02-lld.md` §2 and §1.4) |
 | Date | 26 Nov 2026 |
 | Deciders | Solution architecture, operations, InfoSec (SOC), SME business owner |
 | Critical issues | C3 (degraded mode), C12 (model version pins), C15 (insider misuse) |
@@ -56,19 +56,19 @@ Adopt **option 1**, with GitOps as the source of truth for non-emergency configu
 
 1. **Store.** One App Configuration store per environment, Standard tier, UAE North, private endpoint, local auth
    disabled, purge protection on, geo-replica not used (in-country single region, ADR-015).
-2. **Flags.** `uc1.enabled`, `uc2.enabled`, `uc3.drafting.enabled`, `writes.enabled` (master switch for every
-   write), `writes.crm.commit_followup.enabled`, `lang.ar.enabled`, `source.news.enabled`, plus targeting filters
-   for pilot cohorts. Flags default to off in code: a missing flag means disabled.
+2. **Flags** (names as in `02-lld.md` §2 and the prototype): `uc1`, `uc2`, `uc3`, `writes` (master switch for every
+   write), `outbox_delivery`, `degraded_force` (per use case), `news`, `arabic`, `facts_first`, `model_canary`,
+   `online_eval`, `cs_groundedness`, plus targeting filters for pilot cohorts. Flags default to off in code: a missing flag means disabled.
 3. **Pins.** Prompt versions, model deployment names and versions, guardrail rule set version, approval `kid`
    allow-list, as key-values with labels per environment. Pins are changed only by pipeline from Git after the eval
    gate (ADR-018, ADR-021), so App Configuration holds the deployed state and Git holds the reviewed state.
-4. **Refresh.** Services use the App Configuration provider with a sentinel key and a 30 s refresh interval
-   (illustrative, tuned for request cost) **[confirm provider behaviour and request quotas for the tier]**.
+4. **Refresh.** Services use the App Configuration provider with the sentinel key `rmc:sentinel` and a 15 s refresh
+   interval, so a kill switch is enforced in ≤ 30 s (`02-lld.md` §2) **[confirm provider behaviour and request quotas for the tier]**.
    Kill-switch flags are additionally pushed through Event Grid change notifications where supported, to cut
    propagation to seconds **[confirm]**.
 5. **Failure behaviour.** Last known good values stay in memory. If the store has been unreachable for more than
-   15 minutes, `writes.enabled` is treated as **off** (fail closed) while read use cases continue with the last
-   known values. Pods that start without ever reaching the store start with every flag off.
+   15 minutes, `writes` is treated as **off** (fail closed) while read use cases continue with the last known
+   values. A pod that cannot load configuration at start is not ready and receives no traffic.
 6. **Who can flip what.**
    - Turning a switch **off**: on-call operations (App Configuration Data Owner via PIM, scoped to the kill-switch
      keys) and the Sentinel playbook's managed identity (scoped role on the same keys). One person, no approval,
@@ -79,9 +79,11 @@ Adopt **option 1**, with GitOps as the source of truth for non-emergency configu
    bulk use) trigger a Logic App playbook that can disable a use case for one RM (targeting filter) or globally,
    and opens an incident. The Logic App needs network reach to the private endpoint (VNet-integrated plan)
    **[confirm Logic Apps networking option the Bank uses]**.
-8. **Kill switch behaviour in the product.** A disabled use case returns its degraded mode (ADR-015) with a
-   message, not an error. With `writes.enabled` off, approvals are refused before signing and queued outbox items
-   are held (ADR-010), not dropped.
+8. **Kill switch behaviour in the product.** A disabled use case returns `503 FEATURE_DISABLED` with
+   `details.flag`; the UI hides the action and shows a banner with the manual path (`02-lld.md` §1.4). Kill-switch
+   time is excluded from the availability SLO and reported separately (plan §5). Degraded mode is forced with the
+   separate `degraded_force` flag (ADR-015). With `writes` off, approvals are refused before signing and queued
+   outbox items are held (ADR-010), not dropped.
 9. **Monthly test.** Operations flip each kill switch in production during business hours (with the business owner's
    agreement) and measure propagation time; result recorded.
 

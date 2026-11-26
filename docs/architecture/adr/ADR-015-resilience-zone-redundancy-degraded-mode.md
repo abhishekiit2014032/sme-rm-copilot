@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (Phase 1); warm standby re-evaluation is Proposed for Phase 2 |
+| Status | Accepted (Phase 1); warm standby re-evaluation is Proposed for Phase 2; amended 26 Nov 2026 for plan v2.2 (APIM 2 units, only the CRM profile critical for UC1) |
 | Date | 26 Nov 2026 |
 | Deciders | Solution architecture, business continuity, platform operations, SME business owner |
 | Critical issues | C2 (regional availability), C3 (no in-country model DR), C14 (protect systems of record) |
@@ -15,7 +15,7 @@
 - **Regions.** UAE North has three availability zones. UAE Central is a restricted region with a limited
   catalogue and no availability zones **[confirm access and catalogue, §10 item 4]**. Whether AKS, APIM Premium, AI
   Search, Azure OpenAI and Cosmos DB can be deployed there is unknown.
-- **Targets (§5).** Pilot availability SLO 99.0% in business hours (Mon to Fri 07:00 to 20:00 GST), scale 99.5%;
+- **Targets (§5).** Pilot availability SLO 99.0% in business hours (Mon to Fri 07:00 to 20:00 GST), scale 99.5% (conditional on pilot measurements, CRM ≥ 99.9% and Event Hubs Premium);
   a correct answer **or** a clearly flagged degraded answer counts as available. Zone failure: audit RPO 0, RTO
   minutes. Region loss: audit RPO ≤ 15 min, app RTO best effort 24 h (BCP).
 - **The copilot is an assistant, not a system of record.** RMs can do their job from existing CRM screens. The
@@ -24,7 +24,7 @@
 - **Latency budgets and deadlines (§5).** Deadline set at `web-bff` (UC1 8 s), every hop's timeout = min(own cap,
   remaining deadline minus reserve); tool cap 2 s; model failover to a second backend only if ≥ 4 s remain.
 - **Dependencies with their own availability**: Azure OpenAI Regional Standard (no customer zone control), AI
-  Search (zone spread needs ≥ 2 replicas), APIM Premium (pilot 1 unit), Cosmos DB, Event Hubs, Key Vault, Entra
+  Search (zone spread needs ≥ 2 replicas), APIM Premium (2 units across zones), Cosmos DB, Event Hubs, Key Vault, Entra
   ID, the systems of record over ExpressRoute with Bank-defined support hours. Composite availability maths sit in
   `05-nfr-scenarios-and-dr.md`.
 
@@ -62,30 +62,31 @@ Adopt **option 1**.
    | Tier | Setting |
    |---|---|
    | Application Gateway WAF v2 | Zone-redundant (zones 1, 2, 3), autoscale minimum 2 |
-   | AKS | System and user node pools across 3 zones; pod topology spread and PodDisruptionBudgets per service; ≥ 2 replicas of every service (3 for `tool-gateway`) |
-   | APIM Premium | Pilot 1 unit, production ≥ 2 units across zones **[confirm zone behaviour of a 1-unit Premium instance and the unit count needed, §10 item 6]**. With 1 unit APIM is not zone-redundant (ADR-003), so in the pilot it is a single-zone dependency and appears as such in the composite maths, unless the lead decides on 2 units |
+   | AKS | All node pools across 3 zones; pod topology spread and PodDisruptionBudgets per service; ≥ 3 replicas of `web-bff`, `orchestrator` and `tool-gateway`, ≥ 2 of the workers (`02-lld.md` §2) |
+   | APIM Premium | 2 units across zones from the pilot, 3 at scale (plan v2.2, ADR-003) **[confirm unit rules and SLA, §10 item 6]** |
    | Azure OpenAI | Regional Standard deployments; zone resilience is Microsoft-managed and not configurable. A second deployment of each model (separate resource or quota pool, same region) in the APIM backend pool absorbs throttling, not regional outage |
    | AI Search | 2 replicas in pilot (read SLA), 3 in production; zone spread where supported **[confirm]** |
    | Cosmos DB | Zone-redundant account, single region (ADR-019) |
-   | Event Hubs, Key Vault, App Configuration, Storage | Zone-redundant SKUs or defaults; Storage for audit and documents GZRS |
+   | Event Hubs, Key Vault, App Configuration, Storage | Zone-redundant SKUs or defaults; Event Hubs Standard in the pilot (Cosmos `audit-spool` fallback) and Premium at scale; Storage for audit and documents GZRS |
    | Azure Firewall | Zone-redundant |
 
-2. **Deadline propagation.** `web-bff` sets an absolute deadline and passes it in a request header with the W3C
-   `traceparent`. Each hop computes its timeout as min(own cap, remaining deadline minus a reserve for its own
+2. **Deadline propagation.** `web-bff` sets the deadline and passes the remaining budget in the relative header
+   `x-deadline-ms` with the W3C `traceparent` (`02-lld.md` §1.6). Each hop computes its timeout as min(own cap, remaining deadline minus a reserve for its own
    post-processing). Work that cannot finish before the deadline is not started.
 3. **Circuit breakers and bulkheads.** APIM backend pool with priority, circuit breaker and `retry` in front of
    the model deployments. `tool-gateway` keeps one breaker and one bounded connection pool per system of record
    (bulkheads, C14), so a slow LOS cannot exhaust capacity for CRM reads. Retries only on idempotent reads, at
    most one, and only within the deadline.
-4. **Degraded mode per use case (C3).** Triggered by an open model breaker, the remaining deadline (< 4 s before
-   generation), or a kill switch (ADR-020). Always flagged in the UI and counted as degraded.
+4. **Degraded mode per use case (C3).** Triggered by an open model breaker, a model failure when less than 4 s
+   remain for failover, a remaining budget below the minimum viable generation budget (`02-lld.md` §1.6), or the
+   `degraded_force` flag (ADR-020). Always flagged in the UI and counted as degraded.
 
    | Use case | Degraded output | Still works |
    |---|---|---|
    | UC1 brief | Data-only brief: snapshot, watch list, signals from tool output, no generated wording | Entitlements, sources, audit |
    | UC2 policy | Ranked passages with citations and no generated answer; offer routing to the credit or product desk | Search, filters, audit |
    | UC3 follow-up | Manual call report form; no extraction. Commit of an already-approved draft is independent of the model and continues (ADR-010) | Approval, saga, outbox |
-   | Partial sources | A failed non-critical source (news, KYC) yields a partial brief with the section flagged (§4.1 step 5) | Everything else |
+   | Partial sources | A failed non-critical source (LOS facilities, ODS transactions, KYC, news; only the CRM profile is critical) yields a partial brief with the section flagged (§4.1 step 5) | Everything else |
 
 5. **Region loss is a BCP event.** RMs fall back to CRM screens. Recovery assets: audit WORM and document store on
    GZRS (audit RPO ≤ 15 min), Cosmos DB backups with geo-redundant backup storage in-country **[confirm backup
@@ -114,8 +115,6 @@ Negative
 - The 24 h RTO is conditional on UAE Central's catalogue, which is unknown. If the catalogue is insufficient, the
   honest RTO is "when UAE North returns".
 - Degraded mode is a product surface that needs design, testing and RM training; RMs may perceive it as broken.
-- A pilot APIM with one unit may be a single-zone dependency; zone redundancy is not end to end until production
-  unit counts are in place.
 
 Risks and mitigations
 
@@ -143,5 +142,6 @@ Risks and mitigations
   from IaC), ADR-022 (deadline-aware release). ADR-001 (UAE North, no cross-border failover),
   ADR-002 (AKS zones), ADR-003 (APIM backend pool, circuit breaker, unit count), ADR-004 (Regional Standard
   deployments, PTU gate), ADR-006 (AI Search replicas and index rebuild).
-- Docs: `05-nfr-scenarios-and-dr.md` (composite availability, failure-mode catalogue).
+- Docs: `04-interfaces-and-slas.md` §9 (composite availability), `05-nfr-scenarios-and-dr.md` (summary §1.1,
+  failure-mode catalogue).
 - Code: `code/rm_copilot/orchestrator.py` (decline path; production adds degraded mode).

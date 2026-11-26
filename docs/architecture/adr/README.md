@@ -3,7 +3,9 @@
 This folder holds the architecture decision records (ADRs) for the SME RM Copilot. Each ADR follows the same
 structure: status, date, context (forces, constraints and NFRs from `../00-plan.md`), options considered, a trade-off
 table, decision, consequences (positive, negative, risks with mitigations), review trigger, and related ADRs and
-plan sections. The baseline is `../00-plan.md` v2; the high-level design is `../01-hld.md`.
+plan sections. The baseline is `../00-plan.md` v2.4; the high-level design is `../01-hld.md`. ADRs 003, 008, 009, 010, 013, 015,
+019 and 020 were amended before ARB approval to match plan v2.1 to v2.4; each records its amendment in the status
+table (`07-review-log.md` lists the findings). Once the ARB approves the pack, rule 5 below applies.
 
 Status values: **Accepted** (in force for the pilot), **Proposed** (to be decided at a stated gate), **Superseded**
 (replaced by a later ADR, which is linked). Items marked **[confirm]** inside an ADR are facts to verify with the

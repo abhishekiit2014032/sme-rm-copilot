@@ -18,7 +18,7 @@ model can retrieve it. Forces:
 - **Freshness**: utilisation, KYC expiry and call history must be current at meeting time; a stale figure presented
   confidently is worse than none.
 - **Privacy and residency**: every copy of identifiable customer data is another store to secure, classify, retain,
-  erase and evidence. Erasure and records rules apply (plan §7, §10.8; C21).
+  erase and evidence. Erasure and records rules apply (plan §7, §10 item 12; C21).
 - **Load on core systems**: core banking cannot take copilot load directly (C14); the ODS read replica exists for
   this purpose.
 - **Latency**: the UC1 fan-out budget is 1,500 ms p95 with a 2 s per-tool cap (plan §5).

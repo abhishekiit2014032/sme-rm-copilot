@@ -1,6 +1,6 @@
 # 05 NFRs, capacity, cost, failure scenarios, DR, threat model, privacy and model risk
 
-Status: v1 for ARB · Workstream B2 · Owner: solution architecture (resilience, security, operations) · Date: 26 Nov 2026
+Status: v1.1 for ARB (aligned to plan v2.4 after the ARB review, `07-review-log.md`) · Workstream B2 · Owner: solution architecture (resilience, security, operations) · Date: 26 Nov 2026
 
 Contract: `00-plan.md` (cited as "plan §n"). Interfaces, SLAs and the composite availability maths are in
 `04-interfaces-and-slas.md` (cited as "04 §n"); deployment, runbooks (RB-nn) and operations are in
@@ -42,13 +42,13 @@ Contents
 | AVAIL-04 | Availability | Degraded rate | ≤ 5% pilot, ≤ 3% scale (04 §8.1) | SLO dashboard |
 | AVAIL-05 | Availability | Kill switch propagation | ≤ 30 s to all pods (15 s refresh, 02 §2) | Monthly drill in pre-prod; quarterly in prod (synthetic cohort) |
 | SEC-01 | Security | Entitlement enforcement in code before any data access (C4) | 0 entitlement leaks; 100% of tool calls preceded by an entitlement decision | Golden-set entitlement tests; contract tests; red team; audit query "tool call without entitlement event" = 0 |
-| SEC-02 | Security | Injection resistance (C19) | 0 successful injections on the adversarial set (≥ 100 items: direct, CRM notes, news, policy docs, Arabic) | Release gate; quarterly red team |
+| SEC-02 | Security | Injection resistance (C19) | 0 successful injections on the red-team suite (≥ 1,000 attacks: direct, CRM notes, news, policy docs, Arabic; plan §5, ADR-018) | Release gate; quarterly red team |
 | SEC-03 | Security | Approval integrity (C6) | 100% of commits carry a valid ES256 token bound to RM, customer, op, schema and draft hash; replay rejected | Unit and integration tests; negative tests (tamper, replay, wrong `aud`, expired, wrong `sub`) |
 | SEC-04 | Security | Network | No public network access on any PaaS; ingress only via internal Application Gateway | Azure Policy deny compliance 100%; quarterly external attack-surface scan |
 | SEC-05 | Security | Identity hygiene | `disableLocalAuth` on every service that supports it; no long-lived secrets in pipelines (OIDC) | Azure Policy; secret scanning in CI |
 | SEC-06 | Security | Supply chain | 100% of images signed and verified at admission; no critical CVEs older than 15 days in prod | Admission policy deny logs; Defender for Containers |
 | SEC-07 | Security | Output rendering | Plain text only; no images, no live links; strict CSP | DAST; CSP report-only monitoring then enforce |
-| PRIV-01 | Privacy | PII masked before every model call | 100% of model calls follow a masking step; regex categories 100% recall on the synthetic PII set; NER recall ≥ 95% [target to confirm with DPO] | PII test set (English and Arabic); audit lineage field `pii_mask_version` present on every model call |
+| PRIV-01 | Privacy | PII masked before every model call | 100% of model calls follow a masking step; regex categories 100% recall on the synthetic PII set; NER recall ≥ 95% [target to confirm with DPO] | PII test set (English and Arabic); the `guardrail_version` in the audit lineage (which versions the PII rules) present on every model call |
 | PRIV-02 | Privacy | Residency | All data at rest and processing in the UAE (plan §3.1) | Azure Policy allowed locations; deployment SKU policy (Regional only); outsourcing file |
 | PRIV-03 | Privacy | Retention | Per plan §7; TTLs enforced by the platform | Configuration tests; quarterly retention audit |
 | PRIV-04 | Privacy | Erasure | Customer content crypto-shredded within 30 days of an approved erasure request (key purge completes 7 days after deletion, 02 §6.6), chain intact | Erasure drill quarterly with a synthetic customer |
@@ -60,13 +60,29 @@ Contents
 | ACC-02 | Accessibility | Status messages for degraded and progress states announced to assistive tech | ARIA live regions for progress and flags | Manual test |
 | L10N-01 | Arabic / RTL | Arabic UI and answers (Phase 2 GA; Phase 1 evaluated) | RTL layout passes visual regression; mixed Arabic/English and Arabic-Indic digits handled in the numeric check | Golden-set Arabic slice (≥ 60 items) with the same gates as English; visual regression on RTL |
 | L10N-02 | Arabic / RTL | Arabic retrieval | Arabic recall@5 within 5 points of English on paired items | Retrieval eval with `ar.microsoft` analyzer |
-| L10N-03 | Arabic / RTL | Dates and week (C16) | All date logic GST, Mon–Fri week; 100% of date-resolution tests pass | Unit tests incl. month ends, public holidays [confirm calendar source] |
+| L10N-03 | Arabic / RTL | Dates and week (C16) | All date logic GST, Mon to Fri week; 100% of date-resolution tests pass | Unit tests incl. month ends, public holidays [confirm calendar source] |
 | COST-01 | Cost | Token and cost runaway (C10) | Per request ≤ 6 tool steps, ≤ 12k input and 1.5k output tokens; per RM ≤ 400k tokens/day | APIM `llm-token-limit` tests; budget alerts at 80% (06 §11) |
 | COST-02 | Cost | Unit cost visibility | Token cost per RM per use case reported monthly | FinOps report (06 §11) |
 | MAINT-01 | Maintainability | Model upgrade | Any model version change completed within 90 days of retirement notice, through the eval gate (C12) | RB-05 drill on each notice |
 | MAINT-02 | Maintainability | Rebuildability | Full environment rebuilt from IaC in ≤ 8 h (excluding data restore and quota) | Annual rebuild test |
 | MAINT-03 | Maintainability | Test coverage of security-critical code | ≥ 90% branch coverage for `tool-gateway` entitlement, approval verification and masking | CI coverage gate |
 | MAINT-04 | Maintainability | Mean time to restore | MTTR P1 ≤ 4 h; P2 ≤ 8 business hours | Incident records |
+
+### 1.1 Composite availability (summary of `04` §9)
+
+Recomputed for plan v2.4: APIM 2 units across zones from the pilot; only the CRM profile is critical for UC1; reads
+and drafts fall back to the Cosmos `audit-spool` (Event Hubs soft), commits need the Event Hubs ack (hard). Common
+platform path 0.9999⁴ × 0.9995³ = **0.99810**.
+
+| Use case | Pilot (CRM 99.8%, app 99.7%, Event Hubs Standard) | Scale (CRM 99.9%, app 99.85%, Event Hubs Premium) | Target |
+|---|---|---|---|
+| UC1 brief | 0.99810 × 0.998 × 0.997 = **99.31%** | 0.99810 × 0.999 × 0.9985 = **99.56%** | 99.0% / 99.5% |
+| UC2 policy | 0.99810 × 0.999 (AI Search) × 0.997 = **99.41%** | **99.56%** | 99.0% / 99.5% |
+| UC3 draft | **99.31%** | **99.56%** | 99.0% / 99.5% |
+| UC3 commit | × 0.9999 (Key Vault) × 0.9995 (Event Hubs) = **99.25%** | × 0.9999 × 0.9999 = **99.54%** | 99.0% / 99.5% |
+
+The scale SLO holds only with CRM ≥ 99.9%, the application tier ≥ 99.85% and Event Hubs Premium (commit is 99.50% on
+Standard), and is committed only after 3 months of pilot measurements (plan §5).
 
 ---
 
@@ -118,7 +134,7 @@ Other consumers (separate deployments or APIM products, so they cannot starve us
 
 | Consumer | Volume | Note |
 |---|---|---|
-| Online quality sampling (in-region judge, plan §3.2) | 5% of UC2 and UC1 answers ≈ 200/day × 8k = 1.6 M tokens/day | Off-peak batch where possible |
+| Online quality sampling (in-region judge, plan §3.2) | 5% of UC2 and UC1 answers, capped at 200/day (02 §2.7, ADR-018) × 8k = 1.6 M tokens/day | Off-peak batch where possible |
 | Ingestion embeddings | Delta about 600 pages/day ≈ 0.4 M tokens/day; full re-embed ≈ 27 M tokens | Throttled by APIM product limit to ≤ 70% of `embed` quota |
 | Eval gate (pre-prod resource, not prod) | 300 golden items × ~2.5 calls × ~6k tokens ≈ 4.5 M tokens per run; nightly plus per release | Separate Azure OpenAI per environment (plan §3.3) |
 
@@ -217,8 +233,8 @@ an ADR option if the security review accepts it.
 
 | Service | Sizing (scale) | Derivation |
 |---|---|---|
-| Event Hubs | Standard, 2 TUs with auto-inflate to 4; 4 partitions on `audit-events` (= max `audit-writer` replicas); retention 3 days `audit-events`, 1 day `audit-content` | Peak 3.2 events/s × 10 KB ≈ 32 KB/s vs 1 MB/s per TU [confirm]; 2 TUs for zone headroom |
-| APIM | Pilot 1 unit (see 04 §10 item 5), scale 2 to 3 units across zones | Load ≈ 3 req/s; units are for availability, not throughput |
+| Event Hubs | Pilot: Standard, 2 TUs with auto-inflate to 4. Scale: **Premium** (1 processing unit, plan §3.3) [confirm sizing]. 4 partitions on `audit-events` (= max `audit-writer` replicas); retention 3 days `audit-events`, 1 day `audit-content` and `crm-portfolio-events`; Cosmos `audit-spool` as fallback | Peak 3.2 events/s × 10 KB ≈ 32 KB/s vs 1 MB/s per TU [confirm]; 2 TUs for zone headroom |
+| APIM | 2 units across zones from the pilot (plan v2.2), 3 units at scale [confirm] | Load ≈ 3 req/s; units are for availability, not throughput |
 | Application Gateway WAF v2 | Autoscale min 2, max 4 instances | Availability across zones |
 | Blob | Audit metadata ≈ 25 GB/year; content ≈ 60 GB rolling; documents and chunks ≈ 30 GB | 04 IF-17 |
 | Log Analytics | 3 to 6 GB/day at scale [estimate]; Basic or Auxiliary plan for verbose container logs [confirm plan names and query limits] | Traces ≈ 50 spans × 1 KB per request ≈ 0.3 GB/day; the rest platform logs |
@@ -236,13 +252,13 @@ the Bank's enterprise agreement **[confirm all unit prices]**.
 | # | Component | Cost driver (formula) | Type | Expected weight |
 |---|---|---|---|---|
 | 1 | Azure OpenAI | Σ deployments (input tokens × input price + output tokens × output price) | Variable | Grows linearly with use; at scale ≈ 741 M tokens/month, two thirds on `gen-large` (22.9 M of 33.7 M per day). Likely the largest variable line |
-| 2 | APIM Premium | units × unit-hour price × 730 | Fixed | Large fixed line: Premium is chosen for VNet injection and zones; 2 to 3 units at scale |
+| 2 | APIM Premium | units × unit-hour price × 730 | Fixed | Large fixed line: Premium is chosen for VNet injection and zones; 2 units in the pilot, 3 at scale |
 | 3 | AKS | node VMs × hours + Standard tier cluster fee + OS disks | Fixed (step) | Moderate: 6 to 9 small nodes |
 | 4 | Application Gateway WAF v2 | fixed gateway hours + capacity units | Fixed | Moderate |
 | 5 | AI Search | search units (replicas × partitions) × hours + semantic ranker per 1,000 queries | Fixed + variable | Moderate: 2 to 3 SUs on S1 |
 | 6 | Log Analytics, Application Insights, Sentinel | GB ingested × (analytics or basic rate) + retention beyond the included period + Sentinel GB | Variable | Can become a top-3 line if container logs are not trimmed; controlled by log levels and table plans |
 | 7 | Defender for Cloud | vCores protected (Containers), plus AI threat protection pricing [confirm model] | Variable | Moderate |
-| 8 | Cosmos DB | autoscale max RU/s × hours (billed at the highest RU/s reached each hour) + storage + continuous backup tier | Fixed-ish | Small |
+| 8 | Cosmos DB | autoscale max RU/s × hours (billed at the highest RU/s reached each hour) + storage + periodic backup copies beyond the included ones (geo-redundant backup storage) | Fixed-ish | Small |
 | 9 | Event Hubs | TUs × hours (Standard) or PUs (Premium) + ingress events | Fixed | Small (Standard); moderate if Premium |
 | 10 | Key Vault Premium | HSM-protected key versions per month + operations | Variable | Small |
 | 11 | Storage (GZRS, immutable) | GB × GZRS rate + operations + geo-replication egress | Variable | Small |
@@ -324,17 +340,17 @@ mock-Azure prototype and pre-prod (Chaos Studio or APIM mock responses [confirm 
 
 | ID | Scenario | Trigger | Detection / alert | User impact | Automatic response | Runbook | RTO | Test |
 |---|---|---|---|---|---|---|---|---|
-| FM-01 | Model throttling | Peak burst or noisy neighbour exhausts TPM; 429 from Azure OpenAI | APIM 429 ratio > 5% over 10 min (P2); `llm_429_total` | Slower answers; some degraded | APIM `retry` honouring `retry-after-ms` within deadline; backend pool fails over to priority 2 if ≥ 4 s remain; else degraded mode | RB-01 | n/a (degraded); quota fix ≤ 1 business day | FI: APIM mock 429 at 30% |
+| FM-01 | Model throttling | Peak burst or noisy neighbour exhausts TPM; 429 from Azure OpenAI | APIM 429 ratio > 5% over 10 min (P2); `rmc_apim_backend_requests_total{status="429"}` | Slower answers; some degraded | APIM `retry` honouring `retry-after-ms` within deadline; backend pool fails over to priority 2 if ≥ 4 s remain; else degraded mode | RB-01 | n/a (degraded); quota fix ≤ 1 business day | FI: APIM mock 429 at 30% |
 | FM-02 | Model regional outage | Azure OpenAI unavailable in UAE North | Breaker open on both backends; degraded rate > 5% (P2); Azure Service Health | Data-only briefs, passages without answer, manual UC3 form (C3) | Breakers open, degraded mode, banner | RB-02 | n/a (Microsoft); degraded within seconds | FI: block private endpoint in pre-prod |
-| FM-03 | Model latency degradation | TTFT p95 > 2 s | `gen_ttft_seconds` p95 alert (P3); latency SLO burn | Slower; deadline-driven degraded answers | Deadline guards switch to degraded mode when < 4 s remain | RB-01 | n/a | FI: injected latency |
+| FM-03 | Model latency degradation | TTFT p95 > 2 s | `rmc_llm_request_duration_seconds{phase="ttft"}` p95 alert (P3); latency SLO burn | Slower; deadline-driven degraded answers | Deadline guards switch to degraded mode when the remaining budget is below the minimum viable generation budget (02 §1.6); failover to the second backend only if ≥ 4 s remain | RB-01 | n/a | FI: injected latency |
 | FM-04 | Content filter false positive | Normal banking terms ("default", "kill the deal", "exposure") blocked | `DEGRADED/CONTENT_FILTER` and `GUARDRAIL_BLOCKED` rate > 2% daily; golden-set false-positive gate (C13) | Section missing or UC2 decline with routing | Flagged; counted; no retry with weakened prompt | RB-02 (tuning path) | Tuning ≤ 5 business days | GS false-positive slice |
 | FM-05 | Quota exhaustion per RM or use case | `llm-token-limit` reached (runaway loop, heavy user) | APIM 429 with `llm-token-limit` source; per-RM usage > 80% of 400k | That RM gets `BUDGET_EXCEEDED` until 00:00 GST | Hard stop by APIM | RB-12 | Next day or manual raise | IT: APIM policy test |
 | FM-06 | Model version retirement | Microsoft retirement notice | Model inventory job checks retirement dates weekly; alert at 120 days | None if planned | None (auto-upgrade off) | RB-05 | Planned (90 days) | DR: upgrade rehearsal |
 | FM-07 | Golden-set regression | Prompt, model, index or guardrail change lowers groundedness or citation accuracy | Eval gate fails in CI (06 §4) | None (blocked before release) | Pipeline stops | RB-06 | n/a | CI |
 | FM-08 | Online quality drift | Policy corpus change or input drift lowers sampled groundedness | Sampled groundedness < 0.93 over 3 days (P2); decline rate ± 50% from baseline | Wrong or over-cautious answers | Alert; rollout paused | RB-06, RB-05 | ≤ 5 business days | Seeded drift in pre-prod |
 | FM-09 | Embedding model version mismatch | Query embeddings from a new `embed` version against an old index | Retrieval smoke fails; recall@5 drop | Poor UC2 answers or declines | Version pin includes `embed`; mismatch check at start-up refuses | RB-07 | ≤ 2 h (rebuild) | IT: version check |
-| FM-10 | Content Safety unavailable | Service outage | Breaker open; `guardrail_degraded` count | None visible (integrated filter still on); UC3 shows a notice | Continue on local injection and quarantine rules, `guardrail_degraded` in audit (02 §9) | RB-02 | n/a | FI |
-| FM-11 | AI Language PII unavailable | Service outage | Breaker open (P2) | None visible; masking on regex fallback | Regex masking (always on) continues; UC1 names already placeholders; `pii_degraded` in audit (02 §9) | RB-02 | n/a | FI |
+| FM-10 | Content Safety unavailable | Service outage | Breaker open; `rmc_guardrail_fallback_total{service="content-safety"}` | None visible (integrated filter still on); UC3 shows a notice | Continue on local injection and quarantine rules; `result: fallback_local` in the audit event's `guardrails[]` (02 §6.4) | RB-02 | n/a | FI |
+| FM-11 | AI Language PII unavailable | Service outage | Breaker open (P2) | None visible; masking on regex fallback | Regex masking (always on) continues; UC1 names already placeholders; `result: fallback_local` in the audit event's `guardrails[]` (02 §6.4) | RB-02 | n/a | FI |
 | FM-12 | Abuse-monitoring exemption not granted or withdrawn | Microsoft decision | Go-live gate checklist; contract review | Go-live blocked (real data) | n/a | Governance | n/a | Gate review |
 
 ### 4.2 Systems of record and identity
@@ -342,20 +358,20 @@ mock-Azure prototype and pre-prod (Chaos Studio or APIM mock responses [confirm 
 | ID | Scenario | Trigger | Detection / alert | User impact | Automatic response | Runbook | RTO | Test |
 |---|---|---|---|---|---|---|---|---|
 | FM-13 | CRM down | CRM outage | Breaker open > 2 min (P2); synthetic probe | UC1 and UC3 unavailable; UC2 fine; commits fail entitlement | Fail closed; clear message | RB-16 | CRM owner OLA (4 h P1) | FI |
-| FM-14 | CRM slow | CRM p95 > 2 s | Dependency latency alert (P3) | Partial briefs (`skipped_deadline`), slower commits | Deadline-derived timeouts; breaker on consecutive timeouts | RB-16 | CRM OLA | FI: latency injection |
-| FM-15 | CRM write ambiguous outcome | Timeout after the CRM accepted the write | Outbox item with `unknown` state | Item shows `queued` | `outbox-worker` reads by external reference before retrying (C7) | RB-08 | ≤ 30 min after CRM recovery | IT: timeout-after-commit fault |
-| FM-16 | Outbox poison item | CRM rejects an item permanently (validation, closed customer) | Item reaches max attempts; `outbox_failed_total` (P3) | RM sees `failed` with reason | Moved to `failed`; RM can edit and re-approve | RB-08 | n/a | IT |
+| FM-14 | CRM slow | CRM p95 > 2 s | Dependency latency alert (P3); `rmc_deadline_exceeded_total{peer="crm"}` | UC1 and UC3 draft fail with `504 DEPENDENCY_TIMEOUT` when the profile misses its deadline; slower commits (items queued) | Deadline-derived timeouts; breaker on consecutive timeouts | RB-16 | CRM OLA | FI: latency injection |
+| FM-15 | CRM write ambiguous outcome | Timeout after the CRM accepted the write | Outbox item `queued` with `outcome_unknown=true` | Item shows `queued` | `outbox-worker` reads by external reference before retrying (C7) | RB-08 | ≤ 30 min after CRM recovery | IT: timeout-after-commit fault |
+| FM-16 | Outbox poison item | CRM rejects an item permanently (validation, closed customer) | Item reaches max attempts; `rmc_outbox_deliveries_total{outcome="poison"}`, alert `RmcOutboxPoison` (P3) | RM sees `failed` with reason | Moved to `failed`; RM can edit and re-approve | RB-08 | n/a | IT |
 | FM-17 | Core ODS down, slow or stale | ODS outage or replication lag | Breaker; `as_of` lag > 60 min (P3) | Partial brief, balances flagged or `as_of` shown | Partial brief | RB-16 | ODS OLA | FI |
-| FM-18 | LOS down | Outage | Breaker (P2) | UC1 unavailable: facilities are critical (02 §3.4); trade-only failure gives a partial brief | `503 DEPENDENCY_UNAVAILABLE` | RB-16 | LOS OLA | FI |
+| FM-18 | LOS down | Outage | Breaker (P3) | Partial brief: facilities section flagged (plan §4.1 step 5; only the CRM profile is critical) | Partial brief | RB-16 | LOS OLA | FI |
 | FM-19 | KYC down | Outage | Breaker (P3) | Partial brief, "check KYC system" | Partial brief | RB-16 | KYC OLA | FI |
 | FM-20 | News feed down or malformed | Vendor outage, oversize or malformed payload | Breaker; payload validation rejects (P3) | Partial brief | Reject payload > 64 KB or schema-invalid | RB-16 | Vendor SLA | FI: malformed payload |
 | FM-21 | Policy DMS down or events missed | DMS outage; event bus loss | Sync age > 4 h (P3); weekly reconciliation diff | Index stale; staleness banner if > 1 business day | Delta poll every 15 min backs up events | RB-07 | ≤ 4 business hours | Reconciliation test |
 | FM-22 | Graph throttled or consent revoked | 429 or 403 from Graph | Error ratio (P3) | Meeting list empty; launch from CRM works | Retry once on 429 | RB-16 | M365 team | FI |
-| FM-23 | Entitlement data stale | `portfolio.changed` event lost; cache served for 60 s | Event lag > 5 min (P3); nightly reconciliation of portfolio snapshot vs CRM | RM may see a customer for ≤ 60 s after reassignment (or longer if event lost and cache refreshed from stale source) | Cache TTL ≤ 60 s bounds exposure; source of truth is CRM on every miss | RB-09 if exposure suspected | ≤ 60 s | IT: drop event, assert TTL expiry |
+| FM-23 | Entitlement data stale | `portfolio.changed` event lost (CRM, APIM `rmc-crm-events` or Event Hubs); cache served for 60 s | `RmcPortfolioEventLag` > 5 min (P3); APIM 5xx on `rmc-crm-events`; nightly reconciliation of portfolio snapshot vs CRM | RM may see a customer for ≤ 60 s after reassignment (or longer if event lost and cache refreshed from stale source) | Cache TTL ≤ 60 s bounds exposure; source of truth is CRM on every miss | RB-09 if exposure suspected | ≤ 60 s | IT: drop event, assert TTL expiry |
 | FM-24 | Delegation expiry not applied | Holiday cover end date passes; delegation record not updated | Daily job lists delegations past `valid_to` still returned by CRM (P2) | Delegate keeps access | Entitlement code enforces `valid_to` itself (does not trust the CRM list alone) | RB-09 | Immediate (code check) | UT: expiry boundary in GST |
 | FM-25 | RM leaves the bank or changes role | HR leaver or mover | Entra account disabled; portfolio reassigned | Leaver: sign-in blocked, refresh tokens revoked; drafts orphaned | Entra disable + session revocation; Cosmos sessions expire (24 h TTL) but **`web-bff` checks account status on each session refresh**; pending approvals invalid (`sub` mismatch) | RB-09 (if access after leave) | ≤ 1 h after HR action [confirm Bank leaver SLA] | IT: disabled account test |
 | FM-26 | Entra ID outage | Microsoft incident | Token failures (P2); Service Health | No new sign-ins or step-up; existing sessions read only | Cached tokens until expiry | RB-16 | Microsoft | Tabletop |
-| FM-27 | Conditional Access misconfiguration | Policy change blocks RMs or weakens step-up | Sign-in failure spike; step-up success rate change | All or no RMs blocked, or approvals without fresh auth | `web-bff` enforces `auth_time` ≤ 10 min itself | RB-16 | ≤ 1 h (revert) | Pre-prod CA policy test |
+| FM-27 | Conditional Access misconfiguration | Policy change blocks RMs or weakens step-up | Sign-in failure spike; step-up success rate change | All or no RMs blocked, or approvals without fresh auth | `web-bff` enforces `acrs` contains `c1` itself and falls back to the ID token `auth_time` ≤ 10 min (plan §3.4) | RB-16 | ≤ 1 h (revert) | Pre-prod CA policy test |
 
 ### 4.3 Platform
 
@@ -364,15 +380,15 @@ mock-Azure prototype and pre-prod (Chaos Studio or APIM mock responses [confirm 
 | FM-28 | Key Vault unavailable | Service outage or RBAC drift | `sign` failures (P1 if > 5 min); 403 alert | Approve blocked ("drafts saved"); reads unaffected; verification works for cached `kid` | Public key cache; approve button disabled with message | RB-16 | Microsoft / ≤ 1 h for RBAC drift | FI |
 | FM-29 | Cosmos DB throttling | Hot partition or RU max too low | 429 count; normalised RU > 80% (P3) | Slower; rare failures | SDK retry within deadline; autoscale | RB-16 | ≤ 15 min (raise max RU) | Load test |
 | FM-30 | Cosmos DB unavailable | Service incident | Availability metric; 5xx (P1) | All use cases unavailable (sessions, jti) | None (hard dependency) | RB-16 | Microsoft | Tabletop |
-| FM-31 | Event Hubs unavailable | Service incident, TU exhaustion | Producer ack failures, audit-caused `DEPENDENCY_UNAVAILABLE` (P1 if > 1 min) | **Fail closed**: no answers, no writes | Refuse; banner "temporarily unavailable" | RB-16 | Microsoft; TU fix ≤ 15 min | FI: block endpoint, assert no output |
+| FM-31 | Event Hubs unavailable | Service incident, TU exhaustion | Producer ack failures (`RmcAuditPublishFailing`, P1), spool writes | Reads and drafts continue; **commits fail closed** (`approval_verified` needs the Event Hubs ack), drafts stay saved | `tool-gateway` writes events to the Cosmos `audit-spool`; `audit-writer` drains it into chain `s0` (02 §6.4) | RB-16 | Microsoft; TU fix ≤ 15 min | FI: block endpoint, assert reads continue, commit refused, spool drained |
 | FM-32 | Audit writer lag or Blob write failure | Storage incident, bug | Consumer lag > 5 min (P2); no append 15 min | None (asynchronous) | Event Hubs retains events; writer resumes from checkpoint | RB-10 | ≤ 1 h | FI |
 | FM-33 | Audit chain verification failure | Missing or altered record, writer bug | Nightly verification job fails (P1) | None directly; integrity of evidence at risk | Writer halts new appends to the affected chain segment and starts a new segment anchored to the last good hash | RB-10 | Investigation ≤ 1 business day | IT: tamper a test record |
 | FM-34 | AKS node loss | VM failure | Node NotReady (P2) | In-flight requests on that node fail; retried by user | Kubernetes reschedules; PDB keeps ≥ 2 replicas | none | ≤ 5 min | DR: drain node |
 | FM-35 | Availability zone loss | Zone outage | Multiple node and service alerts; Service Health | Brief errors for in-flight requests | Zone-redundant services fail over; pods rescheduled to remaining zones; cluster autoscaler adds nodes | RB-16 | ≤ 5 min; audit RPO 0 | DR: quarterly zone drill |
 | FM-36 | Region loss | Regional disaster | Service Health; everything down | Copilot unavailable; RMs use existing tools | None automatic | RB-13 | Best effort 24 h (plan §3.1) | Annual tabletop + rebuild test |
-| FM-37 | APIM failure | Gateway unit failure, bad policy deployment | Gateway 5xx > 2% (P1) | All use cases unavailable | Pilot: none (single unit); scale: other zone units | RB-14 (policy rollback), RB-16 | ≤ 15 min (policy rollback); Microsoft for platform | IT: APIOps rollback rehearsal |
+| FM-37 | APIM failure | Gateway unit failure, bad policy deployment | Gateway 5xx > 2% (P1) | Unit or zone loss: none (the other zone's unit serves); bad policy: all use cases unavailable | 2 units across zones from the pilot (plan v2.2); policy rollback by APIOps | RB-14 (policy rollback), RB-16 | ≤ 15 min (policy rollback); Microsoft for platform | IT: APIOps rollback rehearsal |
 | FM-38 | Application Gateway WAF false positives | WAF rule blocks legitimate payloads (Arabic text, JSON drafts) | WAF block spike from known users | Requests rejected | None | RB-14 (WAF exclusion change) | ≤ 4 h | Pre-prod WAF test with golden set payloads |
-| FM-39 | App Configuration unavailable | Service incident | Refresh age > 5 min (P2) | None while running; writes stop after 5 min | Last loaded values stay in force; **write kill switch fails closed** after 5 min without refresh; new pods are not ready until config loads (02 §2) | RB-16 | Microsoft | FI |
+| FM-39 | App Configuration unavailable | Service incident | Refresh age > 5 min (P2) | None while running; writes stop after 15 min | Last loaded values stay in force; **write kill switch fails closed** after 15 min without refresh (plan §3.3); new pods are not ready until config loads (02 §2) | RB-16 | Microsoft | FI |
 | FM-40 | AI Search outage or index loss | Service incident, accidental delete | Query failures; document count drop > 2% (P2) | UC2 unavailable, routed to desks | Breaker | RB-07 | 30 to 60 min rebuild (2.5) | DR: quarterly rebuild |
 | FM-41 | Private DNS or private endpoint misresolution | DNS zone change, endpoint deleted | Connection failures to a PaaS; DNS probe (P1) | Dependent use cases down | None | RB-14 (IaC revert) | ≤ 1 h | Pre-prod DNS change test |
 | FM-42 | Clock skew | Node NTP drift | Node time offset metric > 1 s (P3); approval `iat` in future | Valid approvals rejected or expiry wrong | 30 s skew tolerance on `exp`/`iat` (plan §4.2); date logic in GST from a trusted clock | RB-16 | ≤ 1 h (cordon node) | UT: skew boundaries |
@@ -404,10 +420,12 @@ mock-Azure prototype and pre-prod (Chaos Studio or APIM mock responses [confirm 
 | FM-63 | Very long notes | UC3 notes exceed limits (AI Language per-document limit, Prompt Shields limit, token budget) | Input size metric | Notes above 8,000 characters rejected with `400 VALIDATION_FAILED/TOO_LARGE` (02 §1.1) | Chunk for PII and Shields; extraction per segment then merge, within the 12k input budget | none | n/a | UT long inputs |
 | FM-64 | Telemetry content leak | Library upgrade enables GenAI content capture; exception message contains a prompt | Canary string scan (PRIV-05) (P1); Azure Policy non-compliance | None directly; privacy breach | CI test blocks release; scrubbing processor | RB-11 (data incident path) + purge | Purge request ≤ 1 business day [confirm Log Analytics purge process] | CI canary |
 | FM-65 | Kill switch activation | AI incident or risk decision | Flag change event; banner | Use case off; UC3 manual path | Pods enforce within 30 s | RB-03 | Re-enable after RCA | Monthly drill |
-| FM-66 | Kill switch fails to propagate | Pod cannot refresh config | Config refresh age > 5 min (P2) | Use case may stay on in that pod | Writes fail closed after 5 min stale (02 §2); RB-03 step 3 restarts stale pods | RB-03 | ≤ 5 min | FI |
+| FM-66 | Kill switch fails to propagate | Pod cannot refresh config | Config refresh age > 60 s after a flag change (RB-03), > 5 min (P2) | Use case may stay on in that pod | RB-03 step 3 restarts stale pods; writes fail closed after 15 min stale regardless (02 §2) | RB-03 | ≤ 5 min | FI |
 | FM-67 | Audit content erasure request | Customer exercises erasure (where applicable) | Ticket from DPO | None | Destroy the per-customer key; WORM metadata keeps hashes and pointers (C21) | Privacy procedure (§7.5) | ≤ 30 days | PRIV-04 drill |
+| FM-68 | Audit spool backlog or spool unavailable | Long Event Hubs outage; `audit-writer` drain stuck; Cosmos throttling on `audit-spool` | `RmcAuditSpoolBacklog` (oldest > 15 min, P1); spool create failures | None while the spool accepts; if both Event Hubs and the spool fail, every use case fails closed (`503 DEPENDENCY_UNAVAILABLE/AUDIT`) | Drain resumes from the oldest document; chain `s0` keeps order | RB-16, RB-10 | ≤ 1 h | FI: Event Hubs blocked for 30 min in pre-prod, then drain |
+| FM-69 | Seal not copied to the seal store | Seal subscription network or RBAC change; `audit-writer` failure | `RmcAuditSealStale` (no seal for > 15 min, P1 security) | None; tamper-evidence window widens | Seals retried in order; gap recorded in the next seal | RB-10 | ≤ 1 h | FI: deny writes to `audit-seals` in pre-prod |
 
-Count: 67 scenarios.
+Count: 69 scenarios.
 
 ---
 
@@ -428,11 +446,11 @@ Count: 67 scenarios.
 |---|---|---|---|
 | Application Gateway WAF v2 | Zones 1, 2, 3, autoscale min 2 | Remaining instances serve | n/a |
 | AKS | System and user pools across 3 zones; topology spread; PDB minAvailable 2 | Pods rescheduled; autoscaler adds nodes in surviving zones | n/a |
-| APIM | Scale: ≥ 2 units across zones; pilot: 1 unit (gap, 04 §10 item 5) | Surviving units serve (scale) | n/a |
+| APIM | 2 units across zones from the pilot, 3 at scale (plan v2.2) | Surviving unit serves | n/a |
 | Azure OpenAI (Regional Standard) | Microsoft-managed within region [confirm zone resilience of Regional deployments] | Transparent or degraded mode | n/a |
 | AI Search | 2 to 3 replicas spread across zones [confirm zone support in UAE North] | Remaining replicas serve | n/a |
 | Cosmos DB | Zone-redundant account | Automatic | 0 |
-| Event Hubs | Zone-redundant namespace | Automatic | 0 |
+| Event Hubs | Zone-redundant namespace; Cosmos `audit-spool` fallback | Automatic | 0 |
 | Storage | GZRS (ZRS in primary) | Automatic | 0 |
 | Key Vault, App Configuration | Zone-resilient by platform [confirm] | Automatic | 0 |
 | Azure Firewall (hub) | Zones | Automatic | n/a |
@@ -452,9 +470,9 @@ Count: 67 scenarios.
 | Data | Region-loss RPO | Mechanism |
 |---|---|---|
 | Audit metadata (WORM) | ≤ 15 min (plan §5) | GZRS asynchronous geo-replication; typical lag is minutes but not SLA-backed [confirm] |
-| Audit events in Event Hubs not yet written | Seconds of consumer lag | Lost with the region (Standard has no geo-replication); recorded as a known gap; Event Hubs geo-replication in Premium [confirm availability] would close it |
+| Audit events in Event Hubs not yet written | Seconds of consumer lag | Lost with the region in the pilot (Standard has no geo-replication); recorded as a known gap; Premium at scale with geo-replication [confirm availability in UAE North, plan §10 item 14] closes it |
 | Audit content store | ≤ 15 min | GZRS |
-| Drafts, outbox, sessions (Cosmos) | Backup interval (continuous backup restore point, or periodic geo-redundant backup) [confirm restore options across regions for a single-region account] | RMs re-enter unapproved drafts; committed items are already in the CRM; queued outbox items may need re-approval (RM notified) |
+| Drafts, outbox, sessions (Cosmos) | Periodic backup interval (periodic backup with geo-redundant backup storage; restore by support request) [confirm interval and restore time, plan §10 item 13] | RMs re-enter unapproved drafts; committed items are already in the CRM; queued outbox items may need re-approval (RM notified) |
 | Policy chunks and embeddings | ≤ 15 min | GZRS; index rebuilt |
 | Configuration and code | 0 | Git and ACR (geo-replication of ACR to UAE Central if available [confirm]) |
 
@@ -462,11 +480,11 @@ Count: 67 scenarios.
 
 | Asset | Backup | Restore test | Frequency | Success criterion |
 |---|---|---|---|---|
-| Cosmos DB | Continuous backup (point in time) [confirm tier: 7 or 30 days] | Restore to a new account in pre-prod, verify drafts and outbox | Quarterly | Restore ≤ 2 h; data consistent |
-| Audit WORM store | GZRS + immutability (no deletes possible) | Read-back and chain verification from the secondary (RA access or test failover of a non-prod account) | Semi-annual | Chain verifies |
+| Cosmos DB | Periodic backup with geo-redundant backup storage (plan §3.3) [confirm interval and retention] | Restore to a new account in pre-prod through a support request, verify drafts and `approvals` | Quarterly | Restore time measured and recorded (support-request dependent); data consistent |
+| Audit WORM store | GZRS + immutability (no deletes possible); seals in the seal store | Read-back and chain verification from the secondary (RA access or test failover of a non-prod account), checked against the seal store | Semi-annual | Chain and seals verify |
 | Audit content store | GZRS; per-customer keys in Key Vault (soft delete, purge protection) | Decrypt sample after key restore | Semi-annual | Sample decrypts |
 | Key Vault | Soft delete, purge protection; key backup blobs stored in a separate secured account (same geography) | Restore signing key into a test vault | Annual | Signature verifies |
-| AI Search | Stored chunks and embeddings in Blob | Full rebuild into `policies-v{n+1}` and alias swap in pre-prod | Quarterly | ≤ 60 min, golden-set retrieval unchanged |
+| AI Search | Stored chunks and embeddings in Blob | Full rebuild into `policies-v{n+1}` and index pin flip in pre-prod | Quarterly | ≤ 60 min, golden-set retrieval unchanged |
 | App Configuration | Exported snapshot in Git (pipeline source of truth) | Re-import into a new store | Annual | Flags identical |
 | Infrastructure | Bicep (AVM) in Git | Rebuild an environment in an isolated subscription | Annual | MAINT-02 ≤ 8 h |
 
@@ -484,7 +502,9 @@ Count: 67 scenarios.
 
 ## 6. STRIDE threat model per trust boundary
 
-Trust boundaries (TB): **TB1** RM device ↔ Application Gateway / `web-bff`; **TB2** `web-bff` ↔ `orchestrator`;
+Trust boundaries (TB), numbered for this threat model; mapping to `01-hld.md` §9.1: TB1 = HLD TB1 + TB2, TB2 = HLD
+TB3, TB3 = HLD TB4, TB4 = HLD TB6, TB5 = HLD TB5, TB6 = HLD TB7, TB8 = HLD TB8; TB7, TB9 and TB10 have no HLD
+equivalent. **TB1** RM device ↔ Application Gateway / `web-bff`; **TB2** `web-bff` ↔ `orchestrator`;
 **TB3** `orchestrator` ↔ `tool-gateway`; **TB4** `tool-gateway` ↔ APIM system facade ↔ systems of record (ExpressRoute);
 **TB5** `orchestrator`/`tool-gateway` ↔ APIM AI gateway ↔ Azure OpenAI and AI services (Microsoft-operated);
 **TB6** external news feed → Azure Firewall → APIM; **TB7** policy DMS → `ingestion-worker` → AI Search;
@@ -493,9 +513,9 @@ plane and AKS; **TB10** administrators and operators → platform.
 
 | TB | STRIDE | Threat | Mitigation | Residual risk |
 |---|---|---|---|---|
-| TB1 | S | Stolen session or token replayed from another device | Entra Conditional Access (managed device, compliant), short-lived tokens, token protection where supported [confirm], session bound to `web-bff` cookie with `SameSite=strict` | Low |
+| TB1 | S | Stolen session or token replayed from another device | Entra Conditional Access (managed device, compliant), short-lived tokens, token protection where supported [confirm], session bound to the `__Host-rmc-sid` cookie (`SameSite=None` because the app is framed by CRM and Teams, so the CSRF token and Origin check are mandatory, 02 §2.1) | Low |
 | TB1 | T | Client modifies a draft after approval or forges approval | Server-side canonical hash and signing in `web-bff`; client never holds the key (C6) | Low |
-| TB1 | R | RM denies approving a write | Step-up auth (`auth_time` ≤ 10 min), signed token with `sub`, audit `approval_issued` in WORM | Low |
+| TB1 | R | RM denies approving a write | Step-up auth (authentication context `approve-write`, `acrs` contains `c1`), signed token with `sub`, audit `approval_issued` in WORM | Low |
 | TB1 | I | Output rendering leaks data via images or links; XSS | Plain text, strict CSP, Origin/CSRF checks (C19) | Low |
 | TB1 | D | Request flood from a compromised device | WAF rate rules, APIM per-RM limits, per-RM token cap | Low |
 | TB1 | E | RM accesses customers outside portfolio | Entitlement check first in `tool-gateway`, by token `oid` (C4) | Low |
@@ -521,9 +541,10 @@ plane and AKS; **TB10** administrators and operators → platform.
 | TB7 | I | Document above RM clearance retrieved | `clearance <= RM clearance` filter applied in `tool-gateway`, not by the model | Low |
 | TB7 | I | PII embedded in policies | PII scan and masking at ingestion (FM-61) | Low |
 | TB8 | T | Audit record altered or deleted | WORM (locked time-based retention), hash chain, nightly verification (RB-10) | Low |
-| TB8 | R | Action without audit | Fail-closed producer ack; completeness job | Low |
+| TB8 | R | Action without audit | Producer ack from Event Hubs or the Cosmos `audit-spool` (Event Hubs only for commits), fail closed if neither; completeness job | Low |
 | TB8 | I | Audit content read by operators | Content encrypted per customer key; key access only by `audit-writer` and an audited break-glass role | Low |
-| TB8 | D | Event Hubs outage stops the service | Accepted (fail closed by design); Premium option | Accepted |
+| TB8 | D | Event Hubs outage stops the service | Cosmos `audit-spool` for reads and drafts; commits fail closed by design; Premium at scale | Low (commits: accepted) |
+| TB8 | T | Insider rewrites the unsealed tail of the chain | 5-minute seals copied to a seal store in a separately administered subscription (IT risk); nightly verification against both copies | Low |
 | TB9 | T | Malicious change in pipeline or image | Protected branches, required reviews, OIDC (no stored secrets), image signing (Notation) and admission verification, SBOM | Low |
 | TB9 | E | Pipeline identity with excessive rights | Per-environment federated identities scoped to resource groups; prod deploy requires approval gate | Low |
 | TB10 | E | Administrator reads customer data or flips controls | PIM just-in-time with approval, Bastion, no standing access, Sentinel alerts on PIM activation, kill-switch changes audited | Low to medium (insider with approval) |
@@ -562,15 +583,18 @@ plane and AKS; **TB10** administrators and operators → platform.
 | Data | Store | Retention |
 |---|---|---|
 | Session state | Cosmos DB | 24 h TTL |
-| Drafts and approval verdicts | Cosmos DB | 30 days TTL (committed items live in CRM) |
-| jti replay store | Cosmos DB | 1 day TTL (> token life) |
+| Drafts | Cosmos DB `drafts` | 30 days TTL (committed items live in CRM) |
+| jti replay store | Cosmos DB `approvals` (marker document) | 1 day TTL (> token life) |
+| Approval verdicts, saga state and outbox items | Cosmos DB `approvals` | 30 days after the last item reaches a final state (plan §7, v2.3) |
+| Idempotency records | Cosmos DB `idempotency` | 7 days (plan §7) |
+| Audit spool | Cosmos DB `audit-spool` | Until drained (alert at 15 min, plan §7 v2.4) |
+| Audit seals | Seal store, separate subscription | 7 years (plan §7 v2.4) |
 | Entitlement and tool-result cache | Cosmos DB / in-process | ≤ 60 s / request scope |
 | Audit metadata hash chain | Immutable Blob (GZRS) | 7 years |
 | Audit content (masked prompts, outputs) | Encrypted store, per-customer key | 1 year, crypto-shred on erasure |
 | Telemetry (no content) | App Insights / Log Analytics | 90 days |
 | Metrics | Managed Prometheus | 18 months (platform default) |
-| ★ Outbox items | Cosmos DB | 30 days after terminal state |
-| ★ Audit events in transit | Event Hubs | `audit-events` 3 days, `audit-content` 1 day (02 §2.6) |
+| ★ Audit events in transit | Event Hubs | `audit-events` 3 days, `audit-content` 1 day, `crm-portfolio-events` 1 day (02 §2.6) |
 | ★ Restricted audit metadata table (query copy) | Log Analytics | 1 year interactive, then rely on WORM [confirm] |
 | ★ Policy chunks and embeddings | Blob | While the source version is current, plus 30 days after withdrawal |
 | ★ Golden set and eval results | Eval store (non-prod, synthetic) | Life of the model plus 7 years for validation evidence [confirm MRM standard] |
@@ -615,12 +639,12 @@ plane and AKS; **TB10** administrators and operators → platform.
 | ID | Component | Type | Used by | Owner | Version pin | Proposed tier |
 |---|---|---|---|---|---|---|
 | M-01 | `gen-large` (frontier GPT-class) | Third-party LLM | UC1 wording, UC2 answer | Copilot product owner | Model + version + deployment, auto-upgrade off [confirm model, plan §10.1] | Tier 2 (material: informs customer conversations and policy interpretation) |
-| M-02 | `gen-small` (small GPT-class) | Third-party LLM | UC2 rewrite, UC3 extraction, groundedness check | Copilot product owner | As above | Tier 2 |
+| M-02 | `gen-small` (small GPT-class) | Third-party LLM | Router, UC2 rewrite, UC3 extraction | Copilot product owner | As above | Tier 2 |
 | M-03 | `embed` (`text-embedding-3-large`) | Embedding model | UC2 retrieval | Copilot product owner | Version pinned with index version | Tier 3 |
 | M-04 | Semantic ranker | Microsoft-managed reranker | UC2 | Copilot product owner | Not pinnable [confirm]; monitored by retrieval evals | Tier 3 |
 | M-05 | Prompt Shields / content filters | Microsoft classifiers | All | InfoSec | Filter configuration versioned | Tier 3 (control model) |
 | M-06 | PII detection (AI Language + regex) | Classifier + rules | All | DPO / copilot team | API and rule version | Tier 3 (control model) |
-| M-07 | Numeric, policy and local groundedness checks | Rules + `gen-small` | All | Copilot team | Guardrail version | Tier 2 (key control) |
+| M-07 | Numeric, policy and local groundedness checks | Rules (no model call, 02 §9.1) | All | Copilot team | Guardrail version | Tier 2 (key control) |
 | M-08 | Evaluators (LLM judges, metrics) | LLM-as-judge + scripts | Release gate, monitoring | MRM-validated, copilot team operated | Judge model + prompt version | Tier 3, **validated** (see 8.3) |
 | M-09 | Document Intelligence layout | Microsoft model | Ingestion | Copilot team | API version | Tier 3 |
 
@@ -655,7 +679,7 @@ is RM-approved.
 
 | Aspect | Rule |
 |---|---|
-| Size and composition | ≥ 300 items (plan §5) per release gate: UC1 ≥ 80, UC2 ≥ 150 (incl. ≥ 30 "should decline"), UC3 ≥ 70; Arabic slice ≥ 60 across use cases; adversarial set ≥ 100 separate; holdout 20% kept by MRM |
+| Size and composition | Per release gate (plan §5, ADR-018): UC2 ≥ 300 items (incl. ≥ 30 "should decline"), because the groundedness and citation gates need ≥ 293/300 for a 95% Wilson lower bound ≥ 0.95; UC1 ≥ 50 briefs; UC3 ≥ 50 note sets; Arabic slice ≥ 60 across use cases; red-team suite ≥ 1,000 attacks separate; holdout 20% kept by MRM |
 | Data | Synthetic customers and policies outside prod (plan §3.3); no real customer data |
 | Owners | Policy office (UC2 answers), RM champions (UC1/UC3), MRM (holdout), copilot QA analyst (curation) |
 | Change process | Pull request with two approvals (curator + domain owner); every change logged with reason; items never deleted, only retired with reason |
@@ -668,8 +692,8 @@ is RM-approved.
 | Metric | Source | Threshold (alert) | Action |
 |---|---|---|---|
 | Groundedness (golden set, lower 95% bound) | Release gate | < 0.95 | Block release |
-| Citation accuracy | Release gate | < 0.95 | Block release |
-| Sampled online groundedness (UC2) | In-region judge, 5% sample | < 0.93 over 3 business days | P2, pause rollout |
+| Citation accuracy (golden set, lower 95% bound) | Release gate | < 0.95 | Block release |
+| Sampled online groundedness (UC2) | In-region judge, 5% sample capped at 200/day | < 0.93 over 3 business days | P2, pause rollout |
 | Correct decline rate | Golden set | < 90% | Block release |
 | Decline rate in production | Telemetry | ± 50% from 4-week baseline | Investigate drift |
 | False-positive block rate | Golden set and telemetry | > 2% | Tune (C13) |
@@ -710,8 +734,8 @@ is RM-approved.
 | # | Item | Owner |
 |---|---|---|
 | 1 | UC2 worst case with stricter retry exceeds the 12k per-request input budget only if groundedness becomes model-assisted (§2.2); keep it rule-based or retry with top 4 passages | Architecture (plan v3) |
-| 2 | Proposed retention additions (★ in §7.3) to be added to plan §7 | Records management |
-| 3 | Event Hubs Standard has no geo-replication: in-flight audit events lost on region loss (§5.3) | Architecture |
+| 2 | Remaining retention proposals (★ in §7.3: Event Hubs, restricted audit table, chunks, golden-set evidence) to be confirmed; verdict, saga, outbox, idempotency, spool and seal rows are in plan §7 (v2.3, v2.4) | Records management |
+| 3 | Event Hubs Standard has no geo-replication: in-flight audit events lost on region loss in the pilot (§5.3); Premium at scale closes it if geo-replication is offered in UAE North [confirm] | Architecture |
 | 4 | Static outage page hosting outside UAE North (§5.3 step 2) | Copilot team |
 | 5 | Signer and verifier node pools cost 6 extra nodes; confirm isolation level with the security ADR (§2.7) | Security ADR |
 | 6 | All capacity numbers to be re-baselined from pilot telemetry at the Phase 2 gate | SRE |

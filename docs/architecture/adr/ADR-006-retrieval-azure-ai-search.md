@@ -82,7 +82,7 @@ Adopt **option 1: Azure AI Search, Standard tier**, private endpoint, Entra auth
 **Negative**
 - One more managed service with a fixed monthly floor that does not scale down for the pilot.
 - Semantic ranker behaviour is a vendor model we do not control; changes to it can shift scores and thresholds.
-- Index schema changes require reindexing (mitigated by stored chunks and alias swap).
+- Index schema changes require reindexing (mitigated by stored chunks and a blue/green index with a pin flip, `02-lld.md` §6.2).
 
 **Risks and mitigations**
 
