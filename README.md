@@ -6,7 +6,7 @@ An AI assistant for SME relationship managers, built around three use cases: a *
 |---|---|
 | Presentation (29 slides, with speaker notes) | https://claude.ai/artifact/SQ99QXKTFqqkcG8qZvvGB1 (source in `deck/project/`). Export to PowerPoint or PDF from the deck's Share menu. |
 | Clickable prototype | https://claude.ai/artifact/QMmwAsgAQZnoUtVf2iTkWA (source: `prototype/rm-copilot.html`, which also opens offline in any browser). The "How it works" tab shows the Azure architecture and lights up what the last request touched |
-| Azure architecture pack | `docs/architecture/`: plan and baseline (`00-plan.md`), HLD (`01`), LLD (`02`), 22 ADRs with trade-offs (`adr/`), interfaces and SLAs (`04`), NFRs, failure modes, DR and model risk (`05`), deployment and operations (`06`), ARB review log and verdict (`07`) |
+| Azure architecture pack | `docs/architecture/`: plan and baseline (`00-plan.md`), HLD (`01`), LLD (`02`), 22 ADRs with trade-offs (`adr/`), interfaces and SLAs (`04`), NFRs, failure modes, DR and model risk (`05`), deployment and operations (`06`), ARB review log and verdict (`07`); one-page diagrams in `diagrams/` (Azure target architecture, current application) |
 | Working prototype on mock Azure | `code/`. See `code/README.md`. Python standard library only. `python3 stack.py` starts 7 services over HTTP against mock Azure APIs (Entra ID, APIM, Azure OpenAI, Content Safety, AI Language, AI Search, Key Vault, App Configuration, Cosmos DB, Event Hubs) with a console; `python3 -m unittest`, `python3 -m evals.run_evals`, `python3 loadtest.py`, `python3 demo.py` |
 
 ## How the deck maps to the brief

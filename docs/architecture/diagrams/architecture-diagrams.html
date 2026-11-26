@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Architecture diagrams</title>
+<!-- Source for azure-target-architecture.png and current-application-architecture.png.
+     Open in a browser to view; render to PNG with docs/architecture/diagrams/render.js (Playwright). Fictional, unbranded. -->
+<style>
+:root {
+  --ink: #0F2233; --paper: #F6F4EF; --card: #FCFBF8; --line: #C9D2D7; --muted: #4A5866;
+  --teal: #0B7A65; --teal-soft: #DCEFE9; --amber: #C98A12; --amber-soft: #F8EBD0; --navy: #0F2233;
+  --slate-soft: #E6ECEF; --region: #EAF4F0; --hub: #EEF1F4; --red: #B3261E;
+}
+* { box-sizing: border-box; margin: 0; }
+body { background: var(--paper); font-family: Inter, "Segoe UI", Arial, sans-serif; color: var(--ink); padding: 24px; }
+.canvas { position: relative; background: var(--paper); margin: 0 auto 48px; overflow: hidden; }
+.title { position: absolute; left: 40px; top: 28px; font: 600 40px/1.1 "Space Grotesk", "Segoe UI", Arial, sans-serif; }
+.subtitle { position: absolute; left: 40px; top: 80px; font-size: 22px; color: var(--muted); }
+.grp { position: absolute; border-radius: 18px; border: 2px solid var(--line); }
+.grp > .gl { position: absolute; left: 16px; top: 10px; font-size: 18px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; color: var(--teal); }
+.grp.region { background: var(--region); border: 3px dashed var(--teal); }
+.grp.spoke { background: rgba(255,255,255,.35); border-color: #A9D6C7; }
+.grp.hub { background: var(--hub); border-color: #C3CDD4; }
+.grp.aks { background: rgba(220,239,233,.55); border-color: #8CC7B4; }
+.grp.apim { background: rgba(230,236,239,.8); border-color: #AFC0CA; }
+.grp.foundry { background: #12293B; border-color: #12293B; }
+.grp.foundry > .gl { color: #5FD3B6; }
+.grp.onprem { background: #FFFFFF; border: 2px solid var(--ink); }
+.grp.onprem > .gl, .grp.ext > .gl { color: var(--ink); }
+.grp.ext { background: #FFFFFF; border: 2px dashed #8796A3; }
+.grp.bcp { background: var(--amber-soft); border-color: #E6C98A; }
+.grp.bcp > .gl { color: #7A4E06; }
+.grp.ops { background: #FFFFFF; border-color: var(--line); }
+.box { position: absolute; border-radius: 12px; border: 1.5px solid var(--line); background: var(--card); padding: 10px 14px; display: flex; flex-direction: column; justify-content: center; gap: 3px; }
+.box b { font-size: 20px; line-height: 1.2; }
+.box span { font-size: 16px; line-height: 1.3; color: var(--muted); }
+.box.svc { background: #FFFFFF; border-color: #8CC7B4; }
+.box.svc b { font-family: "SFMono-Regular", Consolas, monospace; font-size: 19px; }
+.box.gw { background: var(--slate-soft); border-color: #AFC0CA; }
+.box.ai { background: #1D3A50; border-color: #1D3A50; }
+.box.ai b { color: #EEF2F0; } .box.ai span { color: #AFC2CC; }
+.box.data { background: var(--amber-soft); border-color: #E6C98A; }
+.box.pass { background: #FFFFFF; border-color: #B9C5CC; }
+.box.mock { background: var(--slate-soft); border-color: #AFC0CA; }
+.box.mock i { font-style: normal; font-size: 15px; color: var(--teal); font-weight: 600; }
+.band { position: absolute; border-radius: 10px; display: flex; align-items: center; padding: 0 18px; font-size: 18px; font-weight: 600; }
+.band.pe { background: var(--teal); color: #FFFFFF; }
+.band.mon { background: var(--navy); color: #EEF2F0; }
+.band.mon em { font-style: normal; color: #5FD3B6; letter-spacing: 1.5px; margin-right: 18px; }
+.lbl { position: absolute; font-size: 16px; font-weight: 600; color: var(--teal); background: var(--paper); padding: 1px 6px; border-radius: 6px; }
+.lbl.amber { color: #7A4E06; }
+.note { position: absolute; font-size: 17px; color: var(--muted); line-height: 1.35; }
+.legend { position: absolute; display: flex; gap: 28px; align-items: center; font-size: 17px; color: var(--muted); }
+.legend .k { display: inline-flex; align-items: center; gap: 8px; }
+.legend .sw { width: 22px; height: 16px; border-radius: 4px; border: 1.5px solid var(--line); display: inline-block; }
+svg.wires { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; }
+</style>
+</head>
+<body>
+
+<div class="canvas" id="azure" style="width:2440px; height:1540px"></div>
+<div class="canvas" id="local" style="width:2140px; height:1240px"></div>
+
+<script>
+const NS = 'http://www.w3.org/2000/svg';
+function el(tag, cls, html, style) { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; if (style) e.setAttribute('style', style); return e; }
+function pos(x, y, w, h) { return `left:${x}px;top:${y}px;width:${w}px;height:${h}px`; }
+function build(id, spec) {
+  const c = document.getElementById(id);
+  c.appendChild(el('div', 'title', spec.title));
+  c.appendChild(el('div', 'subtitle', spec.subtitle));
+  for (const g of spec.groups) { const d = el('div', 'grp ' + g.cls, `<div class="gl">${g.label}</div>`, pos(...g.r)); c.appendChild(d); }
+  for (const b of spec.bands || []) c.appendChild(el('div', 'band ' + b.cls, b.html, pos(...b.r)));
+  for (const b of spec.boxes) c.appendChild(el('div', 'box ' + b.cls, `<b>${b.t}</b>${b.s ? `<span>${b.s}</span>` : ''}${b.i ? `<i>${b.i}</i>` : ''}`, pos(...b.r)));
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('class', 'wires'); svg.setAttribute('width', c.style.width); svg.setAttribute('height', c.style.height);
+  const defs = document.createElementNS(NS, 'defs');
+  for (const [mid, col] of [['h-teal', '#0B7A65'], ['h-grey', '#6B7B88'], ['h-amber', '#B07A10']]) {
+    const m = document.createElementNS(NS, 'marker');
+    m.setAttribute('id', id + mid); m.setAttribute('viewBox', '0 0 10 10'); m.setAttribute('refX', '9'); m.setAttribute('refY', '5');
+    m.setAttribute('markerWidth', '7'); m.setAttribute('markerHeight', '7'); m.setAttribute('orient', 'auto-start-reverse');
+    const p = document.createElementNS(NS, 'path'); p.setAttribute('d', 'M0,0 L10,5 L0,10 z'); p.setAttribute('fill', col); m.appendChild(p); defs.appendChild(m);
+  }
+  svg.appendChild(defs);
+  for (const w of spec.wires) {
+    const col = w.c === 'grey' ? '#6B7B88' : w.c === 'amber' ? '#B07A10' : '#0B7A65';
+    const p = document.createElementNS(NS, 'polyline');
+    p.setAttribute('points', w.p.map(q => q.join(',')).join(' '));
+    p.setAttribute('fill', 'none'); p.setAttribute('stroke', col); p.setAttribute('stroke-width', w.wd || 3);
+    p.setAttribute('stroke-linejoin', 'round'); p.setAttribute('stroke-linecap', 'round');
+    if (w.dash) p.setAttribute('stroke-dasharray', '9 7');
+    const head = `url(#${id}h-${w.c || 'teal'})`;
+    if (w.h !== 'none') p.setAttribute('marker-end', head);
+    if (w.h === 'both') p.setAttribute('marker-start', head);
+    svg.appendChild(p);
+  }
+  c.appendChild(svg);
+  for (const l of spec.labels || []) c.appendChild(el('div', 'lbl ' + (l.cls || ''), l.t, `left:${l.x}px;top:${l.y}px`));
+  for (const n of spec.notes || []) c.appendChild(el('div', 'note', n.t, `left:${n.x}px;top:${n.y}px;width:${n.w}px`));
+  if (spec.legend) c.appendChild(el('div', 'legend', spec.legend.html, `left:${spec.legend.x}px;top:${spec.legend.y}px`));
+}
+
+/* ------------------------------------------------------------------ Azure target architecture */
+build('azure', {
+  title: 'SME RM Copilot · target architecture on Azure',
+  subtitle: 'UAE North, 3 availability zones, private by default. Pilot: 30 RMs, CRM sidebar and Teams tab. Fictional bank; model versions and regional features to confirm with Microsoft.',
+  groups: [
+    { cls: 'ext', label: 'RM on a managed device', r: [40, 230, 250, 300] },
+    { cls: 'ext', label: 'Microsoft cloud', r: [40, 1150, 250, 200] },
+    { cls: 'region', label: 'Azure UAE North · 3 zones · no public endpoints', r: [320, 150, 1670, 1230] },
+    { cls: 'spoke', label: 'Spoke VNet rm-copilot', r: [340, 200, 1630, 920] },
+    { cls: 'aks', label: 'AKS private cluster · zones 1 2 3', r: [620, 245, 600, 485] },
+    { cls: 'apim', label: 'APIM · internal · 2 units', r: [1260, 245, 300, 485] },
+    { cls: 'foundry', label: 'Azure AI Foundry · Regional', r: [1600, 245, 350, 245] },
+    { cls: 'hub', label: 'Hub VNet', r: [340, 1150, 1630, 210] },
+    { cls: 'onprem', label: 'Bank data centre', r: [2030, 230, 370, 520] },
+    { cls: 'ext', label: 'Licensed feed', r: [2030, 790, 370, 130] },
+    { cls: 'bcp', label: 'UAE Central · continuity', r: [2030, 960, 370, 200] },
+    { cls: 'ops', label: 'Security operations', r: [2030, 1200, 370, 160] },
+  ],
+  bands: [
+    { cls: 'pe', html: 'Private endpoints · Private Link · disableLocalAuth · every PaaS service below', r: [360, 760, 1590, 44] },
+    { cls: 'mon', html: '<em>AZURE MONITOR VIA AMPLS</em>Application Insights (OpenTelemetry) · Log Analytics · managed Prometheus · Managed Grafana · metadata only, no prompt content', r: [360, 1062, 1590, 46] },
+  ],
+  boxes: [
+    { cls: 'pass', t: 'CRM sidebar', s: 'MSAL sign-in', r: [60, 285, 210, 90] },
+    { cls: 'pass', t: 'Teams personal tab', s: 'Teams SSO · bot in Phase 2', r: [60, 405, 210, 100] },
+    { cls: 'pass', t: 'Entra ID', s: 'SSO, MFA, OBO, step-up', r: [60, 1200, 210, 66] },
+    { cls: 'pass', t: 'Microsoft Graph', s: 'calendar ReadBasic only', r: [60, 1276, 210, 66] },
+
+    { cls: 'gw', t: 'App Gateway WAF v2', s: 'internal ingress only', r: [360, 330, 220, 100] },
+
+    { cls: 'svc', t: 'web-bff', s: 'SSO, OBO, CSRF, step-up · signs approvals', r: [640, 290, 260, 100] },
+    { cls: 'svc', t: 'orchestrator', s: 'workflows, budgets, guardrails, checks · holds no key', r: [940, 290, 260, 100] },
+    { cls: 'svc', t: 'audit-writer', s: 'hash chain, seals, crypto-shred', r: [640, 450, 260, 100] },
+    { cls: 'svc', t: 'tool-gateway', s: 'entitlements first · verifies approvals · only audit producer', r: [940, 450, 260, 110] },
+    { cls: 'svc', t: 'outbox-worker', s: 'read-before-retry CRM writes', r: [640, 610, 260, 100] },
+    { cls: 'svc', t: 'ingestion-worker', s: 'policy docs to AI Search · eval-runner is a CI job', r: [940, 610, 260, 100] },
+
+    { cls: 'gw', t: 'AI gateway', s: 'token limits per RM, failover, token metrics', r: [1280, 290, 260, 100] },
+    { cls: 'gw', t: 'System API facade', s: 'validate-jwt, signed RM header, quotas', r: [1280, 455, 260, 100] },
+    { cls: 'gw', t: 'CRM events API', s: 'portfolio changes in', r: [1280, 610, 260, 100] },
+
+    { cls: 'ai', t: 'Azure OpenAI · primary', s: 'gen-large · gen-small · embed', r: [1620, 295, 310, 84] },
+    { cls: 'ai', t: 'Azure OpenAI · secondary', s: 'failover only if 4 s remain', r: [1620, 395, 310, 80] },
+
+    { cls: 'ai', t: 'AI Content Safety', s: 'Prompt Shields, harm filters', r: [360, 830, 300, 94] },
+    { cls: 'ai', t: 'AI Language', s: 'PII masked before every model call', r: [680, 830, 300, 94] },
+    { cls: 'ai', t: 'AI Search', s: 'hybrid + semantic ranker, security filters', r: [1000, 830, 300, 94] },
+    { cls: 'ai', t: 'Document Intelligence', s: 'layout parsing for ingestion', r: [1320, 830, 300, 94] },
+    { cls: 'ai', t: 'AI Speech', s: 'voice memos · Phase 2', r: [1640, 830, 310, 94] },
+
+    { cls: 'data', t: 'Key Vault Premium (HSM)', s: 'web-bff signs · tool-gateway has public key only', r: [360, 945, 300, 100] },
+    { cls: 'data', t: 'Cosmos DB', s: 'sessions, drafts, jti, approvals, outbox, spool', r: [680, 945, 300, 100] },
+    { cls: 'data', t: 'Event Hubs', s: 'audit · crm-portfolio-events', r: [1000, 945, 300, 100] },
+    { cls: 'data', t: 'Blob Storage, immutable', s: 'WORM hash chain (GZRS) · encrypted content store', r: [1320, 945, 300, 100] },
+    { cls: 'data', t: 'App Configuration', s: 'flags, kill switches, allowed key versions', r: [1640, 945, 310, 100] },
+
+    { cls: 'pass', t: 'Azure Firewall Premium', s: 'egress allow-list', r: [360, 1200, 300, 110] },
+    { cls: 'pass', t: 'ExpressRoute gateway', s: 'private peering to the Bank', r: [690, 1200, 300, 110] },
+    { cls: 'pass', t: 'Azure Bastion', s: 'admin access with PIM', r: [1020, 1200, 290, 110] },
+    { cls: 'pass', t: 'DNS Private Resolver', s: 'private DNS zones', r: [1340, 1200, 290, 110] },
+    { cls: 'pass', t: 'ACR Premium · Azure Policy', s: 'signed images, deny public access', r: [1660, 1200, 290, 110] },
+
+    { cls: 'pass', t: 'CRM', s: 'profile, portfolio, call reports, tasks', r: [2050, 280, 330, 80] },
+    { cls: 'pass', t: 'Core banking ODS', s: 'balances, transaction aggregates', r: [2050, 372, 330, 80] },
+    { cls: 'pass', t: 'LOS (lending, trade)', s: 'facilities, utilisation, covenants', r: [2050, 464, 330, 80] },
+    { cls: 'pass', t: 'KYC / CDD', s: 'status, expiry, masked IDs', r: [2050, 556, 330, 80] },
+    { cls: 'pass', t: 'Policy DMS', s: 'export to ingestion', r: [2050, 648, 330, 80] },
+    { cls: 'pass', t: 'News and registry', s: 'via the firewall allow-list', r: [2050, 830, 330, 74] },
+    { cls: 'pass', t: 'Region loss = BCP', s: 'GZRS audit copy, Cosmos geo backups, IaC rebuild, best-effort RTO 24 h', r: [2050, 1005, 330, 140] },
+    { cls: 'pass', t: 'Defender · Sentinel · Purview', s: 'posture, misuse analytics, DSPM for AI', r: [2050, 1245, 330, 100] },
+  ],
+  wires: [
+    { p: [[270, 330], [315, 330], [315, 380], [360, 380]] },
+    { p: [[270, 455], [315, 455], [315, 380]], h: 'none' },
+    { p: [[580, 380], [610, 380], [610, 340], [640, 340]] },
+    { p: [[900, 340], [940, 340]] },
+    { p: [[1200, 340], [1280, 340]] },
+    { p: [[1540, 340], [1580, 340], [1580, 337], [1620, 337]] },
+    { p: [[1580, 340], [1580, 435], [1620, 435]], dash: true },
+    { p: [[1070, 390], [1070, 450]] },
+    { p: [[1200, 505], [1280, 505]] },
+    { p: [[1540, 505], [2030, 505]] },
+    { p: [[2030, 700], [1990, 700], [1990, 660], [1540, 660]], c: 'amber' },
+    { p: [[900, 660], [920, 660], [920, 600], [1260, 600], [1260, 520], [1280, 520]], c: 'grey', dash: true },
+    { p: [[920, 730], [920, 760]], h: 'none', wd: 6 },
+    { p: [[1410, 730], [1410, 760]], h: 'none', wd: 6 },
+    { p: [[1775, 490], [1775, 760]], h: 'none', wd: 6 },
+    { p: [[360, 1255], [270, 1255]], c: 'grey', dash: true },
+  ],
+  labels: [
+    { t: 'ExpressRoute', x: 1805, y: 474 },
+    { t: 'CRM portfolio events', x: 1580, y: 668, cls: 'amber' },
+    { t: 'outbox retries', x: 960, y: 573 },
+  ],
+  legend: { x: 40, y: 1410, html: `
+    <span class="k"><svg width="46" height="14"><line x1="2" y1="7" x2="38" y2="7" stroke="#0B7A65" stroke-width="3"/><path d="M36,2 L44,7 L36,12 z" fill="#0B7A65"/></svg>request path</span>
+    <span class="k"><svg width="46" height="14"><line x1="2" y1="7" x2="38" y2="7" stroke="#6B7B88" stroke-width="3" stroke-dasharray="8 6"/><path d="M36,2 L44,7 L36,12 z" fill="#6B7B88"/></svg>background or egress</span>
+    <span class="k"><span class="sw" style="background:#FFFFFF;border-color:#8CC7B4"></span>workload on AKS</span>
+    <span class="k"><span class="sw" style="background:#E6ECEF;border-color:#AFC0CA"></span>gateway</span>
+    <span class="k"><span class="sw" style="background:#1D3A50;border-color:#1D3A50"></span>AI service</span>
+    <span class="k"><span class="sw" style="background:#F8EBD0;border-color:#E6C98A"></span>data and keys</span>
+    <span class="k"><span class="sw" style="background:#0B7A65;border-color:#0B7A65"></span>private endpoints (all PaaS)</span>` },
+  notes: [
+    { x: 40, y: 1450, w: 2360, t: 'Identity: RM token (aud web-bff) → OBO token (aud tool-gateway) forwarded unchanged by the orchestrator, which adds its own workload token; tool-gateway takes the RM from oid and checks entitlements before any data moves. Writes need an ES256 approval token signed in Key Vault for web-bff (RM, customer, op, draft hash, 5 minutes, jti once). Output is verified before release; nothing unverified is streamed.' },
+  ],
+});
+
+/* ------------------------------------------------------------------ Current application (local stack) */
+build('local', {
+  title: 'Current application · the working stack (python3 stack.py)',
+  subtitle: 'Every box is its own HTTP server on 127.0.0.1. Mocks speak the real Azure REST shapes, so pointing a base URL at Azure replaces a mock. 97 tests, evals gate, load test.',
+  groups: [
+    { cls: 'ext', label: 'Browser', r: [40, 180, 260, 250] },
+    { cls: 'aks', label: 'Copilot services · AKS pods in production', r: [340, 180, 660, 600] },
+    { cls: 'apim', label: 'APIM mock :8707', r: [1050, 180, 330, 600] },
+    { cls: 'foundry', label: 'Azure OpenAI mocks', r: [1430, 180, 330, 270] },
+    { cls: 'onprem', label: 'Systems of record :8711', r: [1430, 490, 330, 290] },
+    { cls: 'ops', label: 'Checks', r: [1810, 180, 290, 600] },
+  ],
+  bands: [
+    { cls: 'pe', html: 'HTTP on 127.0.0.1 · azmock/ imitates each Azure REST API · RMC_URL_&lt;NAME&gt; swaps a mock for the real service', r: [40, 830, 2060, 44] },
+  ],
+  boxes: [
+    { cls: 'pass', t: 'Console', s: 'console.html · sign in as a fictional RM · run UC1, UC2, UC3, approve', r: [60, 235, 220, 170] },
+
+    { cls: 'svc', t: 'web-bff :8712', s: 'Entra token, OBO, session, CSRF, step-up, approval signing via Key Vault, CSP', r: [360, 235, 300, 130] },
+    { cls: 'svc', t: 'orchestrator :8713', s: 'runs the rm_copilot workflows: budgets, deadlines, guardrails, placeholders, degraded mode', r: [690, 235, 290, 130] },
+    { cls: 'svc', t: 'outbox-worker :8715', s: 'Cosmos change feed, read-before-retry, kill switch holds writes', r: [360, 420, 300, 140] },
+    { cls: 'svc', t: 'tool-gateway :8714', s: 'both tokens, entitlement first, approval verify, saga, only audit producer', r: [690, 420, 290, 140] },
+    { cls: 'svc', t: 'audit-writer :8716', s: 'hash chain, per-customer keys, crypto-shred', r: [360, 615, 300, 130] },
+    { cls: 'svc', t: 'ingestion-worker', s: 'start-up job: PII scan, embeddings, index policies', r: [690, 615, 290, 130] },
+
+    { cls: 'gw', t: 'AI gateway', s: 'validate-jwt, token limit per RM, failover if 4 s remain', r: [1070, 235, 290, 130] },
+    { cls: 'gw', t: 'System API facade', s: 'signed RM header, per-backend limits', r: [1070, 420, 290, 140] },
+    { cls: 'gw', t: 'CRM events API', s: 'portfolio changes to Event Hubs', r: [1070, 615, 290, 130] },
+
+    { cls: 'ai', t: 'primary :8705', s: 'gen-large · gen-small · embed', r: [1450, 235, 290, 90] },
+    { cls: 'ai', t: 'secondary :8706', s: 'same deployments', r: [1450, 340, 290, 90] },
+    { cls: 'pass', t: 'CRM · ODS · LOS · KYC · news', s: 'fictional data, fault injection per backend', r: [1450, 545, 290, 110] },
+    { cls: 'pass', t: 'Graph /graph', s: 'calendar ReadBasic only', r: [1450, 670, 290, 90] },
+
+    { cls: 'pass', t: '/metrics', s: 'Prometheus text on every service, metadata only', r: [1830, 235, 250, 120] },
+    { cls: 'pass', t: '/api/trace/{id}', s: 'one W3C trace across 13 components', r: [1830, 370, 250, 120] },
+    { cls: 'pass', t: 'loadtest.py', s: 'p95 vs plan budgets', r: [1830, 505, 250, 100] },
+    { cls: 'pass', t: '97 tests · evals', s: 'unit, end to end, red team; release gate', r: [1830, 620, 250, 140] },
+
+    { cls: 'mock', t: 'Entra ID :8700', s: 'tokens, OBO, JWKS', i: '→ Microsoft Entra ID', r: [40, 910, 240, 140] },
+    { cls: 'mock', t: 'Key Vault :8701', s: 'ES256 sign, RSA unwrap', i: '→ Key Vault Premium', r: [300, 910, 240, 140] },
+    { cls: 'mock', t: 'App Config :8702', s: 'flags, kill switches, key allow-list', i: '→ App Configuration', r: [560, 910, 240, 140] },
+    { cls: 'mock', t: 'Cosmos DB :8703', s: 'sessions, drafts, jti, approvals, outbox', i: '→ Cosmos DB for NoSQL', r: [820, 910, 240, 140] },
+    { cls: 'mock', t: 'Event Hubs :8704', s: 'audit, crm-portfolio-events', i: '→ Event Hubs', r: [1080, 910, 240, 140] },
+    { cls: 'mock', t: 'Content Safety :8708', s: 'shieldPrompt, analyze, groundedness', i: '→ AI Content Safety', r: [1340, 910, 240, 140] },
+    { cls: 'mock', t: 'AI Language :8709', s: 'PII recognition', i: '→ AI Language', r: [1600, 910, 240, 140] },
+    { cls: 'mock', t: 'AI Search :8710', s: 'hybrid search, filters, semantic', i: '→ AI Search', r: [1860, 910, 240, 140] },
+  ],
+  wires: [
+    { p: [[280, 300], [360, 300]] },
+    { p: [[660, 300], [690, 300]] },
+    { p: [[980, 300], [1070, 300]] },
+    { p: [[1360, 300], [1405, 300], [1405, 280], [1450, 280]] },
+    { p: [[1405, 300], [1405, 385], [1450, 385]], dash: true },
+    { p: [[835, 365], [835, 420]] },
+    { p: [[980, 490], [1070, 490]] },
+    { p: [[1360, 490], [1400, 490], [1400, 580], [1450, 580]] },
+    { p: [[1450, 630], [1420, 630], [1420, 690], [1360, 690]], c: 'amber' },
+    { p: [[510, 780], [510, 830]], h: 'none', wd: 6 },
+    { p: [[1215, 780], [1215, 830]], h: 'none', wd: 6 },
+    { p: [[1595, 780], [1595, 830]], h: 'none', wd: 6 },
+  ],
+  labels: [
+    { t: 'events', x: 1366, y: 700, cls: 'amber' },
+  ],
+  legend: { x: 40, y: 1080, html: `
+    <span class="k"><span class="sw" style="background:#FFFFFF;border-color:#8CC7B4"></span>copilot service (would be an AKS pod)</span>
+    <span class="k"><span class="sw" style="background:#E6ECEF;border-color:#AFC0CA"></span>Azure mock, labelled with the real service it stands in for</span>
+    <span class="k"><span class="sw" style="background:#1D3A50;border-color:#1D3A50"></span>model mock (deterministic, returns token usage)</span>` },
+  notes: [
+    { x: 40, y: 1125, w: 2060, t: 'Same controls as the Azure design: OBO identity chain, entitlement check before any data moves, ES256 approval tokens bound to RM, customer, op and draft hash with jti used once, write saga with outbox, kill switches, partial briefs and degraded mode, hash-chained audit with crypto-shredding. Not emulated: TLS, private endpoints, managed identity, real model quality, Document Intelligence, Speech, the Teams tab (see code/README.md).' },
+  ],
+});
+</script>
+</body>
+</html>
