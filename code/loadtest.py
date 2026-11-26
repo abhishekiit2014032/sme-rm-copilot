@@ -9,6 +9,9 @@ The mix follows the pilot: briefs and policy questions dominate; every follow-up
 Mock latencies (azmock/_base.py REALISTIC_*) are illustrative p50s for in-region private endpoints; the result
 shows the orchestration overhead and the budget headroom, not real Azure performance. The local stack runs every
 service in one Python process, so CPU-bound work (JWT/ECDSA) competes for one interpreter lock.
+
+Per use case it also reports p95 tokens per request (input and output, from each reply's `ops` metadata) and the
+estimated cost per request and in total, from the ILLUSTRATIVE price table in App Configuration (`rmc:finops:*`).
 """
 from __future__ import annotations
 
@@ -43,6 +46,9 @@ def run(base_client_factory, n: int, concurrency: int, seed: int = 7) -> dict:
     rnd = random.Random(seed)
     clients = {upn: base_client_factory(upn) for upn in PORTFOLIO}
     results: dict[str, list[float]] = {k: [] for k in BUDGET_S}
+    tokens: dict[str, list[tuple[int, int]]] = {k: [] for k in BUDGET_S}
+    cost: dict[str, list[float]] = {k: [] for k in BUDGET_S}
+    gates: dict[str, int] = {}
     errors: dict[str, list[str]] = {k: [] for k in BUDGET_S}
     modes: dict[str, int] = {}
     lock = threading.Lock()
@@ -56,6 +62,13 @@ def run(base_client_factory, n: int, concurrency: int, seed: int = 7) -> dict:
                 results[kind].append(dt)
                 mode = out.get("mode") or out.get("status")
                 modes[f"{kind}:{mode}"] = modes.get(f"{kind}:{mode}", 0) + 1
+                ops = out.get("ops") or {}
+                if "tokens" in ops:
+                    tokens[kind].append((ops["tokens"].get("input", 0), ops["tokens"].get("output", 0)))
+                    cost[kind].append(float(ops.get("cost_aed", 0.0)))
+                for gate in (out.get("evaluation") or {}).get("gates", []):
+                    key = f"{gate['gate']}:{gate['outcome']}"
+                    gates[key] = gates.get(key, 0) + 1
             return out
         except ApiError as e:
             with lock:
@@ -79,7 +92,7 @@ def run(base_client_factory, n: int, concurrency: int, seed: int = 7) -> dict:
     t0 = time.perf_counter()
     with ThreadPoolExecutor(max_workers=concurrency) as ex:
         list(ex.map(one, range(n)))
-    return {"wall_s": time.perf_counter() - t0, "results": results, "errors": errors, "modes": modes}
+    return {"wall_s": time.perf_counter() - t0, "results": results, "errors": errors, "modes": modes, "tokens": tokens, "cost": cost, "gates": gates}
 
 
 def report(out: dict, n: int, concurrency: int) -> bool:
@@ -92,7 +105,15 @@ def report(out: dict, n: int, concurrency: int) -> bool:
         ok = bool(xs) and p95 <= budget and not out["errors"][k]
         ok_all &= ok
         print(f"{k:<10}{len(xs):>5}{len(out['errors'][k]):>5}{pct(xs, 50):>9.2f}{p95:>9.2f}{max(xs) if xs else float('nan'):>9.2f}{budget:>9.1f}  {'PASS' if ok else 'FAIL'}")
+    print(f"\n{'use case':<10}{'p95 tok in':>11}{'p95 tok out':>12}{'budget in/out':>15}{'AED/request':>13}{'AED total':>11}   (illustrative prices)")
+    for k in BUDGET_S:
+        tk = out["tokens"][k]
+        if not tk:
+            continue
+        c = out["cost"][k]
+        print(f"{k:<10}{pct([x[0] for x in tk], 95):>11}{pct([x[1] for x in tk], 95):>12}{'12000/1500':>15}{sum(c) / len(c):>13.5f}{sum(c):>11.4f}")
     print("\nOutcomes:", ", ".join(f"{k}={v}" for k, v in sorted(out["modes"].items())))
+    print("Runtime gates:", ", ".join(f"{k}={v}" for k, v in sorted(out["gates"].items())))
     for k, errs in out["errors"].items():
         if errs:
             print(f"Errors in {k}: {sorted(set(errs))}")

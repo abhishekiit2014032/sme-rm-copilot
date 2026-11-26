@@ -86,25 +86,47 @@ def _numbers(text: str) -> set[str]:
     return {n.replace(",", "") for n in re.findall(r"\d[\d,]*(?:\.\d+)?", text)}
 
 
-def groundedness(answer: str, passages: list[dict], min_support: float = 0.6) -> dict:
+MIN_SUPPORT = 0.6  # share of a claim's content words that must appear in its source (lexical entailment floor)
+
+
+def split_sentences(text: str) -> list[str]:
+    """Claims = sentences. Shared by the groundedness check and the RAGAS-style metrics (rm_copilot/ragas.py)."""
+    return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text or "") if s.strip()]
+
+
+def cited(sentence: str) -> list[int]:
+    return [int(c) for c in re.findall(r"\[(\d+)\]", sentence)]
+
+
+def strip_citations(sentence: str) -> str:
+    return re.sub(r"\s*\[\d+\]", "", sentence)
+
+
+def claim_support(claim: str, source: str) -> tuple[float, set[str]]:
+    """(share of the claim's content words found in `source`, numbers in the claim that are absent from `source`)."""
+    words = [w for w in tokenize(claim) if len(w) > 2]
+    vocab = set(tokenize(source))
+    support = sum(w in vocab for w in words) / max(len(words), 1)
+    return support, _numbers(claim) - _numbers(source)
+
+
+def groundedness(answer: str, passages: list[dict], min_support: float = MIN_SUPPORT) -> dict:
     """Each sentence must cite a passage that exists, share most of its content words with it,
     and contain no number that is absent from it."""
-    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", answer) if s.strip()]
     claims = []
-    for s in sentences:
-        cites = [int(c) for c in re.findall(r"\[(\d+)\]", s)]
-        body = re.sub(r"\[\d+\]", "", s)
+    for s in split_sentences(answer):
+        cites = cited(s)
+        body = strip_citations(s)
         if not cites or any(c < 1 or c > len(passages) for c in cites):
-            claims.append({"sentence": s, "ok": False, "reason": "missing or invalid citation"})
+            claims.append({"sentence": s, "ok": False, "cited": False, "reason": "missing or invalid citation"})
             continue
-        source = " ".join(passages[c - 1]["text"] for c in cites)
-        words = [w for w in tokenize(body) if len(w) > 2]
-        support = sum(w in set(tokenize(source)) for w in words) / max(len(words), 1)
-        stray = _numbers(body) - _numbers(source)
+        support, stray = claim_support(body, " ".join(passages[c - 1]["text"] for c in cites))
         ok = support >= min_support and not stray
-        claims.append({"sentence": s, "ok": ok, "support": round(support, 2), "reason": "" if ok else (f"numbers not in source: {sorted(stray)}" if stray else "low support")})
+        claims.append({"sentence": s, "ok": ok, "cited": True, "support": round(support, 2),
+                       "reason": "" if ok else (f"numbers not in source: {sorted(stray)}" if stray else "low support")})
     passed = sum(c["ok"] for c in claims)
-    return {"ok": bool(claims) and passed == len(claims), "score": round(passed / max(len(claims), 1), 2), "claims": claims}
+    return {"ok": bool(claims) and passed == len(claims), "score": round(passed / max(len(claims), 1), 2), "claims": claims,
+            "cited_all": bool(claims) and all(c["cited"] for c in claims)}
 
 
 def free_numbers(model_text: str) -> list[str]:

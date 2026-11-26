@@ -47,6 +47,7 @@ def reset(stack: Stack) -> None:
     for f in ("uc1", "uc2", "uc3", "writes"):
         stack.components["appconfig"].set_flag(f, True)
     stack.publish_pins()
+    stack.publish_eval_config()
 
 
 class Workload:

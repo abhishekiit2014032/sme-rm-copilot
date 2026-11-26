@@ -29,7 +29,8 @@ FF_PREFIX = ".appconfig.featureflag/"
 FF_CONTENT_TYPE = "application/vnd.microsoft.appconfig.ff+json;charset=utf-8"
 FLAGS = {"uc1": "UC1 pre-meeting brief", "uc2": "UC2 policy copilot", "uc3": "UC3 follow-up drafting", "writes": "All CRM writes (kill switch)"}
 # Data Reader for every service that enforces a flag (tool-gateway and outbox-worker enforce the `writes` kill switch).
-RBAC = {"orchestrator": {"kv/read"}, "tool-gateway": {"kv/read"}, "outbox-worker": {"kv/read"}, "ops-admin": {"kv/read", "kv/write"}}
+RBAC = {"orchestrator": {"kv/read"}, "tool-gateway": {"kv/read"}, "outbox-worker": {"kv/read"}, "ops-admin": {"kv/read", "kv/write"},
+        "web-bff": {"kv/read"}, "eval-worker": {"kv/read"}}  # web-bff and eval-worker read the ops budgets and eval settings
 
 
 class AppConfigMock(Mock):

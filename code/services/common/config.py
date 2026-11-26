@@ -34,7 +34,7 @@ DEPENDENCIES: dict[str, tuple[str, str, str]] = {
     "news": ("Licensed news feed (behind APIM, firewall egress)", "-", "azmock.systems"),
     "graph": ("https://graph.microsoft.com", "https://graph.microsoft.com", "azmock.systems"),
 }
-SERVICES = ("audit-writer", "tool-gateway", "orchestrator", "web-bff", "outbox-worker")
+SERVICES = ("audit-writer", "tool-gateway", "orchestrator", "web-bff", "outbox-worker", "eval-worker")
 SOR_SYSTEMS = ("crm", "ods", "los", "kyc", "news")
 
 # Audiences (app ID URIs) of our own APIs and of the Azure resources we call.
@@ -103,6 +103,11 @@ class Settings:
     checkpoint_open_ttl_s: int = 30 * 86400      # ... 30 days while a UC3 draft waits for approval
     episode_ttl_s: int = 90 * 86400
     memory_key_cache_s: float = 60.0
+    # evaluation and operations (plan §3.9)
+    eval_poll_s: float = 2.0                     # eval-worker: read new sampled answers from the audit content store
+    ops_eval_s: float = 15.0                     # eval-worker: evaluate the ops alert rules
+    ops_snapshot_s: float = 60.0                 # eval-worker: write a metrics snapshot for the drift report
+    ops_dir: str = ""                            # where snapshots go; default <run_dir>/ops (stack.py: a stable temp dir)
     run_dir: str = ""
 
     @classmethod
@@ -116,6 +121,8 @@ class Settings:
             setattr(s, k, v)
         if not s.run_dir:
             s.run_dir = tempfile.mkdtemp(prefix="rmc-run-")
+        if not s.ops_dir:  # stable across runs, so the drift report can compare days (`evals.scheduled --drift`)
+            s.ops_dir = os.path.join(tempfile.gettempdir(), "rmc-ops")
         Path(s.run_dir).mkdir(parents=True, exist_ok=True)
         return s
 

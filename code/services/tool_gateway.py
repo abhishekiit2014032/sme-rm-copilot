@@ -56,6 +56,8 @@ from services.common.contracts import (AUDIT_EVENTS, APPROVAL_OP, APPROVAL_SCHEM
                                        followup_payload, valid_customer_id, validate_followup)
 from services.common.cosmos_client import CosmosClient
 from services.common.flags import ConfigValues, FeatureFlags
+from services.common.opsmetrics import OpsRecorder
+from rm_copilot.gates import KEYS as GATE_KEYS, RUNTIME_THRESHOLDS, SANITY as GATE_SANITY
 from services.common.httpkit import (HttpError, Request, RequestContext, Response, TransportError, request_context, run_parallel,
                                      set_request_context, time_left)
 from services.common.identities import AGENT_WORKLOAD, AGENTS
@@ -70,6 +72,8 @@ SEARCH_API_VERSION = "2024-07-01"
 CRITICAL_SOURCES = ("crm",)  # LLD §2.3: only the CRM profile is critical; other sections degrade
 SECTION = {"los": "facilities", "ods": "signals", "kyc": "kyc", "news": "news"}
 ALLOWED_KIDS_KEY = "rmc:tool-gateway:approval:allowed_kids"  # LLD §4.7: key versions accepted for approval tokens
+CANDIDATE_FLOOR_KEY = GATE_KEYS["candidate_floor"]           # LLD §17.2 step 3: search returns candidates only
+DEFAULT_CANDIDATE_FLOOR = RUNTIME_THRESHOLDS["candidate_floor"]
 PORTFOLIO_HUB = "crm-portfolio-events"                       # plan §4.1 step 4, LLD §7.3
 RUN_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
 THREAD_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -97,6 +101,7 @@ class ToolGateway(Service):
         self._evicted: dict[str, float] = {}  # oid -> monotonic time of the last portfolio-change event
         self._portfolio_seq = 0               # Event Hubs checkpoint of `crm-portfolio-events` (in memory, like the mock)
         self._lock = threading.Lock()
+        self.ops = OpsRecorder(self.metrics)  # rmc_stage_duration_seconds{stage="entitlement"} (plan §3.9)
         m = self.metrics
         self.m_denied = m.counter("entitlement_denials_total", "Requests denied by the entitlement check", ())
         self.m_ent_cache = m.counter("entitlement_cache_total", "Entitlement cache lookups", ("result",))
@@ -144,6 +149,10 @@ class ToolGateway(Service):
         return rm
 
     def entitlements(self, oid: str) -> dict:
+        with self.ops.stage("entitlement"):  # plan §5: cached ~20 ms, miss ~150 ms
+            return self._entitlements_lookup(oid)
+
+    def _entitlements_lookup(self, oid: str) -> dict:
         now = time.monotonic()
         with self._lock:
             hit = self._entitlements.get(oid)
@@ -292,8 +301,12 @@ class ToolGateway(Service):
             resp = None
         if resp is None or not resp.ok:
             raise HttpError(503, "DEPENDENCY_UNAVAILABLE", "policy search is unavailable", details={"reason": "SEARCH"})
+        floor = self.config.get(CANDIDATE_FLOOR_KEY)  # LLD §17.2 step 3: candidates only (reranker score >= floor)
+        lo, hi = GATE_SANITY["candidate_floor"]
+        floor = float(floor) if isinstance(floor, (int, float)) and lo <= float(floor) <= hi else DEFAULT_CANDIDATE_FLOOR
         hits = [{"id": x["id"], "doc": x["doc"], "ref": x["ref"], "text": x["text"], "status": x["status"], "classification": x["classification"],
-                 "effective_from": str(x.get("effective_from", ""))[:10], "score": x.get("@search.rerankerScore", 0.0)} for x in resp.json()["value"]]
+                 "effective_from": str(x.get("effective_from", ""))[:10], "score": x.get("@search.rerankerScore", 0.0)} for x in resp.json()["value"]
+                if x.get("@search.rerankerScore", 0.0) >= floor]
         self.audit.emit("tool_call", tool="search_policies", system="search", hits=len(hits), hybrid=bool(vector), index=index)
         return {"value": hits, "index_version": index}
 

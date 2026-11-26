@@ -79,3 +79,31 @@ class ConfigValues:
         with self._lock:
             self._cache[key] = (now + self.svc.cfg.settings.flags_ttl_s, value)
         return value
+
+    def get_prefix(self, prefix: str) -> dict:
+        """Every key-value under `prefix` (one list call, `GET /kv?key=<prefix>*`), JSON-decoded, cached `flags_ttl_s`;
+        on an outage the last known values; never read -> {} (callers fall back to their defaults)."""
+        now = time.monotonic()
+        ck = "prefix:" + prefix
+        with self._lock:
+            hit = self._cache.get(ck)
+        if hit and hit[0] > now:
+            return hit[1]  # type: ignore[return-value]
+        try:
+            r = self.svc.client.request("GET", f"{self.svc.cfg.url('appconfig')}/kv?key={urllib.parse.quote(prefix + '*', safe='')}&api-version=2023-11-01",
+                                        headers=self.svc.auth_headers("appconfig"), timeout=1.0, peer="appconfig")
+            ok = r.ok
+            items = r.json().get("items", []) if ok else []
+        except (TransportError, ValueError, TypeError):
+            ok, items = False, []
+        if not ok:
+            return hit[1] if hit else {}  # type: ignore[return-value]
+        values = {}
+        for it in items:
+            try:
+                values[it["key"]] = json.loads(it["value"])
+            except (KeyError, ValueError, TypeError):
+                continue
+        with self._lock:
+            self._cache[ck] = (now + self.svc.cfg.settings.flags_ttl_s, values)
+        return values

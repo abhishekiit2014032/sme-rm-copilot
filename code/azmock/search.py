@@ -14,8 +14,9 @@ tool-gateway uses for security trimming: `eq ne lt le gt ge` joined by `and`, on
 `Edm.DateTimeOffset` (e.g. `status eq 'current' and clearance_rank le 1 and effective_from le 2026-11-26T00:00:00Z`).
 
 Differences: the mock reranker score is BM25 x query coverage, NOT the calibrated 0-4 scale of the semantic
-ranker, so the decline threshold (orchestrator MIN_RETRIEVAL_SCORE) must be re-tuned on real Azure with the
-golden set. No `or`/`not`/`search.in`, analyzers (no `ar.microsoft`), scoring profiles, captions, answers,
+ranker, so the retrieval gate values (`rmc:tool-gateway:search:candidate_floor`, `rmc:orchestrator:gate:retrieval:*`,
+LLD §17.2) are published re-tuned for this scale and must be re-tuned on real Azure with the golden set
+(`python3 -m evals.run_evals --tune-gate`). No `or`/`not`/`search.in`, analyzers (no `ar.microsoft`), scoring profiles, captions, answers,
 synonym maps, replicas or index aliases.
 """
 from __future__ import annotations

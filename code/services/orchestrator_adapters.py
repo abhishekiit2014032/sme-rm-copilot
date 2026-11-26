@@ -9,6 +9,8 @@
                                   for the RM, both obtained with the orchestrator workload's federated credential.
 
 Per-request state (RM token, budgets, lineage) lives in the request context, never in the shared objects.
+Every adapter call is timed as a stage of the request (`rmc_stage_duration_seconds{use_case,stage,call}`, LLD §11.8.1):
+tool_fanout (call = tool), retrieval, pii, prompt_shields, model (call = prompt template id), post_gates.
 """
 from __future__ import annotations
 
@@ -19,12 +21,13 @@ import re
 import threading
 import time
 import urllib.parse
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from rm_copilot import guardrails as g
 from rm_copilot import tools as t
-from rm_copilot.llm import EXTRACT_SYSTEM, QUERY_REWRITE_SYSTEM, ModelUnavailable
+from rm_copilot.llm import BRIEF_SYSTEM, EXTRACT_SYSTEM, POLICY_QA_SYSTEM, QUERY_REWRITE_SYSTEM, STRICT_SUFFIX, ModelUnavailable
 from rm_copilot.ports import LocalGuard
 from services.common.auth import FederatedTokenProvider
 from services.common.config import AUD
@@ -53,6 +56,7 @@ class Budget:
     tool_steps: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    model_calls: int = 0
     lineage: dict = field(default_factory=dict)
 
     def step(self) -> None:
@@ -62,7 +66,8 @@ class Budget:
 
     def output_cap(self) -> int:
         if self.input_tokens >= self.max_input_tokens or self.output_tokens >= self.max_output_tokens:
-            raise HttpError(429, "BUDGET_EXCEEDED", "token budget exceeded", details={"reason": "REQUEST_TOKENS"}, retryable=False)
+            budget = "request_input_tokens" if self.input_tokens >= self.max_input_tokens else "request_output_tokens"
+            raise HttpError(429, "BUDGET_EXCEEDED", "token budget exceeded", details={"reason": "REQUEST_TOKENS", "budget": budget}, retryable=False)
         return self.max_output_tokens - self.output_tokens
 
 
@@ -77,6 +82,22 @@ def _budget() -> Budget:
 
 def _lineage() -> dict:
     return request_context().data.setdefault("lineage", {})
+
+
+def stage(svc, name: str, call: str = "-"):
+    """Time one stage of the request (no-op for a service without an `ops` recorder)."""
+    ops = getattr(svc, "ops", None)
+    return ops.stage(name, call) if ops is not None else nullcontext()
+
+
+def template_id(system: str) -> str:
+    """The prompt template id of a system prompt (the `call` label of the model stage, LLD §11.8.1)."""
+    if system.startswith(POLICY_QA_SYSTEM[:40]):
+        return "uc2.answer.strict" if STRICT_SUFFIX.strip() in system else "uc2.answer"
+    for prefix, tid in ((BRIEF_SYSTEM, "uc1.brief"), (QUERY_REWRITE_SYSTEM, "uc2.rewrite"), (EXTRACT_SYSTEM, "uc3.extract")):
+        if system.startswith(prefix[:40]):
+            return tid
+    return "other"
 
 
 # --------------------------------------------------------------------------- model
@@ -94,11 +115,12 @@ class ApimChatModel:
         body = {"messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
                 "temperature": 0, "max_tokens": _budget().output_cap(), "store": False}
         headers = {**self.svc.auth_headers("apim"), "x-rm-oid": ctx.data.get("rm_oid", ""), "x-use-case": use_case}
-        try:
-            r = self.svc.client.request("POST", f"{self.svc.cfg.url('apim')}/openai/deployments/{deployment}/chat/completions?api-version={AOAI_API_VERSION}",
-                                        json_body=body, headers=headers, timeout=20.0, peer="apim")
-        except TransportError as e:
-            raise ModelUnavailable(f"model call {e.kind}") from None
+        with stage(self.svc, "model", template_id(system)):
+            try:
+                r = self.svc.client.request("POST", f"{self.svc.cfg.url('apim')}/openai/deployments/{deployment}/chat/completions?api-version={AOAI_API_VERSION}",
+                                            json_body=body, headers=headers, timeout=20.0, peer="apim")
+            except TransportError as e:
+                raise ModelUnavailable(f"model call {e.kind}") from None
         self._raise_for_gateway(r)
         j = r.json()
         content = j["choices"][0]["message"]["content"]
@@ -106,8 +128,12 @@ class ApimChatModel:
         b = _budget()
         b.input_tokens += usage.get("prompt_tokens", 0)
         b.output_tokens += usage.get("completion_tokens", 0)
+        b.model_calls += 1
         self.m_tokens.inc(usage.get("prompt_tokens", 0), deployment=deployment, use_case=use_case, type="prompt")
         self.m_tokens.inc(usage.get("completion_tokens", 0), deployment=deployment, use_case=use_case, type="completion")
+        if getattr(self.svc, "ops", None) is not None:
+            self.svc.ops.model_call(self.svc.prices(), deployment, str(ctx.data.get("agent") or "none"), use_case,
+                                    int(usage.get("prompt_tokens", 0)), int(usage.get("completion_tokens", 0)))
         prompt_hash = hashlib.sha256(system.encode()).hexdigest()[:16]
         lin = _lineage()
         lin.setdefault("models", set()).add(f"{deployment}:{j.get('model')}")
@@ -321,13 +347,16 @@ class McpTools(HttpTools):
         self.mcp = mcp
 
     def brief_inputs(self, user: t.User, customer_id: str) -> dict:
-        return self.mcp.call("customer-data", "get_brief_inputs", {"customer_id": customer_id})
+        with stage(self.svc, "tool_fanout", "get_brief_inputs"):
+            return self.mcp.call("customer-data", "get_brief_inputs", {"customer_id": customer_id})
 
     def get_customer_profile(self, user: t.User, customer_id: str) -> dict:
-        return self.mcp.call("customer-data", "get_customer_profile", {"customer_id": customer_id})
+        with stage(self.svc, "tool_fanout", "get_customer_profile"):
+            return self.mcp.call("customer-data", "get_customer_profile", {"customer_id": customer_id})
 
     def search_policies(self, user: t.User, query: str, k: int = 3) -> list[dict]:
-        j = self.mcp.call("policy-search", "search_policies", {"query": query[:1000] or "?", "k": int(k)})
+        with stage(self.svc, "retrieval"):
+            j = self.mcp.call("policy-search", "search_policies", {"query": query[:1000] or "?", "k": int(k)})
         _lineage()["index_version"] = j.get("index_version")
         return j["value"]
 
@@ -374,14 +403,16 @@ class HttpGuard:
         return prompt_attack, docs
 
     def prompt_attack(self, text: str) -> bool:
-        remote, _ = self._shield(text, [])
+        with stage(self.svc, "prompt_shields"):
+            remote, _ = self._shield(text, [])
         hit = remote or self.local.prompt_attack(text)
         if hit:
             self.m_events.inc(type="prompt_attack")
         return hit
 
     def _doc_flags(self, documents: list[str]) -> list[bool]:
-        _, remote = self._shield("", documents)
+        with stage(self.svc, "prompt_shields"):
+            _, remote = self._shield("", documents)
         return [r or l for r, l in zip(remote, self.local.shield_documents(documents))]
 
     def shield_documents(self, documents: list[str]) -> list[bool]:
@@ -406,6 +437,10 @@ class HttpGuard:
         return out, removed
 
     def mask_pii(self, text: str) -> tuple[str, list[str]]:
+        with stage(self.svc, "pii"):
+            return self._mask_pii(text)
+
+    def _mask_pii(self, text: str) -> tuple[str, list[str]]:
         j = self._post("language", f"/language/:analyze-text?api-version={LANG_API_VERSION}",
                        {"kind": "PiiEntityRecognition", "parameters": {"modelVersion": "latest", "redactionPolicy": {"policyKind": "entityMask"}},
                         "analysisInput": {"documents": [{"id": "1", "language": "en", "text": text}]}})
@@ -423,7 +458,7 @@ class HttpGuard:
             self.m_events.inc(type="pii_masked")
         return text, found
 
-    def groundedness(self, answer: str, passages: list[dict]) -> dict:
+    def groundedness(self, answer: str, passages: list[dict]) -> dict:  # timed by the workflow's `post_gates` stage
         check = self.local.groundedness(answer, passages)  # always runs
         j = self._post("content-safety", "/contentsafety/text:detectGroundedness?api-version=2024-09-15-preview",
                        {"domain": "Generic", "task": "Summarization", "text": answer, "groundingSources": [p["text"] for p in passages]})
@@ -434,7 +469,8 @@ class HttpGuard:
         return check
 
     def harmful(self, text: str) -> bool:
-        j = self._post("content-safety", f"/contentsafety/text:analyze?api-version={CS_API_VERSION}", {"text": text, "outputType": "FourSeverityLevels"})
+        with stage(self.svc, "post_gates", "content_safety"):
+            j = self._post("content-safety", f"/contentsafety/text:analyze?api-version={CS_API_VERSION}", {"text": text, "outputType": "FourSeverityLevels"})
         hit = bool(j) and any(c.get("severity", 0) >= 4 for c in j.get("categoriesAnalysis", []))
         if hit:
             self.m_events.inc(type="harm_blocked")

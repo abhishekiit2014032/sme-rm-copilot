@@ -11,24 +11,30 @@ Two things live here, both Python 3.13 standard library only, offline, no keys, 
    Since plan v2.6 the orchestrator is a **fixed multi-agent graph** (supervisor + one specialist per request) whose
    agents call tools only as **MCP servers behind the APIM MCP gateway**, each with **its own Entra identity**, with a
    **checkpointer** and **session, episodic, procedural and profile memory** (see "Agents" and "Memory" below).
+   Since plan v2.7 it has the **four-tier evaluation architecture** (runtime gates, online sampled judge, scheduled
+   nightly and drift, release gate) and **runtime operations metrics** on every request (see "Evaluation" below).
 
 ```bash
 cd code
 python3 demo.py                         # in-process walk-through of UC1, UC2, UC3 and the controls
-python3 -m evals.run_evals              # release gate on the golden set (passes)
+python3 -m evals.run_evals              # Tier 4 release gate on the golden set (passes)
 python3 -m evals.run_evals --careless   # same gate with a hallucinating model (fails, exit 1)
-python3 -m unittest                     # 122 tests: 9 control + 17 platform unit + 43 stack over HTTP + 28 red-team + 16 agents/MCP + 9 memory
-python3 stack.py                        # start the whole stack on 127.0.0.1:8700-8716, console at http://127.0.0.1:8712/
+python3 -m evals.scheduled --nightly    # Tier 3 nightly golden-set report (JSON + Markdown); --stack / --url to run it through web-bff
+python3 -m evals.scheduled --drift      # Tier 3 drift report from the stack's daily metrics snapshots
+python3 -m unittest                     # 144 tests: 9 control + 17 platform unit + 43 stack over HTTP + 28 red-team + 16 agents/MCP + 9 memory + 22 evaluation
+python3 stack.py                        # start the whole stack on 127.0.0.1:8700-8717, console at http://127.0.0.1:8712/
 python3 stack.py --latency realistic    # same, with roughly realistic mock latencies
 python3 stack.py --port-base 0 --smoke  # ephemeral ports, run UC1/UC2/UC3 once, verify the audit chain, stop
-python3 loadtest.py -n 120 -c 16        # mixed load against an in-process stack, p50/p95 vs the plan §5 budgets
+python3 loadtest.py -n 120 -c 16        # mixed load: p50/p95 vs the plan §5 budgets, p95 tokens and est. cost per use case
 python3 loadtest.py --url http://127.0.0.1:8712   # against a stack you started with stack.py
 ```
 
 The console (`services/web/`) signs you in as one of the fictional RMs (Layla, Omar, or Sara who covers one of
 Layla's customers on a dated delegation), runs UC1/UC2/UC3 including edit, approve and commit, and shows the span
 waterfall and the Azure components the request touched, which agent handled the request and the MCP tools it called,
-the RM-approved episodes recalled for a brief, and a profile setting (brief format) kept in profile memory. Plain HTML/CSS/JS, no external assets, light and dark,
+the RM-approved episodes recalled for a brief, a profile setting (brief format) kept in profile memory, and per answer
+the runtime gate outcomes with their scores, tokens, estimated cost, latency and stage times, with Helpful / Not helpful
+feedback buttons. Plain HTML/CSS/JS, no external assets, light and dark,
 usable at 375 px, served under a strict Content-Security-Policy; model output is only ever rendered as text.
 
 ## Architecture of the local stack
@@ -131,6 +137,64 @@ supervisor ──► brief-agent ────┐
 * The orchestrator still holds **no key and no Cosmos DB access**: tool-gateway is the memory store and holds the
   memory keys (Key Vault secrets scoped to the `memory-` prefix).
 
+## Evaluation (plan §3.9, LLD §17, §11.8; ADR-027)
+
+Four tiers; metric names and formulas follow RAGAS (`rm_copilot/ragas.py`, each formula in the docstring), so the same
+number means the same thing in every tier.
+
+| Tier | Where | What | Run |
+|---|---|---|---|
+| 1 Runtime gates | `rm_copilot/gates.py`, inside `Copilot` (in-process and in the orchestrator) | UC2 **pre-generation retrieval gate**: candidates = reranker score ≥ floor; decline `WEAK_RETRIEVAL` **without calling the generation model** if top < `top_min` or context relevance `CRel = kept / candidates` < 0.5 (kept = score ≥ max(keep_min, top − keep_margin)). **Post-generation**: faithfulness (every sentence cited, `F_rt` ≥ 0.9 against the cited passage, Content Safety groundedness) then answer relevancy (≥ 0.7); retry once with the strict prompt if ≥ 4 s remain, else `NO_TIME_FOR_RETRY`; after the retry `FAILED_GROUNDEDNESS` or `LOW_ANSWER_RELEVANCY`. UC1: `profile_present`, then `placeholder` / `numeric` / `policy` per line (dropped, or degraded if all dropped). No LLM judge on the hot path | every request |
+| 2 Online sampled | orchestrator `EvalSampler` + `services/eval_worker.py` (`eval-worker`, port 8717) | `rmc:eval:online:sample_rate` (5%) of released UC1/UC2 answers, deterministic on the request id, cap `max_per_day` (200); question, kept passages and answer go **encrypted to the audit content store** (`eval_sample`); the worker reads them back with the narrow role `Audit.ReadSampled` and scores them with the **in-region judge** (`gen-large` through APIM, fixed rubric prompts `ragas.JUDGE_PROMPTS`, lexical fallback): UC2 faithfulness, answer relevancy, context precision, context utilisation; UC1 faithfulness, context utilisation. RM thumbs: `POST /api/feedback` on web-bff | background loop (`eval_poll_s`) |
+| 3 Scheduled | `evals/scheduled.py` | nightly golden set with references (all RAGAS metrics incl. context recall and answer correctness, citation accuracy, correct-decline, security, p95 latency and tokens) as JSON + Markdown; drift: latest day vs the earlier days of the stack's metric snapshots (decline rate, gate failures, p95 latency, p95 input tokens) | `python3 -m evals.scheduled --nightly [--stack \| --url URL] [--judge]`, `--drift [--days 7]` |
+| 4 Release gate | `evals/run_evals.py` | golden set (156 UC2 incl. 66 unanswerable, 3 UC1, 6 security); enforces the plan thresholds with the **95% Wilson lower bound for rates** and prints a table | `python3 -m evals.run_evals` (PASS), `--careless` (FAIL, exit 1), `--judge`, `--tune-gate`, `--json FILE` |
+
+Release thresholds: faithful answers ≥ 0.95, citation accuracy ≥ 0.95, correct-decline ≥ 0.90 (Wilson lower bounds);
+context precision ≥ 0.85, context recall ≥ 0.90, answer relevancy ≥ 0.85, answer correctness ≥ 0.85 (means; the bootstrap
+2.5th percentile is printed for information); entitlement leaks, numeric mismatches, injection successes = 0; replayed
+p95 latency UC1 ≤ 8 s, UC2 ≤ 7 s; p95 tokens per request ≤ 12k in / 1.5k out.
+
+App Configuration keys (published by `stack.py` as the pipeline would after a passing gate, `Stack.publish_eval_config`):
+`rmc:orchestrator:gate:*` and `rmc:orchestrator:uc2:retry_min_remaining_ms`, `rmc:tool-gateway:search:candidate_floor`
+(values outside the sanity range are rejected and counted in `rmc_gate_config_rejected_total`), `rmc:eval:online:*`,
+`rmc:finops:*` (price table and daily budgets, **illustrative**), `rmc:orchestrator:stage_budget_ms:<uc>:end_to_end`,
+`rmc:ops:baselines` (stand-in for the 7-day baselines).
+
+**Runtime operations metrics** (every request, metadata only; `services/common/opsmetrics.py`):
+`rmc_request_duration_seconds{use_case,outcome}` (web-bff), `rmc_stage_duration_seconds{use_case,stage,call}` (edge,
+entitlement, tool_fanout, retrieval, pii, prompt_shields, retrieval_gate, model with the prompt template as `call`,
+post_gates, judge), `rmc_tokens_per_request{use_case,type}`, `rmc_llm_tokens_total{deployment,use_case,agent,type}`,
+`rmc_cost_aed_total{use_case,deployment,component}`, `rmc_runtime_gate_total{use_case,gate,outcome}`,
+`rmc_runtime_gate_score{use_case,gate}`, `rmc_budget_exceeded_total{use_case,budget,action}`,
+`rmc_online_eval_score{use_case,metric}`, `rmc_online_eval_alert{use_case,metric,window}`, `rmc_rm_feedback_total`,
+`rmc_ops_alert{rule,use_case}`. Every UC1/UC2/UC3 reply carries `evaluation: {gates, scores, gate_version}` and
+`ops: {tokens, model_calls, cost_aed, stages_ms, latency_ms, edge_ms, sampled_for_eval}`; gate spans `eval.gate <gate>`
+carry the outcome and numeric scores only. `GET /api/ops/summary` on web-bff (identity `ops-admin`, app role
+`Ops.Read`) returns p50/p95/p99 per use case and per stage, tokens per request p50/p95, cost today, gate outcomes,
+online scores, feedback and the alert rules (`RmcRequestLatencyP95`, `RmcTokensPerRequestCreep` > 1.2 × baseline,
+`RmcDailyCost80`, `RmcEvalCost80`, `RmcRetrievalGateDeclineRise` + 5 points, `RmcFaithfulnessGateFailures` > 5%),
+computed from the services' histograms with a `histogram_quantile` stand-in; the eval-worker evaluates the same rules
+into `rmc_ops_alert` gauges and writes a daily snapshot to `<ops_dir>/snapshots/` for the drift report.
+
+**What is approximated (honest list)**
+- **Lexical metrics stand in for the RAGAS judge metrics**: claims are sentences, "supported" is content-word overlap
+  ≥ 0.6 with no stray number, answer relevancy is the share of the question's document-known terms the answer uses
+  (RAGAS: cosine with generated questions), similarity is bag-of-words or the mock's hashed embeddings. Paraphrases are
+  under-credited, so the golden set's references are **extractive** (the approved clause). No `embed` call in the
+  runtime faithfulness gate (LLD step 7.4) and no `c0/c1` calibration of `AR_rt`.
+- **Mock judge**: the Azure OpenAI mock answers the rubric prompts with the lexical judgement, so judge scores equal
+  lexical scores offline; the judge prompts are versioned in `ragas.py` but not pinned as procedural memory.
+- **Gate values on the mock scale**: the LLD values (floor 1.0, top 2.0, keep 2.0, margin 1.0) are for the calibrated
+  0-4 semantic ranker; the mock reranker (BM25 × coverage) is published with floor = top = keep 4.0 and margin 5.0,
+  chosen with `--tune-gate` and the release metrics. The LLD rule `CRel = kept / candidates` declines a strong single
+  clause when two weak candidates clear the floor; the margin and floor absorb this here.
+- **Replayed latency** in the release gate replays each request's call graph against the mock latency profile;
+  the stack's numbers are measured. Alerts are evaluated on counters since process start (no 15 min / 1 h windows,
+  no 7-day PromQL baselines); the drift report compares the last snapshot of each day.
+- **Golden set size**: 156 UC2 (66 unanswerable), 3 UC1, 6 security cases, templated paraphrases; the plan's ≥ 300 /
+  50 / 50 is not met (printed as information). UC3 is not scored with RAGAS. Sampling uses SHA-256 of the request id,
+  not a keyed HMAC; RM feedback is a metric and a log line, not an audit event; tokens per RM per day are not reported.
+
 ### Logical service → mock → real Azure
 
 Every dependency is one base URL in `services/common/config.py`; `RMC_URL_<NAME>` overrides it and `stack.py`
@@ -155,11 +219,12 @@ then does not start that mock (`NAME` upper case, `-` as `_`, e.g. `RMC_URL_CONT
 | Service (plan §3.2) | Module (port) | Notes |
 |---|---|---|
 | `web-bff` | `services/web_bff.py` (8712) | token validation, OBO, session + CSRF, Origin check, step-up (`auth_time` ≤ 10 min), deadlines, approval minting via Key Vault, CSP, console, `/api/trace/{request_id}` |
-| `orchestrator` | `services/orchestrator.py` + `agents.py` + `graph.py` + `orchestrator_adapters.py` (8713) | supervisor-led agent graph (≤ 2 hops) running `rm_copilot.Copilot` per specialist with MCP and HTTP adapters; agent identities via the workload's federated credential; checkpoints, interrupt/resume, procedural pins; budgets, degraded mode, feature flags, guardrail floor, audit via tool-gateway with content envelope-encrypted |
+| `orchestrator` | `services/orchestrator.py` + `agents.py` + `graph.py` + `orchestrator_adapters.py` (8713) | supervisor-led agent graph (≤ 2 hops) running `rm_copilot.Copilot` per specialist with MCP and HTTP adapters; agent identities via the workload's federated credential; checkpoints, interrupt/resume, procedural pins; budgets, degraded mode, feature flags, guardrail floor, audit via tool-gateway with content envelope-encrypted; Tier 1 gates, stage/token/cost metrics, online-eval sampling |
 | `tool-gateway` | `services/tool_gateway.py` (8714) | both tokens, entitlement first (cache ≤ 60 s, delegations, evicted by `crm-portfolio-events`), `writes` kill switch, key-version allow-list, parallel fan-out, minimisation, approval verification (`approval_verifier.py`), saga, sole Event Hubs producer; MCP servers and the intersection rule; memory store (checkpoints, session turns, episodes, per-customer memory keys) |
 | `outbox-worker` | `services/outbox_worker.py` (8715) | Cosmos change feed, read-before-retry, backoff, per-item status |
 | `audit-writer` | `services/audit_writer.py` (8716) | hash chain (`verify_chain`), per-customer content keys in Key Vault, crypto-shred (audit content, checkpoints, episodes), operator APIs |
 | `ingestion-worker` | `services/ingestion_worker.py` (job at start-up) | PII scan, embeddings via APIM, AI Search index |
+| `eval-worker` | `services/eval_worker.py` (8717) | Tier 2 online judge on sampled answers (audit content store, `Audit.ReadSampled`), rolling scores and alert gauges, ops alert rules, daily metric snapshots (the LLD's `eval-runner` in mode `online`) |
 
 Telemetry is metadata only by construction: span attributes and log fields pass an allow-list
 (`telemetry.SAFE_KEYS`), exceptions are recorded by type, metric labels use route templates. Every service exposes
@@ -240,8 +305,8 @@ APIM policies: `GET|POST /admin/policies` (tokens per minute, daily quota, calls
 - **Crypto**: ES256 (RFC 6979, verified against the RFC test vector) and RS256/RSA-OAEP (verified against OpenSSL)
   are pure Python and not constant-time. Fine for a mock; never for real keys.
 - **Not built**: Document Intelligence (the corpus is already clause-segmented), Speech, the Teams tab / bot,
-  Application Gateway, Purview, Defender, Sentinel, the eval-runner service (the golden-set gate runs as
-  `evals/run_evals.py`), operator outbox APIs (retry/resolve/cancel), `approval_unused` sweep, the Cosmos
+  Application Gateway, Purview, Defender, Sentinel, the eval-runner CronJobs (the nightly and release gate run as
+  `evals/scheduled.py` and `evals/run_evals.py`; the online part is `eval-worker`), operator outbox APIs (retry/resolve/cancel), `approval_unused` sweep, the Cosmos
   `entitlements` / `idempotency` / `audit-chain-heads` containers (entitlement cache is in-process).
 - **Performance**: all services share one interpreter; `loadtest.py` measures orchestration overhead against mock
   latencies that are illustrative p50s, not Azure benchmarks.
@@ -257,7 +322,8 @@ APIM policies: `GET|POST /admin/policies` (tokens per minute, daily quota, calls
      The orchestrator already sends `store: false`, `max_tokens`, `x-use-case`; APIM must take the quota key from
      the RM token.
    - **AI Search**: create the index from `services/ingestion_worker.py` `INDEX_FIELDS` plus a vector profile and
-     semantic configuration `policy-semantic`; re-tune `MIN_RETRIEVAL_SCORE` on the golden set.
+     semantic configuration `policy-semantic`; re-tune the retrieval gate keys on the golden set
+     (`python3 -m evals.run_evals --tune-gate`; LLD defaults apply to the calibrated 0-4 ranker scale).
    - **Content Safety / Language**: same paths and bodies; check regional availability (plan §10) and keep the
      local floor (it always runs).
    - **Key Vault**: create `approval-signing` (EC P-256) and `audit-transport` (RSA, `unwrapKey`), assign RBAC as in
@@ -286,7 +352,8 @@ APIM policies: `GET|POST /admin/policies` (tokens per minute, daily quota, calls
 | `rm_copilot/guardrails.py` | Hallucination, Security | Injection detection and quote quarantine; PII masking (Emirates ID, IBAN, card, trade licence, email, phone); claim-by-claim groundedness; no free numbers (digits and English/Arabic number words); no approval/pricing/limit promises |
 | `rm_copilot/ports.py` | Architecture | The two interfaces the workflows depend on (`ToolPort`, `GuardPort`) and their in-process adapters |
 | `rm_copilot/orchestrator.py` | Architecture | UC1 fixed workflow with `{placeholders}`, numeric and policy checks, partial and degraded briefs; UC2 rewrite, decline threshold, verify, retry once only with ≥ 4 s left, passages-only degraded mode; UC3 drafts with deterministic dates and manual degraded path |
-| `evals/` | Evaluation | Golden set and release gate with thresholds |
-| `tests/` | Governance | `test_controls.py` (in-process controls), `test_platform_units.py` (crypto, JOSE, canonical hash, filters, telemetry), `test_stack_e2e.py` and `test_stack_writes_resilience.py` (the stack over HTTP), `test_redteam.py` and `test_redteam_followups.py` (attacks on the controls), `test_agents_mcp.py` (agent identities, MCP intersection rule, tool poisoning, hops, procedural pins, agent telemetry), `test_memory.py` (checkpoints, interrupt/resume incl. restart, replay, session budget, episodic recall rules, memory poisoning, erasure) |
+| `rm_copilot/ragas.py`, `rm_copilot/gates.py` | Evaluation | RAGAS-style metrics with lexical, embedding and LLM-judge scorers; Tier 1 runtime gates and their App Configuration keys |
+| `evals/` | Evaluation | Golden set (references, unanswerable items, UC1 briefs), Tier 4 release gate (`run_evals.py`), Tier 3 nightly and drift (`scheduled.py`) |
+| `tests/` | Governance | `test_controls.py` (in-process controls), `test_platform_units.py` (crypto, JOSE, canonical hash, filters, telemetry), `test_stack_e2e.py` and `test_stack_writes_resilience.py` (the stack over HTTP), `test_redteam.py` and `test_redteam_followups.py` (attacks on the controls), `test_agents_mcp.py` (agent identities, MCP intersection rule, tool poisoning, hops, procedural pins, agent telemetry), `test_memory.py` (checkpoints, interrupt/resume incl. restart, replay, session budget, episodic recall rules, memory poisoning, erasure), `test_evaluation.py` (metric formulas, Wilson bound, runtime gates in-process and in the stack, thresholds from App Configuration, online eval worker and alerts, nightly and drift reports, release gate, ops summary, feedback, metadata-only metrics) |
 | `services/agents.py`, `services/graph.py` | Agents | Supervisor-led graph with checkpointer, interrupt/resume and replay; specialists reuse `rm_copilot.Copilot` |
 | `services/common/mcp.py`, `identities.py`, `procedural.py`, `memory.py` | Agents, Security | MCP tool registry and JSON-RPC; agent identities and roles; procedural pins; memory sealing, `memory_safe`, episodes, session budget |

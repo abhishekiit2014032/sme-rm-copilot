@@ -36,8 +36,11 @@ from azmock.systems import SystemsOfRecordMock
 from services.audit_writer import AuditWriter
 from services.common.config import SOR_SYSTEMS, Settings, StackConfig, env_url_overrides
 from services.common.httpkit import Server
+from services.common.opsmetrics import BASELINES, BASELINES_KEY, FINOPS, ONLINE, STAGE_BUDGETS
 from services.common.procedural import PINS_KEY, pins
+from services.eval_worker import EvalWorker
 from services.ingestion_worker import IngestionWorker
+from rm_copilot.gates import KEYS as GATE_KEYS, RUNTIME_THRESHOLDS
 from services.orchestrator import Orchestrator
 from services.outbox_worker import OutboxWorker
 from services.tool_gateway import ToolGateway
@@ -49,7 +52,9 @@ MOCKS = {
     "aoai-primary": lambda c: AzureOpenAIMock(c, "aoai-primary"), "aoai-secondary": lambda c: AzureOpenAIMock(c, "aoai-secondary"),
     "apim": ApimMock, "content-safety": ContentSafetyMock, "language": LanguageMock, "search": SearchMock, "systems": SystemsOfRecordMock,
 }
-SERVICES = {"web-bff": WebBff, "orchestrator": Orchestrator, "tool-gateway": ToolGateway, "outbox-worker": OutboxWorker, "audit-writer": AuditWriter}
+SERVICES = {"web-bff": WebBff, "orchestrator": Orchestrator, "tool-gateway": ToolGateway, "outbox-worker": OutboxWorker, "audit-writer": AuditWriter,
+            "eval-worker": EvalWorker}
+WORKERS = ("audit-writer", "outbox-worker", "tool-gateway", "eval-worker")  # services with background loops
 SYSTEM_URLS = (*SOR_SYSTEMS, "graph")
 
 
@@ -92,11 +97,23 @@ class Stack:
             self.components["appconfig"].put_value("rmc:tool-gateway:approval:allowed_kids", json.dumps([version]), "application/json")
         if "appconfig" in self.components:
             self.publish_pins()
+            self.publish_eval_config()
         self.ingestion = IngestionWorker(self.cfg).run()
-        for n in ("audit-writer", "outbox-worker", "tool-gateway"):
+        for n in WORKERS:
             if n in self.components:
                 self.components[n].start()
         return self
+
+    def publish_eval_config(self, overrides: dict | None = None) -> None:
+        """Pipeline step after the release gate (plan §3.9, LLD §17.2, §17.3, §11.8.3): pin the runtime gate thresholds
+        (`rmc:orchestrator:gate:*`, candidate floor, retry), the online evaluation settings (`rmc:eval:online:*`), the
+        ILLUSTRATIVE price table and daily budgets (`rmc:finops:*`), the end-to-end latency budgets and the alert
+        baselines in App Configuration. `overrides` (App Configuration key -> value) let tests and operators change one."""
+        values = {GATE_KEYS[k]: v for k, v in RUNTIME_THRESHOLDS.items()}
+        values.update({**FINOPS, **STAGE_BUDGETS, **ONLINE, BASELINES_KEY: BASELINES})
+        values.update(overrides or {})
+        for key, value in values.items():
+            self.components["appconfig"].put_value(key, json.dumps(value), "application/json")
 
     def publish_pins(self, value: dict | None = None) -> None:
         """Pipeline step (plan §3.8): pin the procedural memory (graph, prompt templates, MCP tool definitions)."""
@@ -105,16 +122,16 @@ class Stack:
     def restart(self, name: str) -> None:
         """Stop one service and start a fresh instance on the same port (a pod restart: in-memory state is lost)."""
         old = self.servers[name]
-        if name in ("tool-gateway", "outbox-worker", "audit-writer"):
+        if name in WORKERS:
             self.components[name].stop()
         old.stop()
         self.components[name] = SERVICES[name](self.cfg)
         self.servers[name] = Server(name, old.host, old.port).start(self.components[name].app)
-        if name in ("tool-gateway", "outbox-worker", "audit-writer"):
+        if name in WORKERS:
             self.components[name].start()
 
     def stop(self) -> None:
-        for n in ("tool-gateway", "outbox-worker", "audit-writer"):
+        for n in ("eval-worker", "tool-gateway", "outbox-worker", "audit-writer"):
             if n in self.components:
                 self.components[n].stop()
         for s in self.servers.values():
@@ -230,14 +247,32 @@ def _agents(out: dict) -> str:
     return f"{a.get('supervisor')} -> {a.get('specialist')} ({a.get('hops')} hops{', resumed from checkpoint' if a.get('resumed') else ''}) · tools: {tools}"
 
 
+def _evaluation(out: dict) -> str:
+    """Gate outcomes with scores, tokens, cost and latency of one reply (plain text, metadata only)."""
+    ev, ops = out.get("evaluation") or {}, out.get("ops") or {}
+    gates = " · ".join(f"{g['gate']} {g['outcome']}" + (" (" + ", ".join(f"{k} {v}" for k, v in g["scores"].items() if k != "attempt") + ")" if g["scores"] else "")
+                       for g in ev.get("gates", []))
+    tok = ops.get("tokens") or {}
+    return (f"gates: {gates or 'none'}\n    ops: {tok.get('input', 0)} in / {tok.get('output', 0)} out tokens · est. AED {ops.get('cost_aed', 0):.5f} "
+            f"(illustrative) · {ops.get('latency_ms', 0):.0f} ms")
+
+
 def smoke(stack: Stack) -> int:
     c = ConsoleClient(stack).sign_in()
     b = c.brief("harbourline")
     print(f"UC1 brief: {len(b['talking_points'])} talking points, {len(b['watch'])} watch items · trace {b['trace_id'][:8]}")
     print(f"    agents: {_agents(b)}")
+    print(f"    {_evaluation(b)}")
     a = c.ask("Can a company trading for 2 years get an unsecured working capital line?")
     print(f"UC2 answer: {a['status']} · grounded {a.get('grounded')} · sources {a.get('source_ids')}")
     print(f"    agents: {_agents(a)}")
+    print(f"    {_evaluation(a)}")
+    r = c.ask("Does an expired trade licence block new drawdowns?")
+    print(f"UC2 answer after a retry: {r['status']} · {r.get('answer')}")
+    print(f"    {_evaluation(r)}")
+    x = c.ask("What is the interest rate on retail savings accounts?")
+    print(f"UC2 declined before generation: {x['reason_code']} ({x.get('sub_reason')})")
+    print(f"    {_evaluation(x)}")
     d = c.draft("harbourline", "Met Mr Haddad. I promised to send the limit increase checklist by Friday. His ID is 784-1985-1234567-1.")
     print(f"UC3 draft: {len(d['tasks'])} tasks · paused for approval (run {d['run_id'][:8]})")
     print(f"    agents: {_agents(d)}")
@@ -253,6 +288,15 @@ def smoke(stack: Stack) -> int:
     v = stack.components["audit-writer"].chain_path
     from services.audit_writer import verify_chain
     print("Audit chain:", verify_chain(v))
+    summary = stack.components["web-bff"].ops_summary() if "web-bff" in stack.components else None
+    if summary:
+        lat = " · ".join(f"{uc} p50 {x['p50']} / p95 {x['p95']} / p99 {x['p99']} s" for uc, x in summary["latency_s"].items())
+        print(f"Ops summary (GET /api/ops/summary): {lat}")
+        print("    stage p95 s: " + ", ".join(f"{k} {v['p95']}" for k, v in summary["stages_s"].items()))
+        print("    tokens/request p95 (in/out): " + ", ".join(f"{uc} {x.get('input', {}).get('p95')}/{x.get('output', {}).get('p95')}"
+                                                         for uc, x in summary["tokens_per_request"].items()))
+        print(f"    cost today AED {summary['cost_aed']['user_traffic_today']} (illustrative) · alerts firing: "
+              f"{[a['rule'] for a in summary['alerts'] if a['firing']] or 'none'}")
     return 0
 
 

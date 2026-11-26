@@ -60,3 +60,4 @@ button.chip { cursor: pointer; }
 a { color: var(--accent); }
 .agents { margin-top: 12px; padding-top: 8px; border-top: 1px dashed var(--border); }
 .agents p { margin: 2px 0; }
+.agents button { margin-right: 6px; }

@@ -75,7 +75,8 @@ class Backend:
     breaker: CircuitBreaker
 
 
-CHAT_CALLERS = ("orchestrator",)                     # LLD §1.5: AiGateway.Generate (ingestion and tool-gateway: Embed only)
+CHAT_CALLERS = ("orchestrator", "eval-worker")      # LLD §1.5: AiGateway.Generate (ingestion and tool-gateway: Embed only);
+                                                    # eval-worker: the in-region judge `gen-large` (plan §3.9 Tier 2)
 RM_KEY_CALLERS = ("orchestrator", "tool-gateway")     # validate an RM token before they set `x-rm-oid`
 
 

@@ -13,6 +13,12 @@
 * Memory (plan §3.8): passes the session id (thread of the agent graph) and the RM's profile (`rm-profile`:
   language, brief format; `GET|PUT /api/profile`, set only by the RM) to the orchestrator under `context`, which it
   always overwrites; on approve it sends the paused run id of the draft so the orchestrator resumes from the checkpoint.
+* Operations and evaluation (plan §3.9): `rmc_request_duration_seconds{use_case}` (end to end at the BFF) and the
+  `edge` stage (BFF time outside the orchestrator call) on every request, `ops.latency_ms` in each reply;
+  `POST /api/feedback` (RM thumbs up/down on an answer, `rmc_rm_feedback_total{use_case,rating,reason}`, metadata only);
+  `GET /api/ops/summary` (operator identity `ops-admin`, app role `Ops.Read`): p50/p95/p99 per use case and per
+  stage, tokens per request p50/p95, cost today, gate outcomes, online eval scores and the alert rules, computed from
+  the services' Prometheus histograms (`services/common/opsmetrics.py`).
 """
 from __future__ import annotations
 
@@ -24,6 +30,7 @@ import time
 import urllib.parse
 from collections import OrderedDict
 from pathlib import Path
+from typing import Callable
 
 from rm_copilot import data
 from services.common import jose
@@ -31,6 +38,8 @@ from services.common.config import AUD, StackConfig
 from services.common.contracts import (APPROVAL_TYP, FOLLOWUP_SUBJECT, approval_claims, followup_payload, outlook_compose_link, valid_customer_id,
                                        validate_followup)
 from services.common.cosmos_client import CosmosClient
+from services.common.flags import ConfigValues
+from services.common.opsmetrics import BASELINES_KEY, FINOPS_PREFIX, STAGE_BUDGET_PREFIX, OpsRecorder, alerts, budgets_from, prices_from, summarize
 from services.common.httpkit import HttpError, Request, Response, TransportError, current_trace_id, request_context, run_parallel, time_left
 from services.common.service import Service
 
@@ -39,6 +48,9 @@ STATIC = {"console.js": "application/javascript; charset=utf-8", "console.css": 
 APPROVAL_KEY = "approval-signing"
 SESSION_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 PROFILE_VALUES = {"language": ("en", "ar"), "brief_format": ("standard", "short")}
+RATINGS = ("up", "down")
+FEEDBACK_REASONS = ("wrong", "incomplete", "not_relevant", "too_slow", "other")  # LLD §17.3 step 7: fixed codes, no free text
+OPS_SCRAPE = ("orchestrator", "tool-gateway", "eval-worker")
 
 
 def _origin(url: str) -> str:
@@ -64,6 +76,10 @@ class WebBff(Service):
         self.m_stepup = m.counter("step_up_required_total", "Approvals refused for stale authentication", ())
         self.m_csrf = m.counter("csrf_rejections_total", "Approvals refused by Origin/CSRF checks", ("reason",))
         self.m_memory = m.counter("memory_writes_total", "Writes to copilot memory", ("type",))
+        self.m_feedback = m.counter("rmc_rm_feedback_total", "RM thumbs up / down on an answer", ("use_case", "rating", "reason"))
+        self.ops = OpsRecorder(self.metrics)
+        self.config = ConfigValues(self)
+        self._use_cases: OrderedDict[str, str] = OrderedDict()  # request_id -> use case (for feedback)
         self._profiles: dict[str, tuple[float, dict]] = {}
         a = self.app.route
         a("GET", "/")(lambda r: self._file("console.html", "text/html; charset=utf-8"))
@@ -72,11 +88,13 @@ class WebBff(Service):
         a("GET", "/api/config")(self._config)
         a("POST", "/api/session")(self._session)
         a("GET", "/api/meetings")(lambda r: self._proxy(r, "GET", "/v1/meetings", None, self.cfg.settings.deadline_uc1_s))
-        a("POST", "/api/uc1/brief")(lambda r: self._proxy(r, "POST", "/v1/brief", r.json(), self.cfg.settings.deadline_uc1_s))
-        a("POST", "/api/uc2/ask")(lambda r: self._proxy(r, "POST", "/v1/ask", r.json(), self.cfg.settings.deadline_uc2_s))
-        a("POST", "/api/uc3/draft")(self._draft)
+        a("POST", "/api/uc1/brief")(self._timed("uc1", lambda r: self._proxy(r, "POST", "/v1/brief", r.json(), self.cfg.settings.deadline_uc1_s)))
+        a("POST", "/api/uc2/ask")(self._timed("uc2", lambda r: self._proxy(r, "POST", "/v1/ask", r.json(), self.cfg.settings.deadline_uc2_s)))
+        a("POST", "/api/uc3/draft")(self._timed("uc3", self._draft))
         a("POST", "/api/uc3/approval-token")(self._approval_token)
-        a("POST", "/api/uc3/approve")(self._approve)
+        a("POST", "/api/uc3/approve")(self._timed("commit", self._approve))
+        a("POST", "/api/feedback")(self._feedback)
+        a("GET", "/api/ops/summary")(self._ops_summary)
         a("GET", "/api/uc3/writes/{jti}")(lambda r: self._proxy(r, "GET", f"/v1/writes/{urllib.parse.quote(r.params['jti'], safe='')}", None, self.cfg.settings.deadline_commit_s))
         a("GET", "/api/trace/{request_id}")(self._trace)
         a("GET", "/api/profile")(lambda r: self._profile(self._user(r)[0]["oid"]))
@@ -126,17 +144,81 @@ class WebBff(Service):
         names = "Tools.Read Tools.Write" if write else "Tools.Read"
         rm_token = self.tokens.obo_token(user_token, " ".join(f"{AUD['tool-gateway']}/{n}" for n in names.split()))
         headers = {**self.auth_headers("orchestrator"), "x-rm-authorization": "Bearer " + rm_token}
+        t0 = time.perf_counter()
         try:
             resp = self.client.request(method, f"{self.cfg.url('orchestrator')}{path}", json_body=body, headers=headers,
                                        timeout=max(0.1, time_left()), peer="orchestrator")
         except TransportError as e:
+            request_context().data["downstream_s"] = time.perf_counter() - t0
             raise HttpError(504, "DEPENDENCY_TIMEOUT", "The copilot did not answer in time.") if e.kind in ("timeout", "deadline") else \
                 HttpError(503, "DEPENDENCY_UNAVAILABLE", "The copilot is unavailable.", details={"reason": "ORCHESTRATOR"})
+        request_context().data["downstream_s"] = request_context().data.get("downstream_s", 0.0) + time.perf_counter() - t0
         out = resp.json()
         if isinstance(out, dict):
             out.update(request_id=request_context().request_id, trace_id=current_trace_id())
         hdrs = {k: v for k, v in resp.headers.items() if k in ("retry-after",)}
         return Response(resp.status, out, hdrs)
+
+    # ------------------------------------------------------------------ operations metrics and feedback (plan §3.9)
+    def _timed(self, use_case: str, fn: Callable[[Request], Response]) -> Callable[[Request], Response]:
+        """End-to-end duration per use case and the `edge` stage (time spent in web-bff outside the orchestrator)."""
+        def handler(r: Request) -> Response:
+            t0 = time.perf_counter()
+            ctx = request_context()
+            resp, outcome = None, "error"
+            try:
+                resp = fn(r)
+                body = resp.body if isinstance(resp.body, dict) else {}
+                outcome = str(body.get("status") or body.get("mode") or resp.status) if resp.status < 400 else \
+                    str((body.get("error") or {}).get("code") or resp.status).lower()
+            except HttpError as e:
+                outcome = e.code.lower()
+                raise
+            finally:
+                total = time.perf_counter() - t0
+                self.ops.request_seconds.observe(total, use_case=use_case, outcome=outcome[:24])
+                self.ops.stage_seconds.observe(max(0.0, total - ctx.data.get("downstream_s", 0.0)), use_case=use_case, stage="edge", call="-")
+            with self._lock:
+                self._use_cases[ctx.request_id] = use_case
+                while len(self._use_cases) > 5000:
+                    self._use_cases.popitem(last=False)
+            if isinstance(resp.body, dict):
+                ops = resp.body.get("ops") if isinstance(resp.body.get("ops"), dict) else {}
+                resp.body["ops"] = {**ops, "latency_ms": round(total * 1000, 1),
+                                    "edge_ms": round(max(0.0, total - ctx.data.get("downstream_s", 0.0)) * 1000, 1)}
+            return resp
+        return handler
+
+    def _feedback(self, r: Request) -> Response:
+        claims, _ = self._user(r)
+        body = r.json()
+        rid = str(body.get("request_id", "")) if isinstance(body, dict) else ""
+        rating = body.get("rating") if isinstance(body, dict) else None
+        reason = body.get("reason") if isinstance(body, dict) else None
+        if rating not in RATINGS or (reason is not None and reason not in FEEDBACK_REASONS):
+            raise HttpError(400, "VALIDATION_FAILED", "rating up|down; reason one of " + "|".join(FEEDBACK_REASONS), details={"reason": "SCHEMA"})
+        with self._lock:
+            entry, use_case = self._traces.get(rid), self._use_cases.get(rid)
+        if not entry or entry[1] != claims["oid"] or not use_case:
+            raise HttpError(404, "NOT_FOUND", "no answer with this request id for you")
+        self.m_feedback.inc(use_case=use_case, rating=rating, reason=reason or "none")
+        self.telemetry.log("rm_feedback", **{"rmc.use_case": use_case, "rmc.outcome": rating, "rmc.reason": reason or ""})
+        return Response(202, {"recorded": True, "use_case": use_case, "rating": rating})
+
+    def ops_summary(self) -> dict:
+        """The operator view: every service's histograms and counters (a PromQL stand-in) plus the alert rules."""
+        targets = {n: self.cfg.url(n) for n in OPS_SCRAPE if n in self.cfg.urls}
+        got = run_parallel({n: (lambda u=u, n=n: self.client.request("GET", f"{u}/metrics", timeout=2.0, peer=n)) for n, u in targets.items()})
+        texts = [self.metrics.render()] + [resp.body.decode() for resp, err in got.values() if err is None and resp.ok]
+        budgets = budgets_from(self.config.get_prefix(STAGE_BUDGET_PREFIX), self.config.get(BASELINES_KEY))
+        out = summarize(texts, budgets, prices_from(self.config.get_prefix(FINOPS_PREFIX)))
+        out["alerts"] = alerts(out, budgets)
+        out["sources"] = ["web-bff", *[n for n, (resp, err) in got.items() if err is None and resp.ok]]
+        return out
+
+    def _ops_summary(self, r: Request) -> dict:
+        self.validator("web-bff").validate(r.bearer(), scopes=("Ops.Read",), app_only=True, azp=("ops-admin",))
+        return self.ops_summary()
 
     # ------------------------------------------------------------------ memory: profile and session context
     def _profile(self, oid: str) -> dict:

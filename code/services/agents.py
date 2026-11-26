@@ -29,6 +29,7 @@ import time
 from typing import TYPE_CHECKING
 
 from rm_copilot import guardrails as g
+from rm_copilot.gates import GATE_PREFIX, thresholds as merge_thresholds
 from rm_copilot.orchestrator import Copilot
 from services.common.httpkit import HttpError, TransportError, request_context, time_left
 from services.common.identities import AGENT_SERVERS, AGENTS
@@ -87,6 +88,36 @@ class ProceduralGuard:
     def check_prompt(self, system: str) -> None:
         if prompt_sha(system) not in {p.get("sha256") for p in (self.pins().get("prompts") or {}).values()}:
             raise self._refuse("PROMPT")
+
+
+# --------------------------------------------------------------------------- Tier 1 gates -> telemetry (plan §3.9)
+class EvalObserver:
+    """Receives the runtime gate outcomes of the `Copilot` workflows: one span per gate (`eval.gate <gate>`: gate and
+    outcome as enums, scores as numbers only) and, for a released answer, the material for the online sampled
+    evaluation (kept in the request context; `Orchestrator._run` decides whether this request is sampled)."""
+
+    def __init__(self, svc: "Orchestrator"):
+        self.svc = svc
+
+    def gate(self, gate: str, outcome: str, scores: dict) -> None:
+        with self.svc.telemetry.span(f"eval.gate {gate}", **{"rmc.gate": gate, "rmc.outcome": outcome}) as sp:
+            for k, v in scores.items():
+                sp.set_attr(f"rmc.eval.{k}", v)
+
+    def sample(self, use_case: str, question: str, answer: str, contexts: list[str]) -> None:
+        request_context().data["eval_material"] = {"use_case": use_case, "question": question, "answer": answer, "contexts": list(contexts)}
+
+    def stage(self, name: str):
+        return self.svc.ops.stage(name)
+
+    def thresholds(self) -> dict:
+        """LLD §17.2 keys from App Configuration (one list call per prefix, cached); out-of-range values are rejected."""
+        values = {**self.svc.config.get_prefix(GATE_PREFIX), **self.svc.config.get_prefix("rmc:orchestrator:uc2:")}
+        rejected: list[str] = []
+        th = merge_thresholds(values, rejected)
+        for name in rejected:
+            self.svc.m_gate_config_rejected.inc(key=name)  # GateConfigRejected: the default is used
+        return th
 
 
 # --------------------------------------------------------------------------- checkpointer (tool-gateway memory store)
@@ -154,8 +185,11 @@ def verify(state: dict, ctx: RunContext | None = None) -> dict:
             sentences = [s for s in re.split(r"(?<=[.!?])\s+", str(out.get("answer", "")).strip()) if s]
             if not sentences or not all(_CITED.search(s) for s in sentences):
                 dropped = 1
+                ev = dict(out.get("evaluation") or {"gates": [], "scores": {}})
+                ev["gates"] = [*ev.get("gates", []), {"gate": "citations", "outcome": "declined", "scores": {}}]
                 out = {"status": "declined", "reason": "answer failed verification (citations)", "source_ids": out.get("source_ids", []),
-                       "message": "I can't confirm this from approved documents. I can route it to the credit or product desk.", "closest_sources": out.get("sources", [])}
+                       "message": "I can't confirm this from approved documents. I can route it to the credit or product desk.", "closest_sources": out.get("sources", []),
+                       "evaluation": ev}
     elif uc == "uc3":
         tasks = list(out.get("tasks", []))
         kept = [x for x in tasks if isinstance(x, dict) and not g.policy_violations(str(x.get("title", ""))) and (not x.get("due") or _ISO.match(str(x["due"])))]
@@ -171,7 +205,9 @@ class AgentGraph:
         self.spec = spec or GRAPH_SPEC
         model, guard = ApimChatModel(svc), HttpGuard(svc)
         self.clients = {a: McpClient(svc, a) for a in AGENTS if AGENT_SERVERS[a]}
-        self.copilots = {a: Copilot(model, McpTools(svc, c), guard, time_left=time_left) for a, c in self.clients.items()}
+        observer = EvalObserver(svc)
+        self.copilots = {a: Copilot(model, McpTools(svc, c), guard, time_left=time_left, thresholds=observer.thresholds, observer=observer)
+                         for a, c in self.clients.items()}
         self.rest = HttpTools(svc)  # the write API for the commit node: not an agent tool
         self.memory = MemoryStore(svc)
         self.procedural = ProceduralGuard(svc, self.spec)
@@ -241,6 +277,7 @@ class AgentGraph:
                            "deadline_ms": None if left == float("inf") else int(left * 1000)}}
 
     def brief_agent(self, state: dict, ctx: RunContext) -> dict:
+        request_context().data["agent"] = "brief-agent"
         cid = state["customer_id"]
         out = self.copilots["brief-agent"].brief(ctx.user, cid)
         episodes = self.clients["brief-agent"].call("memory", "recall_episodes", {"customer_id": cid, "limit": 3}).get("value", [])
@@ -252,9 +289,11 @@ class AgentGraph:
         return {"output": out}
 
     def policy_agent(self, state: dict, ctx: RunContext) -> dict:
+        request_context().data["agent"] = "policy-agent"
         return {"output": self.copilots["policy-agent"].ask(ctx.user, ctx.inputs["question"])}
 
     def followup_agent(self, state: dict, ctx: RunContext) -> dict:
+        request_context().data["agent"] = "followup-agent"
         cid = state["customer_id"]
         out = self.copilots["followup-agent"].draft_followup(ctx.user, cid, ctx.inputs["notes"])
         tasks = [{"type": str(x.get("type") or "follow_up")[:32], "title": str(x.get("title", ""))[:300], "due": str(x.get("due") or "")[:32]}

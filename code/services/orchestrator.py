@@ -13,10 +13,19 @@ token for tool-gateway, validated here for the RM's `oid` (quota key, audit) and
 Deadlines come from web-bff in `x-deadline-ms`; every hop derives its timeout from what is left. Feature flags
 and kill switches come from App Configuration (cached `flags_ttl_s`; on outage the last known value is used,
 and writes fail closed). Output is buffered and verified before it is returned (no streaming, plan C18).
+
+Evaluation (plan §3.9, LLD §17): the Tier 1 runtime gates run inside the workflows (`rm_copilot/gates.py`, thresholds
+from App Configuration `rmc:orchestrator:gate:*`); every outcome is counted (`rmc_runtime_gate_total`,
+`rmc_runtime_gate_score`), traced and returned under `evaluation`. Every UC1/UC2/UC3 reply carries `ops` metadata
+(tokens, estimated cost from `rmc:finops:*`, stage times). A share of released UC1/UC2 answers
+(`rmc:eval:online:sample_rate`, default 5%, `max_per_day` 200) is sent to the audit content store as an encrypted
+`eval_sample` event for the eval-worker's online judge (Tier 2); telemetry stays metadata.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import threading
 import time
 import urllib.parse
 
@@ -26,17 +35,55 @@ from services.common.config import AUD, StackConfig
 from services.common.contracts import JTI_RE, RemoteAuditSink, valid_customer_id
 from services.common.flags import FLAG_DEFAULTS, ConfigValues, FeatureFlags  # noqa: F401 - re-exported
 from services.common.httpkit import HttpError, Request, Response, TransportError, request_context
+from services.common.opsmetrics import FINOPS_PREFIX, ONLINE_PREFIX, OpsRecorder, online_from, prices_from
 from services.common.service import Service
 from services.common.telemetry import current_span
 from services.orchestrator_adapters import Budget, HttpTools, rm_user
 
 
-def decline_code(reason: str) -> str:
+def decline_code(reason: str, reason_code: str | None = None) -> str:
+    if reason_code:
+        return reason_code.lower()  # LLD §17.2 decline codes (WEAK_RETRIEVAL, LOW_ANSWER_RELEVANCY, ...)
     for needle, code in (("no approved document", "weak_retrieval"), ("insufficient", "insufficient_evidence"),
                          ("no time to retry", "ungrounded_no_time"), ("twice", "ungrounded"), ("content safety", "harm")):
         if needle in reason:
             return code
     return "other"
+
+
+class EvalSampler:
+    """Tier 2 producer side: picks a deterministic share of released UC1/UC2 answers (hash of the request id) within a
+    daily cap and sends question, kept passages and answer to the audit content store (encrypted per customer key)."""
+
+    def __init__(self, svc: "Orchestrator"):
+        self.svc = svc
+        self._day, self._count = "", 0
+        self._lock = threading.Lock()
+        self.m_items = svc.metrics.counter("rmc_online_eval_items_total", "Online evaluation items by outcome", ("use_case", "outcome"))
+
+    def maybe(self, material: dict | None) -> bool:
+        if not material:
+            return False
+        cfg = online_from(self.svc.config.get_prefix(ONLINE_PREFIX))
+        ctx = request_context()
+        draw = int(hashlib.sha256(ctx.request_id.encode()).hexdigest()[:8], 16) / 0x100000000
+        if draw >= float(cfg["sample_rate"]):
+            return False
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        with self._lock:
+            if day != self._day:
+                self._day, self._count = day, 0
+            if self._count >= cfg["max_per_day"]:
+                self.m_items.inc(use_case=material["use_case"], outcome="skipped_cap")
+                return False
+            self._count += 1
+        try:
+            self.svc.audit.emit("eval_sample", content=material, use_case=material["use_case"], contexts=len(material["contexts"]))
+        except HttpError:
+            self.m_items.inc(use_case=material["use_case"], outcome="sample_error")  # sampling never fails the RM's request
+            return False
+        self.m_items.inc(use_case=material["use_case"], outcome="sampled")
+        return True
 
 
 class Orchestrator(Service):
@@ -49,6 +96,9 @@ class Orchestrator(Service):
         self.tools = HttpTools(self)  # REST: meetings, write status and the commit (not agent tools)
         self.flags = FeatureFlags(self)
         self.config = ConfigValues(self)
+        self.ops = OpsRecorder(self.metrics)
+        self.m_gate_config_rejected = self.metrics.counter("rmc_gate_config_rejected_total", "Gate thresholds outside the sanity range (default used)", ("key",))
+        self.sampler = EvalSampler(self)
         self.agents = AgentGraph(self)
         self.procedural = self.agents.procedural
         m = self.metrics
@@ -63,6 +113,10 @@ class Orchestrator(Service):
         a("POST", "/v1/commit")(lambda r: self._run(r, "commit", self._commit))
         a("GET", "/v1/writes/{jti}")(lambda r: self._run(r, "status", self._writes))
         a("GET", "/v1/meetings")(lambda r: self._run(r, "meetings", lambda r, u: {"value": self.tools.meetings()}))
+
+    def prices(self) -> dict:
+        """Price table (App Configuration `rmc:finops:*`, illustrative); the built-in illustrative values where missing."""
+        return prices_from(self.config.get_prefix(FINOPS_PREFIX))
 
     def workload_assertion(self) -> str:
         """The pod's workload identity assertion: the only credential the agent identities federate with (C24)."""
@@ -97,6 +151,7 @@ class Orchestrator(Service):
         if flag and not self.flags.enabled(flag):
             self.m_requests.inc(use_case=use_case, outcome="feature_disabled")
             raise HttpError(503, "FEATURE_DISABLED", "This feature is switched off right now.", details={"flag": flag}, retryable=False)
+        data = request_context().data
         try:
             result = fn(r, rm_user(claims))
         except t.NotEntitled:
@@ -104,12 +159,34 @@ class Orchestrator(Service):
             raise HttpError(403, "NOT_ENTITLED", "You are not entitled to this customer.") from None
         except HttpError as e:
             self.m_requests.inc(use_case=use_case, outcome=e.code.lower())
+            if e.code == "BUDGET_EXCEEDED":
+                reason = str(e.details.get("reason") or "")
+                budget = e.details.get("budget") or {"REQUEST_STEPS": "tool_steps", "AGENT_HOPS": "hops", "RM_DAILY": "rm_daily"}.get(reason, reason.lower())
+                self.ops.budget.inc(use_case=use_case, budget=budget, action="refused")
+            elif e.code == "DEPENDENCY_TIMEOUT":
+                self.ops.budget.inc(use_case=use_case, budget="deadline", action="refused")
+            if use_case == "uc1" and e.details.get("source") == "crm":
+                self.ops.gate(use_case, "profile_present", "declined", {})  # no brief without the CRM profile
             raise
+        finally:
+            b = data.get("budget")
+            if use_case in ("uc1", "uc2", "uc3") and b is not None:
+                self.ops.request_tokens(use_case, b.input_tokens, b.output_tokens)
         if isinstance(result, dict):  # mode and warnings were set by the graph's respond node
             outcome = "degraded" if result.get("degraded") or result.get("status") == "degraded" else str(result.get("status", "ok"))
             self.m_requests.inc(use_case=use_case, outcome=outcome)
             if outcome == "degraded":
                 self.m_degraded.inc(use_case=use_case)
+            for gate in (result.get("evaluation") or {}).get("gates", []):
+                self.ops.gate(use_case, gate["gate"], gate["outcome"], gate.get("scores") or {})
+            if use_case in ("uc1", "uc2", "uc3"):
+                b = data.get("budget")
+                sampled = self.sampler.maybe(data.get("eval_material")) if use_case in ("uc1", "uc2") and outcome not in ("declined", "degraded") else False
+                result["ops"] = {"tokens": {"input": getattr(b, "input_tokens", 0), "output": getattr(b, "output_tokens", 0)},
+                                 "model_calls": getattr(b, "model_calls", 0), "cost_aed": round(data.get("cost_aed", 0.0), 6),
+                                 "stages_ms": dict(data.get("stages") or {}), "sampled_for_eval": sampled}
+                if (sp := current_span()) is not None:
+                    sp.set(**{"rmc.sampled": sampled, "rmc.cost_aed": round(data.get("cost_aed", 0.0), 6)})
         return result
 
     @staticmethod
@@ -145,7 +222,7 @@ class Orchestrator(Service):
             raise HttpError(400, "VALIDATION_FAILED", "question is required (max 2000 characters)", details={"reason": "SCHEMA"})
         out = self.agents.run("uc2", user, None, {"question": q}, self._context(r))
         if out["status"] == "declined":
-            self.m_declines.inc(use_case="uc2", reason=decline_code(out["reason"]))
+            self.m_declines.inc(use_case="uc2", reason=decline_code(out["reason"], out.get("reason_code")))
         return out
 
     def _followup(self, r: Request, user: t.User) -> dict:

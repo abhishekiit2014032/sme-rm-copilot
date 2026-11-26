@@ -12,6 +12,10 @@
   customer's memory keys (`memory-ckpt-c-<id>`, `memory-ep-c-<id>`), so sealed checkpoints and episodes are shredded,
   and removes those documents from Cosmos DB `checkpoints` and `episodes`.
 
+* Sampled answers for the online evaluation (plan §3.9 Tier 2): `GET /audit/eval-samples?from_seq=` returns only the
+  `eval_sample` events and their decrypted content, to the eval-worker's identity with the narrow role
+  `Audit.ReadSampled` (it cannot read any other content). Crypto-shredded samples are skipped.
+
 Local files live under `<run_dir>/audit/`. The content cipher (services/common/envelope.py) is a MOCK built from
 the standard library; production uses AES-256-GCM with keys wrapped by Key Vault HSM keys. Differences from the
 LLD: one chain (one partition), no hourly signed anchors, customer id in clear in metadata (LLD: HMAC reference).
@@ -93,6 +97,7 @@ class AuditWriter(Service):
         a("GET", "/audit/records")(self._records)
         a("POST", "/audit/erasure")(self._erasure)
         a("GET", "/audit/content/{customer}/{event_id}")(self._content)
+        a("GET", "/audit/eval-samples")(self._eval_samples)
 
     def _head(self) -> tuple[int, str]:
         """The chain head (next seq, last hash) of an existing chain file. Production: Cosmos `audit-chain-heads`."""
@@ -240,6 +245,35 @@ class AuditWriter(Service):
                 self.cosmos.delete(coll, doc["id"])
             counts[coll] = len(docs)
         return {**counts, "keys_shredded": shredded}
+
+    def _eval_samples(self, r: Request) -> dict:
+        self.validator("audit").validate(r.bearer(), scopes=("Audit.ReadSampled",), app_only=True, azp=("eval-worker",))
+        try:
+            start, limit = max(0, int(r.query.get("from_seq", 0))), max(1, min(int(r.query.get("limit", 50)), 200))
+        except ValueError:
+            raise HttpError(400, "VALIDATION_FAILED", "from_seq and limit are integers", details={"reason": "SCHEMA"}) from None
+        lines = self.chain_path.read_text(encoding="utf-8").splitlines() if self.chain_path.exists() else []
+        out, next_seq = [], start
+        for line in lines[start:]:
+            rec = json.loads(line)
+            next_seq = rec["seq"] + 1
+            ev, ref = rec.get("event") or {}, rec.get("content_ref")
+            if ev.get("event") != "eval_sample" or not ref:
+                continue
+            customer = ev.get("customer") or "_no-customer"
+            path = self.dir / "content" / key_name(customer) / f"{re.sub(r'[^a-f0-9]', '', str(ev.get('event_id')))}.bin"
+            with self._lock:
+                key = self._key(customer, create=False)
+            try:
+                content = json.loads(unseal(key, path.read_bytes())) if key and path.exists() else None
+            except ValueError:
+                content = None  # shredded: the sample is gone for good
+            if content is not None:
+                out.append({"seq": rec["seq"], "event_id": ev.get("event_id"), "ts": rec["ts"], "use_case": (ev.get("metadata") or {}).get("use_case"),
+                            "content": content})
+            if len(out) >= limit:
+                break
+        return {"value": out, "next_seq": next_seq}
 
     def _content(self, r: Request) -> dict:
         self._admin(r, "Audit.ReadContent")

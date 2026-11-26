@@ -31,7 +31,12 @@ SAFE_KEYS = frozenset({
     "gen_ai.system", "gen_ai.operation.name", "gen_ai.request.model", "gen_ai.response.model",
     "gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens", "service", "level", "event", "status",
     "rmc.agent", "rmc.node", "rmc.hop", "rmc.server", "rmc.step", "rmc.memory", "rmc.rpc_method", "rmc.graph", "rmc.resumed",
+    # evaluation (plan §3.9): gate names and outcomes are enums; scores are numbers only (`numeric_keys` below)
+    "rmc.gate", "rmc.metric", "rmc.sampled", "rmc.cost_aed",
+    "rmc.eval.best_score", "rmc.eval.context_relevance", "rmc.eval.passages", "rmc.eval.faithfulness", "rmc.eval.answer_relevancy",
+    "rmc.eval.cited_all", "rmc.eval.claims", "rmc.eval.attempt", "rmc.eval.lines", "rmc.eval.dropped",
 })
+NUMERIC_ONLY_PREFIXES = ("rmc.eval.", "rmc.cost_aed")
 _MAX_STR = 80
 
 
@@ -43,7 +48,7 @@ def safe_fields(fields: dict) -> dict:
             continue
         if isinstance(v, bool) or isinstance(v, (int, float)):
             out[k] = v
-        elif isinstance(v, str):
+        elif isinstance(v, str) and not k.startswith(NUMERIC_ONLY_PREFIXES):
             out[k] = v[:_MAX_STR]
     return out
 

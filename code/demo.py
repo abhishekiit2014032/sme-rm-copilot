@@ -69,6 +69,31 @@ try:
 except (t.ApprovalRequired, t.NotEntitled) as e:
     print("  token replay by another user blocked:", type(e).__name__)
 
+title("Evaluation · Tier 1 runtime gates on UC2 (plan §3.9)")
+from rm_copilot import ragas  # noqa: E402
+
+
+def gates(r: dict) -> str:
+    return " · ".join(f"{g['gate']} {g['outcome']}" + (f" {g['scores']}" if g["scores"] else "") for g in r["evaluation"]["gates"])
+
+
+r = copilot.ask(layla, "What is the interest rate on retail savings accounts?")
+print("  weak retrieval, no model call:", r["status"], r["reason_code"], "|", gates(r))
+r = copilot.ask(layla, "Does an expired trade licence block new drawdowns?")
+print("  off-topic first answer, retried:", r["status"], "-", r["answer"])
+print("   ", gates(r))
+r = Copilot(CarelessLLM(), time_left=lambda: 3.0).ask(layla, "Can a company trading for 2 years get an unsecured working capital line?")
+print("  careless model with 3 s left (no retry):", r["status"], r["reason_code"], "|", gates(r))
+
+title("Evaluation · RAGAS-style metrics for one answer (lexical scorer)")
+q = "Can a company trading for 2 years get an unsecured working capital line?"
+r = copilot.ask(layla, q)
+ctx = [p["text"] for p in t.data.POLICY_PASSAGES if p["id"] in r["source_ids"]]
+ref = ("Unsecured SME working capital lines require a minimum of 3 years audited trading history and annual turnover of at least AED 5m. "
+       "Businesses with less than 3 years trading history may be offered secured facilities only.")
+print(" ", ragas.evaluate({"question": q, "answer": r["answer"], "contexts": ctx, "reference": ref}))
+print("  release gate: python3 -m evals.run_evals · nightly: python3 -m evals.scheduled --nightly")
+
 title("Audit log (last 6 events)")
 for e in t.AUDIT_LOG[-6:]:
     print(" ", {k: v for k, v in e.items() if k != "ts"})

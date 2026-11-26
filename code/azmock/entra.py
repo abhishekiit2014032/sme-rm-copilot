@@ -52,7 +52,7 @@ from ._base import Mock
 CONSOLE_CLIENT_ID = "rm-copilot-console"
 APP_ID_URIS = {"web-bff": AUD["web-bff"], "orchestrator": AUD["orchestrator"], "tool-gateway": AUD["tool-gateway"]}
 WORKLOADS = ("web-bff", "orchestrator", "tool-gateway", "outbox-worker", "audit-writer", "ingestion-worker", "apim", "ops-admin",
-             "crm-integration")
+             "crm-integration", "eval-worker")
 # App roles granted to workload identities on our own APIs (client credentials).
 APP_ROLES = {
     "web-bff": {AUD["orchestrator"]: ["Copilot.Invoke"]},
@@ -62,7 +62,10 @@ APP_ROLES = {
     "outbox-worker": {AUD["apim"]: ["SystemApis.Read", "SystemApis.Write"], AUD["tool-gateway"]: ["Audit.Append"]},
     "ingestion-worker": {AUD["apim"]: ["AiGateway.Invoke"]},
     # PIM-activated operator roles in production: audit content and erasure; checkpoint replay for debugging (C29)
-    "ops-admin": {AUD["audit"]: ["Audit.ReadContent", "Audit.Erase"], AUD["tool-gateway"]: ["Checkpoints.Replay"]},
+    "ops-admin": {AUD["audit"]: ["Audit.ReadContent", "Audit.Erase"], AUD["tool-gateway"]: ["Checkpoints.Replay"],
+                  AUD["web-bff"]: ["Ops.Read"]},  # runtime operations summary (plan §3.9)
+    # Tier 2 online evaluation: the in-region judge through the AI gateway, and the sampled answers only (not all content)
+    "eval-worker": {AUD["apim"]: ["AiGateway.Invoke"], AUD["audit"]: ["Audit.ReadSampled"]},
     "crm-integration": {AUD["apim"]: ["CrmEvents.Publish"]},  # the CRM's publisher identity (LLD §7.3 rmc-crm-events)
     "apim": {AUD["tool-gateway"]: ["Mcp.Forward"]},  # the MCP gateway forwarding to the MCP servers in tool-gateway
     **{a: {AUD["mcp"]: list(AGENT_ROLES[a])} for a in AGENTS},  # one service principal per agent, roles per tool

@@ -43,7 +43,7 @@ class Base(unittest.TestCase):
 
     @staticmethod
     def public(out: dict) -> dict:
-        return {k: v for k, v in out.items() if k not in ("request_id", "trace_id", "_status")}
+        return {k: v for k, v in out.items() if k not in ("request_id", "trace_id", "_status", "ops")}  # transport metadata
 
     def episodes(self, upn: str, customer: str) -> list[dict]:
         return [e for e in memory_docs(self.stack, "episodes") if e["oid"] == user_oid(upn) and e["customer_id"] == customer]

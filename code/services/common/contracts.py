@@ -100,6 +100,7 @@ AUDIT_EVENTS = frozenset({
     "tool_call", "entitlement_denied", "brief_built", "groundedness", "declined", "degraded", "injection_flagged", "followup_drafted",
     "model_call", "approval_issued", "approval_verified", "approval_rejected", "write_blocked", "write_committed", "write_queued", "write_failed",
     "mcp_denied", "episode_recorded", "checkpoint_replayed",
+    "eval_sample",  # Tier 2 online evaluation: a sampled answer, content encrypted in the audit content store (plan §3.9)
 })
 
 

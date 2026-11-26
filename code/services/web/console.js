@@ -72,6 +72,38 @@ function agentsBox(a) {
     el("p", { class: "muted", text: "Tools called through the MCP gateway: " + (tools.length ? tools.join(", ") : "none") }));
 }
 
+// Runtime gates, tokens, cost and latency of one answer (plan §3.9), and RM feedback. Plain text only.
+function fmtScores(sc) {
+  return Object.entries(sc || {}).filter(([k]) => k !== "attempt").map(([k, v]) => `${k.replace(/_/g, " ")} ${Number.isInteger(v) ? v : Number(v).toFixed(2)}`).join(", ");
+}
+function evalBox(r) {
+  const box = el("div", { class: "agents" });
+  const ev = r.evaluation;
+  if (ev && ev.gates && ev.gates.length) {
+    const gates = ev.gates.map((g) => `${g.gate.replace(/_/g, " ")}${g.scores && g.scores.attempt ? " (attempt " + g.scores.attempt + ")" : ""}: ${g.outcome}` +
+      (fmtScores(g.scores) ? ` [${fmtScores(g.scores)}]` : ""));
+    box.append(el("p", { class: "muted", text: `Runtime gates (${ev.gate_version}): ` + gates.join(" · ") }));
+  }
+  const ops = r.ops;
+  if (ops) {
+    const tok = ops.tokens ? `${ops.tokens.input} in / ${ops.tokens.output} out tokens` : "no model tokens";
+    const cost = ops.cost_aed !== undefined ? ` · est. AED ${Number(ops.cost_aed).toFixed(5)} (illustrative prices)` : "";
+    const lat = ops.latency_ms !== undefined ? ` · ${Math.round(ops.latency_ms)} ms end to end` : "";
+    const stages = Object.entries(ops.stages_ms || {}).map(([k, v]) => `${k} ${Math.round(v)} ms`).join(", ");
+    box.append(el("p", { class: "muted", text: tok + cost + lat + (ops.sampled_for_eval ? " · sampled for online evaluation" : "") }));
+    if (stages) box.append(el("p", { class: "muted", text: "Stages: " + stages }));
+  }
+  if (r.request_id) {
+    const note = el("span", { class: "muted", text: "" });
+    const send = (rating) => async () => {
+      const res = await api("POST", "/api/feedback", { request_id: r.request_id, rating });
+      note.textContent = res.status === 202 ? ` Thanks, feedback recorded (${rating}).` : " Feedback not recorded.";
+    };
+    box.append(el("p", {}, el("button", { text: "Helpful", onclick: send("up") }), el("button", { text: "Not helpful", onclick: send("down") }), note));
+  }
+  return box;
+}
+
 // ------------------------------------------------------------------ sign-in
 async function signIn(upn) {
   const form = new URLSearchParams({ grant_type: "password", client_id: state.config.client_id, username: upn,
@@ -120,7 +152,7 @@ async function runBrief() {
       el("h3", { text: "News (external, screened)" }), list(b.news.length ? b.news : ["None"]),
       el("h3", { text: "Your earlier interactions (RM-approved, from memory)" }),
       list((b.previous_interactions || []).length ? b.previous_interactions.map((e) => `${e.text} [${e.source}]`) : ["None"]),
-      agentsBox(b.agents));
+      agentsBox(b.agents), evalBox(b));
   });
 }
 
@@ -138,11 +170,12 @@ async function runAsk() {
       box.append(flag("Degraded: passages only (model unavailable)", "warn"), el("p", { text: a.message }),
         list(a.passages.map((p) => `[${p.n}] ${p.source}: ${p.text}`)));
     } else {
-      box.append(flag("Declined", "warn"), el("p", { text: a.message }), el("p", { class: "muted", text: "Reason: " + a.reason }));
+      box.append(flag("Declined", "warn"), el("p", { text: a.message }), el("p", { class: "muted", text: "Reason: " + a.reason + (a.reason_code ? ` (${a.reason_code})` : "") }));
       if (a.closest_sources && a.closest_sources.length) box.append(el("h3", { text: "Closest sources" }), list(a.closest_sources));
     }
     const ab = agentsBox(a.agents);
     if (ab) box.append(ab);
+    box.append(evalBox(a));
   });
 }
 
@@ -172,6 +205,7 @@ async function runDraft() {
     $("#uc3-email").value = d.email_draft || "";
     const ab = agentsBox(d.agents);
     if (ab) f.append(ab, el("p", { class: "muted", text: "Paused for your approval: the run is checkpointed and resumes when you approve." }));
+    f.append(evalBox(d));
     clear($("#uc3-result"));
   });
 }

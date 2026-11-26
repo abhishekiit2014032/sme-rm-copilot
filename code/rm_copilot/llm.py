@@ -53,11 +53,15 @@ STRICT_SUFFIX = "\nYour previous answer failed verification. Quote the passages 
 
 # --------------------------------------------------------------------------- deterministic mock
 class MockLLM:
-    """Simulates the three prompt types with rules, so behaviour is reproducible."""
+    """Simulates the prompt types with rules, so behaviour is reproducible. Also answers the evaluation judge's
+    rubric prompts (`ragas.JUDGE_PROMPTS`) with the lexical judgement: a MOCK judge, see README "Evaluation"."""
 
     def complete(self, system: str, user: str) -> str:
+        from .ragas import JUDGE_PREFIX, mock_judge  # lazy: ragas imports guardrails and retrieval
+        if system.startswith(JUDGE_PREFIX):
+            return mock_judge(system, user)
         if system.startswith(POLICY_QA_SYSTEM[:40]):
-            return self._qa(user)
+            return self._qa(user, strict=STRICT_SUFFIX.strip() in system)
         if system.startswith(BRIEF_SYSTEM[:40]):
             return self._brief(user)
         if system.startswith(EXTRACT_SYSTEM[:40]):
@@ -67,14 +71,21 @@ class MockLLM:
         raise ValueError("unknown prompt")
 
     @staticmethod
-    def _qa(user: str) -> str:
+    def _qa(user: str, strict: bool = False) -> str:
+        """First sentence of each passage, cited. With the strict retry prompt ("quote the passages more closely") it
+        quotes, per passage, the sentence that shares most words with the question, and drops passages sharing none."""
+        from .retrieval import tokenize
         passages = re.findall(r"^\[(\d+)\] [^\n]*?:: (.+)$", user, flags=re.M)
         if not passages:
             return "INSUFFICIENT_EVIDENCE"
+        q = set(tokenize(user.rsplit("QUESTION:", 1)[-1])) if strict else set()
         out = []
         for n, text in passages:
-            first = re.split(r"(?<=\.)\s", text.strip())[0].rstrip(".")
-            out.append(f"{first} [{n}].")
+            sentences = [x.rstrip(".") for x in re.split(r"(?<=\.)\s", text.strip()) if x]
+            pick = max(sentences, key=lambda x: len(q & set(tokenize(x)))) if strict else sentences[0]
+            if strict and out and not q & set(tokenize(pick)):
+                continue
+            out.append(f"{pick} [{n}].")
         return " ".join(out)
 
     @staticmethod
