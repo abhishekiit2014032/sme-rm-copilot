@@ -6,7 +6,7 @@
 :root { --bg:#08111F; --lane:#0E1C31; --laneline:#23426A; --box:#10243C; --boxline:#3A6896; --ink:#EEF3F5; --muted:#A9BACB; --cyan:#22D3EE; --amber:#F5B82E; --violet:#B98DFF; --icon:#7DD3FC; --badge:#2563EB; }
 * { box-sizing:border-box; margin:0; }
 body { background:var(--bg); font-family:Inter, Arial, sans-serif; color:var(--ink); }
-#c { position:relative; width:2000px; height:1584px; background:var(--bg); }
+#c { position:relative; width:2000px; height:1500px; background:var(--bg); }
 .lane { position:absolute; left:14px; width:1972px; border:1.5px solid var(--laneline); border-radius:14px; background:var(--lane); }
 .lh { position:absolute; display:flex; align-items:center; gap:12px; font:800 24px/1 Inter; letter-spacing:1.5px; }
 .lh span { width:38px; height:38px; border-radius:50%; background:var(--badge); color:#fff; font:800 20px/38px Inter; text-align:center; }
@@ -25,7 +25,7 @@ body { background:var(--bg); font-family:Inter, Arial, sans-serif; color:var(--i
 .b.off { border-style:dashed; }
 .b.off .t .off { margin-left:8px; font:700 12px/1 Inter; padding:3px 6px; border-radius:4px; background:#3A4B5E; color:#CFD8E3; vertical-align:3px; }
 .b.hitl { border-color:var(--amber); }
-.mem { position:absolute; left:720px; top:980px; width:780px; height:186px; border:1.5px solid var(--boxline); border-radius:12px; background:var(--box); padding:10px 12px; }
+.mem { position:absolute; left:720px; top:1024px; width:780px; height:186px; border:1.5px solid var(--boxline); border-radius:12px; background:var(--box); padding:10px 12px; }
 .mem .mh { display:flex; align-items:center; gap:12px; height:36px; }
 .mem .mh svg.ic { width:30px; height:30px; color:var(--icon); }
 .mem .mh .t { font:700 22px/1 Inter; }
@@ -40,12 +40,9 @@ body { background:var(--bg); font-family:Inter, Arial, sans-serif; color:var(--i
 .lbl.c { color:var(--cyan); } .lbl.a { color:var(--amber); } .lbl.v { color:var(--violet); }
 .pill { position:absolute; font:700 15px/1 Inter; color:var(--amber); border:1.5px solid var(--amber); border-radius:6px; padding:6px 10px; background:#1B1A10; white-space:nowrap; }
 svg.wires { position:absolute; left:0; top:0; pointer-events:none; }
-.legend { position:absolute; left:30px; top:1384px; width:1940px; border-top:1.5px solid var(--laneline); padding-top:14px; display:flex; gap:40px; font-size:18px; color:var(--muted); align-items:center; }
+.legend { position:absolute; left:30px; top:1440px; width:1940px; border-top:1.5px solid var(--laneline); padding-top:14px; display:flex; gap:40px; font-size:18px; color:var(--muted); align-items:center; }
 .legend i { display:inline-block; width:56px; height:0; border-top:3px solid; margin-right:10px; vertical-align:middle; }
 .legend .n { display:inline-block; width:28px; height:28px; border-radius:50%; background:var(--badge); color:#fff; font:800 13px/28px Inter; text-align:center; margin-right:8px; }
-.caps { position:absolute; left:30px; top:1444px; width:1940px; display:grid; grid-template-columns:repeat(4,1fr); gap:28px; }
-.caps div { border-top:3px solid #22A06B; padding-top:10px; font-size:17px; line-height:1.45; color:var(--muted); }
-.caps b { display:block; color:var(--ink); font-size:20px; margin-bottom:4px; }
 </style></head><body><div id="c">
 <svg width="0" height="0" style="position:absolute">
   <defs>
@@ -77,9 +74,9 @@ svg.wires { position:absolute; left:0; top:0; pointer-events:none; }
 </svg>
 
 <div class="lane" style="top:14px;height:356px"></div><div class="lh" style="left:34px;top:30px"><span>A</span>ONLINE REQUEST PATH</div>
-<div class="lane" style="top:384px;height:522px"></div><div class="lh" style="left:34px;top:400px"><span>B</span>CONTROLLED EXECUTION</div>
-<div class="lane" style="top:920px;height:260px"></div><div class="lh" style="left:34px;top:936px"><span>C</span>STATE + DATA FRESHNESS</div>
-<div class="lane" style="top:1194px;height:170px"></div><div class="lh" style="left:34px;top:1210px"><span>D</span>PRODUCTION OPERATIONS</div>
+<div class="lane" style="top:384px;height:566px"></div><div class="lh" style="left:34px;top:400px"><span>B</span>CONTROLLED EXECUTION</div>
+<div class="lane" style="top:964px;height:260px"></div><div class="lh" style="left:34px;top:980px"><span>C</span>STATE + DATA FRESHNESS</div>
+<div class="lane" style="top:1238px;height:184px"></div><div class="lh" style="left:34px;top:1254px"><span>D</span>PRODUCTION OPERATIONS</div>
 <div id="boxes"></div>
 <div class="mem"><div class="mh"><svg class="ic"><use href="#i-db"/></svg><span class="t">Session + memory store</span><span class="s">per RM · encrypted · never shared across RMs</span></div><div class="bd"><span>13</span></div>
 <div class="row4">
@@ -94,48 +91,42 @@ svg.wires { position:absolute; left:0; top:0; pointer-events:none; }
 <div class="lbl c" style="left:1140px;top:50px">HIT · still validate</div>
 <div class="lbl v" style="left:712px;top:304px">invalidate cache</div>
 <div class="lbl c" style="left:1112px;top:310px;text-align:right">tasks in waves<br>results back</div>
-<div class="lbl c" style="left:1336px;top:582px">via gateways only</div>
+<div class="lbl c" style="left:1336px;top:602px">via gateways only</div>
 <div class="lbl a" style="left:1580px;top:410px">APPROVE / ESCALATE</div>
-<div class="lbl a" style="left:1780px;top:880px">sign + audit</div>
-<div class="lbl v" style="left:500px;top:928px">CDC: refresh index</div>
-<div class="lbl v" style="left:1300px;top:1209px">5% sampled answers</div>
-<div class="pill" style="left:924px;top:752px">Writes need RM approval</div>
-<svg class="wires" width="2000" height="1584" viewBox="0 0 2000 1584" id="w"></svg>
+<div class="lbl a" style="left:1780px;top:950px">sign + audit</div>
+<div class="lbl v" style="left:500px;top:972px">CDC: refresh index</div>
+<div class="lbl v" style="left:1300px;top:1253px">5% sampled answers</div>
+<div class="pill" style="left:924px;top:786px">Writes need RM approval</div>
+<svg class="wires" width="2000" height="1500" viewBox="0 0 2000 1500" id="w"></svg>
 
 <div class="legend"><span><i style="border-color:var(--cyan)"></i>Request / response</span><span><i style="border-color:var(--amber)"></i>Human approval</span><span><i style="border-color:var(--violet);border-top-style:dashed"></i>State / ingestion</span><span><b class="n">07</b>building block number</span><span style="margin-left:auto">Fictional bank · cloud-agnostic view</span></div>
-<div class="caps">
-<div><b>A · Online request path</b>Gateway, guardrails, semantic cache and router + orchestrator: every request flows through it.</div>
-<div><b>B · Controlled execution</b>One agent per use case. Agents reach data only through the gateways; the RM approves every write.</div>
-<div><b>C · State + data freshness</b>Change events (CDC) refresh the index and invalidate the cache; memory; keys and audit.</div>
-<div><b>D · Production operations</b>Observability, reliability and scale, safe release, and evaluation of live answers.</div>
-</div>
 </div>
 <script>
 // [x, y, w, h, layout, icon, badges, title, detail, extra class]
 const BOX = [
- [30,96,140,172,'col','user',[],'RM','CRM sidebar · chat app'],
- [212,96,240,172,'col','shield',['01','02'],'API gateway + identity','SSO · rate + token limits'],
- [494,96,240,172,'col','filter',['03'],'Input guardrails','Injection checks · PII masking · scope'],
- [776,96,250,172,'col','cache',['04'],'Semantic cache','Public policy Q&amp;A only · TTL · version · off in pilot','off'],
+ [30,96,140,172,'col','user',[],'RM','CRM sidebar or chat'],
+ [212,96,240,172,'col','shield',['01','02'],'API gateway + identity','SSO · RM token passed on · rate + token limits'],
+ [494,96,240,172,'col','filter',['03'],'Input guardrails','Prompt-injection check · PII masking · out-of-scope block'],
+ [776,96,250,172,'col','cache',['04'],'Semantic cache','Public policy Q&amp;A only · TTL · version · never customer data · off in pilot','off'],
  [1096,96,300,172,'col','router',['07'],'Router + orchestrator','Intent · context · workflow<br>Step limits · time budgets','key'],
- [1466,96,270,172,'col','guard',['03'],'Output guardrails','Grounding · numbers · policy · validate before release'],
- [1778,96,192,172,'col','chat',[],'Answer to RM','Citations · safe decline'],
- [300,452,380,110,'row','agent',[],'Brief agent','Customer brief · customer data tools · large model'],
- [720,452,380,110,'row','agent',[],'Policy agent','Policy + product Q&amp;A · policy search only · cited'],
- [1140,452,360,110,'row','agent',[],'Follow-up agent','Follow-up actions · drafts only · RM approves'],
- [300,620,380,110,'row','search',['05'],'Retrieval / RAG','Hybrid search → rerank · retrieval gate'],
- [720,620,380,110,'row','plug',['12'],'Tool gateway (MCP)','Typed tools · RM ∩ agent ∩ workload identity'],
- [1140,620,360,110,'row','chip',['07','08'],'Model gateway','Model per step · token budgets · retries · fallback'],
- [1560,620,410,110,'row','human',['06'],'Human in the loop','RM approves every write · weak evidence to credit desk','hitl'],
- [300,800,380,94,'row','db',[],'Vector + keyword index','Policy and product clauses'],
- [720,800,380,94,'row','bank',[],'Systems of record','CRM · core · lending · trade · cases'],
- [1140,800,360,94,'row','spark',[],'Primary / fallback LLM','In-region'],
- [300,980,380,186,'row','doc',['05'],'Knowledge ingestion','Policy library change events (CDC) → parse → PII scan → chunk by clause → embed · version + effective date'],
- [1560,980,410,186,'row','lock',[],'Secure storage','Keys · write-once audit log · approval signatures'],
- [30,1254,462,96,'row','chart',['10'],'Observability','Traces · p95 latency · tokens · cost · alerts'],
- [522,1254,462,96,'row','gear',['08','09'],'Reliability + scale','Autoscaling · queues · circuit breakers'],
- [1014,1254,462,96,'row','cycle',[],'Release + recovery','Canary · kill switches · rollback'],
- [1506,1254,464,96,'row','check',['11'],'Evaluation','Runtime gates · RAGAS sampling · golden set'],
+ [1466,96,270,172,'col','guard',['03'],'Output guardrails','Grounded in sources · numbers match · policy check · release only if verified'],
+ [1778,96,192,172,'col','chat',[],'Answer to RM','Cited answer, or a safe decline'],
+ [300,452,380,130,'row','agent',[],'Brief agent','Customer brief: purpose, facilities, open requests, complaints, pending items, products'],
+ [720,452,380,130,'row','agent',[],'Policy agent','Policy + product Q&amp;A: eligibility, documents, pricing rules, each with a clause citation'],
+ [1140,452,360,130,'row','agent',[],'Follow-up agent','Notes → CRM note, tasks, email draft · nothing saved until the RM approves'],
+ [300,640,380,130,'row','search',['05'],'Retrieval / RAG','Hybrid search → rerank · retrieval gate: answer only if the best clause clears the threshold'],
+ [720,640,380,130,'row','plug',['12'],'Tool gateway (MCP)','Typed tools · RM ∩ agent ∩ workload identity on every call · each agent sees only its tools'],
+ [1140,640,360,130,'row','chip',['07','08'],'Model gateway','Small or large model per step · token budgets · retries · fallback'],
+ [1560,640,410,130,'row','human',['06'],'Human in the loop','RM approves every write with a signed, 5-minute token · weak evidence goes to the credit desk','hitl'],
+ [300,830,380,100,'row','db',[],'Vector + keyword index','Policy and product clauses · version + effective date'],
+ [720,830,380,100,'row','bank',[],'Systems of record','CRM · core banking · lending · trade · cases · read live'],
+ [1140,830,360,100,'row','spark',[],'Primary / fallback LLM','In-region · degraded mode if both are down'],
+ [300,1024,380,186,'row','doc',['05'],'Knowledge ingestion','Policy library change events (CDC) → parse → PII scan → chunk by clause → embed · version + effective date'],
+ [1560,1024,410,186,'row','lock',[],'Secure storage','Keys · write-once, hash-chained audit log · approval signatures · retention'],
+ [30,1298,462,110,'row','chart',['10'],'Observability','Traces per stage · p95 latency · tokens + cost per request · alerts · no prompt content'],
+ [522,1298,462,110,'row','gear',['08','09'],'Reliability + scale','Autoscaling · queues · circuit breakers · outbox for CRM writes'],
+ [1014,1298,462,110,'row','cycle',[],'Release + recovery','Canary rollout · kill switches · rollback · backups'],
+ [1506,1298,464,110,'row','check',['11'],'Evaluation','Runtime gates · 5% RAGAS scoring · nightly golden set · release gate'],
 ];
 document.getElementById('boxes').innerHTML = BOX.map(([x,y,w,h,l,ic,bd,t,d,cls]) =>
   `<div class="b ${l} ${cls||''} ${bd.length>1?'hb2':bd.length?'hb':''}" style="left:${x}px;top:${y}px;width:${w}px;height:${h}px">` +
@@ -147,14 +138,14 @@ const W = [
  [[[901,96],[901,74],[1600,74],[1600,96]],'c'],
  [[[1246,268],[1246,432]],'c',0,-1], [[[490,432],[1320,432]],'c',0,-1],
  [[[490,432],[490,452]],'c'], [[[910,432],[910,452]],'c'], [[[1320,432],[1320,452]],'c'],
- [[[490,591],[1320,591]],'c',0,-1],
- [[[490,562],[490,620]],'c',0,1], [[[910,562],[910,620]],'c',0,1], [[[1320,562],[1320,620]],'c',0,1],
- [[[490,730],[490,800]],'c',0,1], [[[910,730],[910,800]],'c',0,1], [[[1320,730],[1320,800]],'c',0,1],
- [[[1380,268],[1380,400],[1765,400],[1765,620]],'a'],
- [[[1765,730],[1765,980]],'a'],
- [[[490,980],[490,894]],'v',1],
- [[[680,1036],[700,1036],[700,296],[901,296],[901,268]],'v',1],
- [[[1530,268],[1530,1254]],'v',1],
+ [[[490,611],[1320,611]],'c',0,-1],
+ [[[490,582],[490,640]],'c',0,1], [[[910,582],[910,640]],'c',0,1], [[[1320,582],[1320,640]],'c',0,1],
+ [[[490,770],[490,830]],'c',0,1], [[[910,770],[910,830]],'c',0,1], [[[1320,770],[1320,830]],'c',0,1],
+ [[[1380,268],[1380,400],[1765,400],[1765,640]],'a'],
+ [[[1765,770],[1765,1024]],'a'],
+ [[[490,1024],[490,930]],'v',1],
+ [[[680,1080],[700,1080],[700,296],[901,296],[901,268]],'v',1],
+ [[[1530,268],[1530,1298]],'v',1],
 ];
 const col = {c:'#22D3EE', a:'#F5B82E', v:'#B98DFF'};
 let s = '<defs>' + Object.entries(col).map(([k,v]) => `<marker id="m${k}" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" fill="${v}"/></marker>`).join('') + '</defs>';
