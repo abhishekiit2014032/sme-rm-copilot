@@ -8,8 +8,9 @@ Two things live here, both Python 3.13 standard library only, offline, no keys, 
    HTTP servers, talking to **mocks of every Azure dependency that speak the same REST shape** as the real service.
    The same `rm_copilot` workflow code runs inside the `orchestrator` service through small adapters, so the demo,
    the evals and the stack cannot drift apart. Moving a dependency to real Azure is a configuration change.
-   Since plan v2.6 the orchestrator is a **fixed multi-agent graph** (supervisor + one specialist per request) whose
-   agents call tools only as **MCP servers behind the APIM MCP gateway**, each with **its own Entra identity**, with a
+   Since plan v2.6 the orchestrator is a **fixed multi-agent graph** (an orchestrator node, deterministic code with no
+   model call, plus one specialist per request) whose agents call tools only as **MCP servers behind the APIM MCP
+   gateway**, each with **its own Entra identity**, with a
    **checkpointer** and **session, episodic, procedural and profile memory** (see "Agents" and "Memory" below).
    Since plan v2.7 it has the **four-tier evaluation architecture** (runtime gates, online sampled judge, scheduled
    nightly and drift, release gate) and **runtime operations metrics** on every request (see "Evaluation" below).
@@ -42,7 +43,7 @@ usable at 375 px, served under a strict Content-Security-Policy; model output is
 ```
 browser console ──► web-bff ──► orchestrator ──► APIM (AI gateway) ──► Azure OpenAI primary ─┐ failover only if
    │  (Entra sign-in)   │       (agent graph)│   ├──► Content Safety, AI Language (PII)       └► secondary  ≥ 4 s left
-   │                    │  supervisor ─► one │   ├──► App Configuration (flags, kill switches, transport key, procedural pins)
+   │                    │ orchestrator ─► one│   ├──► App Configuration (flags, kill switches, transport key, procedural pins)
    │                    │  specialist agent  ├──► APIM (MCP gateway) ──► tool-gateway MCP servers: customer-data,
    ▼                    │                    │       agent token + agent OBO      policy-search, crm-drafts, memory
  Entra ID   Key Vault ◄─┘ (sign)             └──► tool-gateway (write API, memory store: checkpoints, session turns)
@@ -75,23 +76,26 @@ the CRM publishes a portfolio or delegation change (`POST /crm-events/v1/portfol
 ## Agents, identities and the MCP gateway (plan §3.7, C24, C25, C28)
 
 The orchestrator runs a **fixed graph** (`services/agents.py` on the small runtime `services/graph.py`; definition
-`GRAPH_SPEC` in `services/common/procedural.py`, version `graph/2.6.0`):
+`GRAPH_SPEC` in `services/common/procedural.py`, version `graph/2.9.0`):
 
 ```
-supervisor ──► brief-agent ────┐
- (intent,   ──► policy-agent ──┼──► verify ──► respond                                (UC1, UC2)
-  budgets)  ──► followup-agent ┘       └──► await_approval ┄ RM approves ┄► commit ──► respond   (UC3)
+orchestrator ──► brief-agent ────┐
+ (intent,     ──► policy-agent ──┼──► verify ──► respond                                (UC1, UC2)
+  budgets)    ──► followup-agent ┘       └──► await_approval ┄ RM approves ┄► commit ──► respond   (UC3)
 ```
 
-| Agent (Entra service principal) | Job | MCP tools (app role) |
+| Node (identity) | Job | MCP tools (app role) |
 |---|---|---|
-| `supervisor` | intent from the entry point (no router call for CRM-launched requests), picks one specialist, budgets, loads session and profile memory | none |
+| `orchestrator` (the orchestrator workload identity; no agent service principal) | deterministic code, no model call: intent from the entry point (no intent classifier model call for CRM-launched requests), picks one specialist, budgets, loads session and profile memory | none (Entra refuses it an MCP token) |
 | `brief-agent` | UC1: runs `Copilot.brief`, recalls this RM's RM-approved episodes | `customer-data/get_brief_inputs` (`Tools.CustomerData.Read`), `customer-data/get_customer_profile` (`Tools.CustomerData.Profile`), `memory/recall_episodes` (`Tools.Memory.Read`) |
 | `policy-agent` | UC2: runs `Copilot.ask` | `policy-search/search_policies` (`Tools.PolicySearch`) |
 | `followup-agent` | UC3: runs `Copilot.draft_followup`, stores the draft | `customer-data/get_customer_profile`, `crm-drafts/create_followup_draft` (`Tools.CrmDrafts.Write`, drafts only) |
 
-* **At most 2 agent hops** per request (supervisor + one specialist), enforced by the runtime (a third agent node is
+* **At most 2 agent hops** per request (orchestrator + one specialist), enforced by the runtime (a third agent node is
   refused with 429 `BUDGET_EXCEEDED` / `AGENT_HOPS`); edges are fixed and chosen by use case, never by model output.
+  The prototype runs one task per request, i.e. a single wave; multi-task waves (independent reads concurrently in
+  wave 1, dependent or write tasks in wave 2, at most 2 waves) are the production design. Agents never call each
+  other; they report back to the orchestrator.
 * `verify`, `commit` and `respond` are **deterministic code**, not agents. The numeric, policy and groundedness checks
   inside the workflows are code too. **Commit is not an agent tool**: it runs only through the approval-verified write
   API with the RM's `Tools.Write` token; an agent can never obtain `Tools.Write`.
@@ -219,7 +223,7 @@ then does not start that mock (`NAME` upper case, `-` as `_`, e.g. `RMC_URL_CONT
 | Service (plan §3.2) | Module (port) | Notes |
 |---|---|---|
 | `web-bff` | `services/web_bff.py` (8712) | token validation, OBO, session + CSRF, Origin check, step-up (`auth_time` ≤ 10 min), deadlines, approval minting via Key Vault, CSP, console, `/api/trace/{request_id}` |
-| `orchestrator` | `services/orchestrator.py` + `agents.py` + `graph.py` + `orchestrator_adapters.py` (8713) | supervisor-led agent graph (≤ 2 hops) running `rm_copilot.Copilot` per specialist with MCP and HTTP adapters; agent identities via the workload's federated credential; checkpoints, interrupt/resume, procedural pins; budgets, degraded mode, feature flags, guardrail floor, audit via tool-gateway with content envelope-encrypted; Tier 1 gates, stage/token/cost metrics, online-eval sampling |
+| `orchestrator` | `services/orchestrator.py` + `agents.py` + `graph.py` + `orchestrator_adapters.py` (8713) | orchestrator-led agent graph (≤ 2 hops: orchestrator + one specialist) running `rm_copilot.Copilot` per specialist with MCP and HTTP adapters; agent identities via the workload's federated credential; checkpoints, interrupt/resume, procedural pins; budgets, degraded mode, feature flags, guardrail floor, audit via tool-gateway with content envelope-encrypted; Tier 1 gates, stage/token/cost metrics, online-eval sampling |
 | `tool-gateway` | `services/tool_gateway.py` (8714) | both tokens, entitlement first (cache ≤ 60 s, delegations, evicted by `crm-portfolio-events`), `writes` kill switch, key-version allow-list, parallel fan-out, minimisation, approval verification (`approval_verifier.py`), saga, sole Event Hubs producer; MCP servers and the intersection rule; memory store (checkpoints, session turns, episodes, per-customer memory keys) |
 | `outbox-worker` | `services/outbox_worker.py` (8715) | Cosmos change feed, read-before-retry, backoff, per-item status |
 | `audit-writer` | `services/audit_writer.py` (8716) | hash chain (`verify_chain`), per-customer content keys in Key Vault, crypto-shred (audit content, checkpoints, episodes), operator APIs |
@@ -268,8 +272,9 @@ APIM policies: `GET|POST /admin/policies` (tokens per minute, daily quota, calls
   are JSON-RPC errors with the HTTP status mirrored. APIM's MCP server support (GA, UAE North) is a [confirm] item;
   here the APIM mock forwards JSON-RPC and filters `tools/list`.
 - **Agent framework**: `services/graph.py` is a small fixed-graph runtime standing in for Microsoft Agent Framework
-  workflows or LangGraph; the supervisor does not call `gen-small` (all entry points carry their intent), so its
-  identity holds no roles and makes no calls.
+  workflows or LangGraph; the orchestrator node does not call `gen-small` (all entry points carry their intent, so no
+  intent classifier model call is needed), and it has no agent identity: it runs as the orchestrator workload, which
+  holds no MCP roles.
 - **Memory**: checkpoints and episodes use the same MOCK cipher as audit content; memory keys are Key Vault secrets
   restricted by name prefix (production: a separate memory key vault, AES-256-GCM); tool-gateway caches memory keys
   for 60 s, so another process can still decrypt for up to that long after an erasure (the documents are deleted at
@@ -355,5 +360,5 @@ APIM policies: `GET|POST /admin/policies` (tokens per minute, daily quota, calls
 | `rm_copilot/ragas.py`, `rm_copilot/gates.py` | Evaluation | RAGAS-style metrics with lexical, embedding and LLM-judge scorers; Tier 1 runtime gates and their App Configuration keys |
 | `evals/` | Evaluation | Golden set (references, unanswerable items, UC1 briefs), Tier 4 release gate (`run_evals.py`), Tier 3 nightly and drift (`scheduled.py`) |
 | `tests/` | Governance | `test_controls.py` (in-process controls), `test_platform_units.py` (crypto, JOSE, canonical hash, filters, telemetry), `test_stack_e2e.py` and `test_stack_writes_resilience.py` (the stack over HTTP), `test_redteam.py` and `test_redteam_followups.py` (attacks on the controls), `test_agents_mcp.py` (agent identities, MCP intersection rule, tool poisoning, hops, procedural pins, agent telemetry), `test_memory.py` (checkpoints, interrupt/resume incl. restart, replay, session budget, episodic recall rules, memory poisoning, erasure), `test_evaluation.py` (metric formulas, Wilson bound, runtime gates in-process and in the stack, thresholds from App Configuration, online eval worker and alerts, nightly and drift reports, release gate, ops summary, feedback, metadata-only metrics) |
-| `services/agents.py`, `services/graph.py` | Agents | Supervisor-led graph with checkpointer, interrupt/resume and replay; specialists reuse `rm_copilot.Copilot` |
+| `services/agents.py`, `services/graph.py` | Agents | Orchestrator-led graph with checkpointer, interrupt/resume and replay; specialists reuse `rm_copilot.Copilot` |
 | `services/common/mcp.py`, `identities.py`, `procedural.py`, `memory.py` | Agents, Security | MCP tool registry and JSON-RPC; agent identities and roles; procedural pins; memory sealing, `memory_safe`, episodes, session budget |

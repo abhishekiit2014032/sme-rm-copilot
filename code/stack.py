@@ -244,7 +244,7 @@ class ConsoleClient:
 def _agents(out: dict) -> str:
     a = out.get("agents") or {}
     tools = ", ".join(f"{t['server']}/{t['tool']}" for t in a.get("tools", [])) or "none"
-    return f"{a.get('supervisor')} -> {a.get('specialist')} ({a.get('hops')} hops{', resumed from checkpoint' if a.get('resumed') else ''}) · tools: {tools}"
+    return f"{a.get('orchestrator')} -> {a.get('specialist')} ({a.get('hops')} hops{', resumed from checkpoint' if a.get('resumed') else ''}) · tools: {tools}"
 
 
 def _evaluation(out: dict) -> str:

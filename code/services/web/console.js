@@ -66,7 +66,7 @@ async function busy(button, fn) {
 // Which agent handled the request and which MCP tools it called (plain text, plan §3.7).
 function agentsBox(a) {
   if (!a) return null;
-  const route = a.hops ? `${a.supervisor} → ${a.specialist} (${a.hops} agent hops)` : `${a.specialist} run resumed from its checkpoint (no agent hop)`;
+  const route = a.hops ? `${a.orchestrator} → ${a.specialist} (${a.hops} agent hops)` : `${a.specialist} run resumed from its checkpoint (no agent hop)`;
   const tools = (a.tools || []).map((t) => `${t.server}/${t.tool} (${t.agent}, ${t.decision})`);
   return el("div", { class: "agents" }, el("p", { class: "muted", text: `Handled by: ${route} · graph ${a.graph}` }),
     el("p", { class: "muted", text: "Tools called through the MCP gateway: " + (tools.length ? tools.join(", ") : "none") }));

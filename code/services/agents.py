@@ -1,12 +1,13 @@
 """The orchestrator's multi-agent graph (plan §3.7, §3.8; C24 to C29).
 
-    supervisor ──► brief-agent ────┐
-     (intent,  ──► policy-agent ───┼──► verify ──► respond                       (UC1, UC2)
-      budgets) ──► followup-agent ─┘      └──► await_approval ┄┄ RM approves ┄┄► commit ──► respond   (UC3)
+    orchestrator ──► brief-agent ────┐
+     (intent,    ──► policy-agent ───┼──► verify ──► respond                       (UC1, UC2)
+      budgets)   ──► followup-agent ─┘      └──► await_approval ┄┄ RM approves ┄┄► commit ──► respond   (UC3)
 
-* `supervisor` (agent, no tools): takes the intent of the entry point (fixed workflows: no router call when the RM
-  starts from a CRM record, plan §4.1 step 3), picks exactly one specialist, sets the budgets, loads session and
-  profile memory.
+* `orchestrator` (deterministic code, no model call, no data tools; runs under the orchestrator workload identity):
+  takes the intent of the entry point (fixed workflows: no intent classifier model call when the RM starts from a CRM
+  record, plan §4.1 step 3), picks exactly one specialist from the fixed graph, sets the budgets, loads session and
+  profile memory. The prototype runs one task per request (a single wave: orchestrator + one specialist).
 * specialists (agents): run the unchanged `rm_copilot.Copilot` workflows (UC1 brief, UC2 policy answer, UC3 drafts),
   each with its own `McpTools`, i.e. its own Entra identity on the MCP gateway; the brief-agent also recalls this RM's
   RM-approved episodes with the customer; the follow-up agent stores its draft through `crm-drafts`.
@@ -211,12 +212,12 @@ class AgentGraph:
         self.rest = HttpTools(svc)  # the write API for the commit node: not an agent tool
         self.memory = MemoryStore(svc)
         self.procedural = ProceduralGuard(svc, self.spec)
-        handlers = {"supervisor": self.supervisor, "brief-agent": self.brief_agent, "policy-agent": self.policy_agent,
+        handlers = {"orchestrator": self.orchestrator, "brief-agent": self.brief_agent, "policy-agent": self.policy_agent,
                     "followup-agent": self.followup_agent, "verify": verify, "await_approval": self.await_approval, "commit": self.commit,
                     "respond": self.respond}
         self.runtime = GraphRuntime(self.spec, handlers, self.memory, svc.telemetry)
         m = svc.metrics
-        self.m_hops = m.histogram("agent_hops", "Agent nodes run per request (max 2: supervisor + one specialist)", ("use_case",), buckets=(0, 1, 2, 3))
+        self.m_hops = m.histogram("agent_hops", "Agent nodes run per request (max 2: orchestrator + one specialist)", ("use_case",), buckets=(0, 1, 2, 3))
         self.m_resumes = m.counter("checkpoint_resumes_total", "Runs resumed from a checkpoint (UC3 approval)", ())
 
     # ------------------------------------------------------------------ entry points
@@ -266,11 +267,12 @@ class AgentGraph:
         return final["response"]
 
     # ------------------------------------------------------------------ nodes
-    def supervisor(self, state: dict, ctx: RunContext) -> dict:
+    def orchestrator(self, state: dict, ctx: RunContext) -> dict:
+        """Deterministic: no model call. The intent is the entry point's use case; the specialist is the fixed edge."""
         session = self.memory.session(ctx.thread_id)
         b = request_context().data.get("budget")
         left = time_left()
-        return {"intent": state["use_case"], "specialist": self.runtime.next_node("supervisor", state),
+        return {"intent": state["use_case"], "specialist": self.runtime.next_node("orchestrator", state),
                 "context": {"profile": ctx.inputs["profile"], "session": {"turns": session.get("turns", 0), "tokens": session.get("tokens", 0)}},
                 "budget": {"max_tool_steps": getattr(b, "max_tool_steps", 6), "max_input_tokens": getattr(b, "max_input_tokens", 12000),
                            "max_output_tokens": getattr(b, "max_output_tokens", 1500), "max_agent_hops": self.spec["max_agent_hops"],
@@ -319,7 +321,7 @@ class AgentGraph:
         use_case = use_case or state["use_case"]
         calls = list(request_context().data.get("tool_calls", []))
         result["run_id"] = ctx.run_id
-        result["agents"] = {"graph": self.spec["version"], "supervisor": "supervisor", "specialist": state.get("specialist"), "hops": ctx.hops,
+        result["agents"] = {"graph": self.spec["version"], "orchestrator": "orchestrator", "specialist": state.get("specialist"), "hops": ctx.hops,
                             "tools": calls, "resumed": ctx.resumed, "path": [*state.get("path", []), "respond" if use_case != "uc3" else "await_approval"],
                             "verification": state.get("verification")}
         outcome = result.get("status") or result.get("mode") or "ok"

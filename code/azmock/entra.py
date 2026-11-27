@@ -11,9 +11,10 @@ Imitates:
                                                            the token keeps the RM `oid` and names the agent in `act`
        password                                            RM sign-in for the offline console only (see below)
 
-Agent identities (plan §3.7, C24; `services/common/identities.py`): `supervisor`, `brief-agent`, `policy-agent`,
-`followup-agent` are service principals with app roles per MCP tool on `api://rm-copilot-mcp` and NO client secret.
-Each has one federated identity credential: issuer = the AKS OIDC issuer, subject =
+Agent identities (plan §3.7, C24; `services/common/identities.py`): `brief-agent`, `policy-agent`, `followup-agent`
+are service principals with app roles per MCP tool on `api://rm-copilot-mcp` and NO client secret. The orchestrator
+(deterministic code, no model call) has no agent identity: it runs as the `orchestrator` workload, which holds no MCP
+role and is refused a token for the MCP gateway. Each agent has one federated identity credential: issuer = the AKS OIDC issuer, subject =
 `system:serviceaccount:rm-copilot:orchestrator`, audience `api://AzureADTokenExchange`. Only the orchestrator workload
 can obtain such an assertion (client credentials for `api://AzureADTokenExchange`, standing in for the projected
 service-account token AKS mounts into the pod), so agent tokens cannot be minted outside the orchestrator pod.

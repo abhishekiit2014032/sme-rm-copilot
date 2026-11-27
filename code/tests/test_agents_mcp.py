@@ -3,7 +3,7 @@
 Covers: agent identities without secrets (federated credential from the orchestrator workload only), the agent OBO
 token (`act`), the intersection rule at tool-gateway (RM entitled AND agent role AND registered workload AND clearance
 AND pinned schema), `tools/list` filtering per agent, tool poisoning (description hash mismatch), registered servers
-and gateway-only access, per-RM MCP limits, the supervisor-led graph with at most 2 agent hops, commit not being an
+and gateway-only access, per-RM MCP limits, the orchestrator-led graph with at most 2 agent hops, commit not being an
 agent tool, procedural pins (graph, prompts), and agent/MCP telemetry and metrics without customer data.
 """
 from __future__ import annotations
@@ -130,9 +130,14 @@ class Intersection(Base):
     def test_entitled_rm_with_an_agent_lacking_the_role_is_denied(self):
         self.stack.components["tool-gateway"].entitlements(user_oid(LAYLA))
         before = self.sor_calls()
-        for agent in ("policy-agent", "followup-agent", "supervisor"):  # followup-agent holds the profile role only
+        for agent in ("policy-agent", "followup-agent"):  # followup-agent holds the profile role only
             r = call_tool(self.stack, LAYLA, agent, "customer-data", "get_brief_inputs", {"customer_id": "harbourline"})
             self.assertEqual((r.status, self.code(r)), (403, "AGENT_NOT_AUTHORIZED"), agent)
+        # the orchestrator holds no data tools: it is not an agent identity, and its workload gets no MCP token
+        with self.assertRaises(HttpError):
+            agent_tokens(self.stack, LAYLA, "orchestrator")
+        with self.assertRaises(HttpError):
+            Workload(self.stack, "orchestrator").app_token("mcp")
         self.assertEqual(self.sor_calls(), before)
         r = call_tool(self.stack, LAYLA, "followup-agent", "customer-data", "get_customer_profile", {"customer_id": "harbourline"})
         self.assertEqual(r.status, 200)
@@ -183,8 +188,7 @@ class Intersection(Base):
     def test_tools_list_is_filtered_per_agent(self):
         expected = {("brief-agent", "customer-data"): ["get_brief_inputs", "get_customer_profile"], ("brief-agent", "memory"): ["recall_episodes"],
                     ("followup-agent", "customer-data"): ["get_customer_profile"], ("followup-agent", "crm-drafts"): ["create_followup_draft"],
-                    ("followup-agent", "memory"): [], ("policy-agent", "crm-drafts"): [], ("supervisor", "customer-data"): [],
-                    ("supervisor", "policy-search"): []}
+                    ("followup-agent", "memory"): [], ("policy-agent", "crm-drafts"): []}
         pinned = pins()["tools"]
         for (agent, server), names in expected.items():
             tools = mcp(self.stack, server, "tools/list", {}, agent_tokens(self.stack, LAYLA, agent)).json()["result"]["tools"]
@@ -244,7 +248,7 @@ class Intersection(Base):
 
 # ---------------------------------------------------------------------------------------------------- orchestration (C28)
 class Orchestration(Base):
-    def test_supervisor_hands_off_to_exactly_one_specialist(self):
+    def test_orchestrator_hands_off_to_exactly_one_specialist(self):
         c = client(self.stack)
         cases = {"brief-agent": c.brief("harbourline"), "policy-agent": c.ask("When does high utilisation trigger a review?"),
                  "followup-agent": c.draft("harbourline", "I promised to send the limit increase checklist by Friday.")}
@@ -252,10 +256,10 @@ class Orchestration(Base):
                  "followup-agent": {"customer-data/get_customer_profile", "crm-drafts/create_followup_draft"}}
         for specialist, out in cases.items():
             a = out["agents"]
-            self.assertEqual((a["supervisor"], a["specialist"], a["hops"]), ("supervisor", specialist, 2))
+            self.assertEqual((a["orchestrator"], a["specialist"], a["hops"]), ("orchestrator", specialist, 2))
             self.assertEqual({f"{t['server']}/{t['tool']}" for t in a["tools"]}, tools[specialist])
             self.assertTrue(all(t["agent"] == specialist and t["decision"] == "allow" for t in a["tools"]))
-            self.assertEqual(a["path"][:3], ["supervisor", specialist, "verify"])
+            self.assertEqual(a["path"][:3], ["orchestrator", specialist, "verify"])
             self.assertTrue(a["verification"]["passed"])
 
     def test_at_most_two_agent_hops(self):
@@ -274,7 +278,7 @@ class Orchestration(Base):
         with self.assertRaises(HttpError) as e:
             rt.run({"use_case": "uc1", "path": []}, RunContext(run_id="r" * 22, thread_id="t", user=None))
         self.assertEqual((e.exception.status, e.exception.code, e.exception.details["reason"]), (429, "BUDGET_EXCEEDED", "AGENT_HOPS"))
-        self.assertEqual(called, ["supervisor", "brief-agent"])  # the third agent never ran
+        self.assertEqual(called, ["orchestrator", "brief-agent"])  # the third agent never ran
         self.assertEqual([c["status"] for c in cp.saved], ["running", "running", "failed"])
         # the real graph: 2 hops, and the same spec cannot be swapped in at run time (procedural pin, below)
         ok = GraphRuntime(GRAPH_SPEC, {n: node(n) for n in GRAPH_SPEC["nodes"]}, NullCheckpointer())
@@ -331,7 +335,7 @@ class AgentTelemetry(Base):
         self.stack.components["audit-writer"].flush()
         spans = c.trace(b["request_id"])["spans"]
         nodes = [s["attributes"].get("rmc.node") for s in spans if s["name"].startswith("graph.node")]
-        self.assertEqual(nodes, ["supervisor", "brief-agent", "verify", "respond"])
+        self.assertEqual(nodes, ["orchestrator", "brief-agent", "verify", "respond"])
         mcp_spans = [s for s in spans if s["name"].startswith("mcp tools/call")]
         self.assertEqual({(s["attributes"]["rmc.agent"], s["attributes"]["rmc.tool"]) for s in mcp_spans},
                          {("brief-agent", "get_brief_inputs"), ("brief-agent", "recall_episodes")})

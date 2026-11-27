@@ -1,7 +1,9 @@
 """orchestrator: UC1/UC2/UC3 as a fixed multi-agent graph (plan §3.2, §3.7, §3.8, §4).
 
-A supervisor agent hands off once to a specialist (brief-agent, policy-agent, followup-agent; at most 2 agent hops),
-each calling tools only through the APIM MCP gateway with its own Entra agent identity (`services/agents.py`). The
+The orchestrator node is deterministic code with no model call: it takes the intent from the entry point (fixed
+workflows) and hands one task to one specialist (brief-agent, policy-agent, followup-agent), so the prototype runs a
+single wave per request (orchestrator + one specialist, at most 2 agent hops). Specialists never call each other and
+call tools only through the APIM MCP gateway, each with its own Entra agent identity (`services/agents.py`). The
 specialists run the same `rm_copilot.Copilot` workflows as the in-process demo and evals, with HTTP adapters
 (`orchestrator_adapters.py`) for the model (APIM AI gateway), the tools (MCP) and the safety services (Content
 Safety, AI Language). Verification and commit are deterministic code. A checkpoint is written after every node; UC3

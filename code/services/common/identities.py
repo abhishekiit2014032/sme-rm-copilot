@@ -18,22 +18,24 @@ service account [confirm]. The `xms_fic_*` claim names are this mock's; real tok
 """
 from __future__ import annotations
 
-AGENTS = ("supervisor", "brief-agent", "policy-agent", "followup-agent")
+# The specialist agents. The orchestrator node of the graph is deterministic code with no model call; it runs under the
+# orchestrator workload identity below (no agent service principal of its own, no data tools), and the intent
+# classifier inside the orchestrator service uses that same identity for the model gateway.
+AGENTS = ("brief-agent", "policy-agent", "followup-agent")
 ORCHESTRATOR_SUBJECT = "system:serviceaccount:rm-copilot:orchestrator"
 WORKLOAD_SUBJECTS = {"orchestrator": ORCHESTRATOR_SUBJECT}      # workloads that may obtain a federation assertion
 AGENT_WORKLOAD = {a: ORCHESTRATOR_SUBJECT for a in AGENTS}      # federated identity credential registered on each agent
 JWT_BEARER_ASSERTION = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 
-# App roles per tool (tool-gateway MCP servers). The supervisor holds none: it has no data tools.
+# App roles per tool (tool-gateway MCP servers). The orchestrator holds none: it is not an agent identity and has no data
+# tools (Entra refuses it a token for the MCP gateway).
 AGENT_ROLES: dict[str, tuple[str, ...]] = {
-    "supervisor": (),
     "brief-agent": ("Tools.CustomerData.Read", "Tools.CustomerData.Profile", "Tools.Memory.Read"),
     "policy-agent": ("Tools.PolicySearch",),
     "followup-agent": ("Tools.CustomerData.Profile", "Tools.CrmDrafts.Write"),
 }
 # MCP servers each agent's client is configured to connect to (client-side allow-list; the server decides by role).
 AGENT_SERVERS: dict[str, tuple[str, ...]] = {
-    "supervisor": (),
     "brief-agent": ("customer-data", "memory"),
     "policy-agent": ("policy-search",),
     "followup-agent": ("customer-data", "crm-drafts"),

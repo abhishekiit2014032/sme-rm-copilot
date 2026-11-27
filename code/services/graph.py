@@ -3,11 +3,13 @@
 Stand-in for a graph framework such as Microsoft Agent Framework workflows or LangGraph: nodes, fixed edges, state,
 a checkpoint after every node, interrupts for human approval and resume from a checkpoint.
 
-* Nodes are `agent` (runs under its own agent identity), `code` (deterministic: verification, commit, assembly) or
-  `interrupt` (pauses the run: the state is checkpointed as `interrupted` and the run returns).
+* Nodes are `agent` (a specialist runs under its own agent identity; the `orchestrator` node is deterministic code
+  with no model call, under the orchestrator workload identity, and is counted as an agent hop), `code`
+  (deterministic: verification, commit, assembly) or `interrupt` (pauses the run: the state is checkpointed as
+  `interrupted` and the run returns).
 * Edges are fixed in the graph definition. A dict edge is selected by the request's use case, never by model output,
   so an agent cannot hand off to another agent of its choosing.
-* At most `max_agent_hops` agent nodes run per request (supervisor + one specialist = 2); a third is refused with
+* At most `max_agent_hops` agent nodes run per request (orchestrator + one specialist = 2); a third is refused with
   429 `BUDGET_EXCEEDED` / `AGENT_HOPS`, whatever the graph says.
 * `replay` re-executes the deterministic nodes from the checkpoint before them and checks that the stored state is
   reproduced exactly (debugging; operators fetch the checkpoints with a PIM-gated role).

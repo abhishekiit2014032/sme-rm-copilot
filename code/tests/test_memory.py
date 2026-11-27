@@ -62,7 +62,7 @@ class Checkpointer(Base):
         self.assertEqual(d["agents"]["path"][-1], "await_approval")
         self.assertEqual(self.crm_writes(), before)  # paused: nothing written before the RM approves
         cps = checkpoints(self.stack, d["run_id"])
-        self.assertEqual([x["node"] for x in cps], ["supervisor", "followup-agent", "verify", "await_approval"])
+        self.assertEqual([x["node"] for x in cps], ["orchestrator", "followup-agent", "verify", "await_approval"])
         self.assertEqual([x["status"] for x in cps], ["running", "running", "running", "interrupted"])
         self.assertTrue(all(x["integrity"] == "ok" for x in cps))
         raw = {doc["step"]: doc for doc in memory_docs(self.stack, "checkpoints") if doc["run_id"] == d["run_id"]}
@@ -101,7 +101,7 @@ class Checkpointer(Base):
         b = c.brief("harbourline")
         first, second = checkpoints(self.stack, b["run_id"]), checkpoints(self.stack, b["run_id"])
         self.assertEqual(first, second)
-        self.assertEqual([x["node"] for x in first], ["supervisor", "brief-agent", "verify", "respond"])
+        self.assertEqual([x["node"] for x in first], ["orchestrator", "brief-agent", "verify", "respond"])
         self.assertTrue(all(x["integrity"] == "ok" and x["graph_version"] == GRAPH_SPEC["version"] for x in first))
         self.assertEqual(first[-1]["state"]["response"], memory_safe(self.public(b)))  # the final state is the reply
         replay = self.stack.components["orchestrator"].agents.runtime.replay(first)

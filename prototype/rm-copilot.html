@@ -451,7 +451,7 @@ footer.disclaimer { font-size: 13px; color: var(--muted); max-width: 90ch; }
       ['pii', 'az', 'AI Language', 'PII masking', 'Azure AI Language (PII detection): masks personal data before any model call, plus regex for Emirates ID, IBAN and trade licence.', [450, 402, 160], [172, 370, 132]],
       ['speech', 'az', 'AI Speech', 'Phase 2 · voice', 'Azure AI Speech (Phase 2): turns UC3 voice memos into text; audio is deleted after transcription.', [450, 456, 160], [172, 420, 132]],
       ['genl', 'az', 'gen-large', 'Azure OpenAI', 'gen-large (Azure OpenAI in Azure AI Foundry): writes brief wording with {placeholders} and cited policy answers; Regional deployment in UAE North, store=false.', [650, 294, 140], [172, 524, 132]],
-      ['gens', 'az', 'gen-small', 'Azure OpenAI', 'gen-small (Azure OpenAI in Azure AI Foundry): fast, low-cost intent routing, query rewrite and JSON extraction.', [650, 348, 140], [172, 574, 132]],
+      ['gens', 'az', 'gen-small', 'Azure OpenAI', 'gen-small (Azure OpenAI in Azure AI Foundry): fast, low-cost intent classification, query rewrite and JSON extraction.', [650, 348, 140], [172, 574, 132]],
       ['toolgw', 'aks', 'tool-gateway', 'entitlement first', 'tool-gateway (AKS): the security boundary. Entitlement check first, field minimisation and masking, policy search, and the only write API; verifies approval tokens with the public key only.', [250, 522, 160], [12, 632, 136]],
       ['facade', 'az', 'API facade', ['APIM · system APIs', 'APIM system APIs'], 'API Management system API facade: one front for the Bank’s systems over ExpressRoute, with per-backend timeouts, circuit breakers and quotas.', [450, 522, 160], [172, 632, 132]],
       ['crm', 'sor', 'CRM', 'profile · writes', 'CRM: profile, contacts and portfolio assignments; call reports and tasks are written only after a verified approval.', [650, 418, 140], [172, 686, 132]],
@@ -723,7 +723,7 @@ footer.disclaimer { font-size: 13px; color: var(--muted); max-width: 90ch; }
     prepOut.innerHTML = '<div class="empty">Preparing brief…</div>';
     await inputGuard(text);
     const id = findCustomer(text);
-    await step('model · small', 'Intent router', id ? 'ok' : 'flag', id ? `intent = customer_brief\nentity = "${CUSTOMERS[id].name}"` : 'intent = customer_brief\nentity = not found in CRM', ms(180, 320));
+    await step('model · small', 'Intent classifier', id ? 'ok' : 'flag', id ? `intent = customer_brief\nentity = "${CUSTOMERS[id].name}"` : 'intent = customer_brief\nentity = not found in CRM', ms(180, 320));
     if (!id) {
       prepOut.innerHTML = `<div class="card decline"><h3>I couldn’t find that customer</h3><p class="sub">Try the registered name, for example “Harbourline Logistics”. I only search customers in CRM.</p></div>`;
       audit(); return;
@@ -816,7 +816,7 @@ footer.disclaimer { font-size: 13px; color: var(--muted); max-width: 90ch; }
     Arch.begin('UC2', 'Policy question', q);
     askOut.innerHTML = '<div class="empty">Searching approved documents…</div>';
     await inputGuard(q);
-    await step('model · small', 'Intent router', 'ok', 'intent = policy_question · language = en', ms(150, 260));
+    await step('model · small', 'Intent classifier', 'ok', 'intent = policy_question · language = en', ms(150, 260));
     const qt = tok(q);
     await step('retrieval', 'Query rewrite', 'ok', `terms: ${qt.join(', ') || '(none)'}`, ms(120, 220));
 

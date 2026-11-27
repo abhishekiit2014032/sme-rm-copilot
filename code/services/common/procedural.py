@@ -27,16 +27,19 @@ PROMPTS = {  # name -> (version, text)
     "query_rewrite": ("query-rewrite/2", QUERY_REWRITE_SYSTEM),
 }
 
-# The fixed multi-agent graph (plan §3.7, C28). Agent nodes run under their own Entra identity; `code` nodes are
-# deterministic (verification and commit are code, not agents); `interrupt` pauses the run for the RM's approval.
-# Edges are fixed: a dict edge is chosen by the request's use case, never by model output.
+# The fixed multi-agent graph (plan §3.7, C28). The `orchestrator` node is deterministic code with no model call (the
+# intent comes from the entry point); it runs under the orchestrator workload identity, holds no data tools and is
+# counted as the first agent hop, so the hop limit reads "orchestrator + one specialist". Specialist agent nodes run
+# under their own Entra identity; `code` nodes are deterministic (verification and commit are code, not agents);
+# `interrupt` pauses the run for the RM's approval. Edges are fixed: a dict edge is chosen by the request's use case,
+# never by model output.
 GRAPH_SPEC = {
     "id": "rm-copilot",
-    "version": "graph/2.6.0",
-    "entry": "supervisor",
+    "version": "graph/2.9.0",
+    "entry": "orchestrator",
     "max_agent_hops": 2,
     "nodes": {
-        "supervisor": {"kind": "agent", "agent": "supervisor"},
+        "orchestrator": {"kind": "agent", "agent": "orchestrator"},
         "brief-agent": {"kind": "agent", "agent": "brief-agent"},
         "policy-agent": {"kind": "agent", "agent": "policy-agent"},
         "followup-agent": {"kind": "agent", "agent": "followup-agent"},
@@ -46,7 +49,7 @@ GRAPH_SPEC = {
         "respond": {"kind": "code"},
     },
     "edges": {
-        "supervisor": {"uc1": "brief-agent", "uc2": "policy-agent", "uc3": "followup-agent"},
+        "orchestrator": {"uc1": "brief-agent", "uc2": "policy-agent", "uc3": "followup-agent"},
         "brief-agent": "verify",
         "policy-agent": "verify",
         "followup-agent": "verify",
