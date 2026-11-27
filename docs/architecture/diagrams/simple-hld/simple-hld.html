@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Simple HLD</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap">
+<style>
+/* SME RM Copilot, simple four-lane HLD (cloud-agnostic, fictional bank). One node for intent router + orchestrator. */
+:root { --bg:#08111F; --lane:#0E1C31; --laneline:#23426A; --box:#10243C; --boxline:#3A6896; --ink:#EEF3F5; --muted:#A9BACB; --cyan:#22D3EE; --amber:#F5B82E; --violet:#B98DFF; }
+* { box-sizing:border-box; margin:0; }
+body { background:var(--bg); font-family:Inter, Arial, sans-serif; color:var(--ink); }
+#c { position:relative; width:2000px; height:1500px; background:var(--bg); }
+.lane { position:absolute; left:14px; width:1972px; border:1.5px solid var(--laneline); border-radius:14px; background:var(--lane); }
+.lh { position:absolute; display:flex; align-items:center; gap:12px; font:800 24px/1 Inter; letter-spacing:1.5px; }
+.lh span { width:38px; height:38px; border-radius:50%; background:#2563EB; color:#fff; font:800 20px/38px Inter; text-align:center; }
+.b { position:absolute; background:var(--box); border:1.5px solid var(--boxline); border-radius:12px; padding:14px 18px; }
+.b .t { font:700 23px/1.15 Inter; margin-bottom:6px; }
+.b .d { font:400 17px/1.4 Inter; color:var(--muted); }
+.b.key { border:2px solid var(--cyan); box-shadow:0 0 0 4px rgba(34,211,238,.12); }
+.b.off { border-style:dashed; opacity:.85; }
+.b.off .t::after { content:"OFF"; margin-left:10px; font:700 13px/1 Inter; padding:3px 6px; border-radius:4px; background:#3A4B5E; color:#CFD8E3; vertical-align:3px; }
+.b.hitl { border-color:var(--amber); }
+.lbl { position:absolute; font:700 16px/1.2 Inter; white-space:nowrap; }
+.lbl.c { color:var(--cyan); } .lbl.a { color:var(--amber); } .lbl.v { color:var(--violet); }
+.pill { position:absolute; font:700 15px/1 Inter; color:var(--amber); border:1.5px solid var(--amber); border-radius:6px; padding:6px 10px; background:#1B1A10; white-space:nowrap; }
+svg { position:absolute; left:0; top:0; pointer-events:none; }
+.legend { position:absolute; left:30px; top:1300px; width:1940px; border-top:1.5px solid var(--laneline); padding-top:14px; display:flex; gap:44px; font-size:18px; color:var(--muted); align-items:center; }
+.legend i { display:inline-block; width:56px; height:0; border-top:3px solid; margin-right:10px; vertical-align:middle; }
+.caps { position:absolute; left:30px; top:1360px; width:1940px; display:grid; grid-template-columns:repeat(4,1fr); gap:28px; }
+.caps div { border-top:3px solid #22A06B; padding-top:10px; font-size:17px; line-height:1.45; color:var(--muted); }
+.caps b { display:block; color:var(--ink); font-size:20px; margin-bottom:4px; }
+</style></head><body><div id="c">
+
+<div class="lane" style="top:14px;height:356px"></div><div class="lh" style="left:34px;top:30px"><span>A</span>ONLINE REQUEST PATH</div>
+<div class="lane" style="top:384px;height:522px"></div><div class="lh" style="left:34px;top:400px"><span>B</span>CONTROLLED EXECUTION</div>
+<div class="lane" style="top:920px;height:176px"></div><div class="lh" style="left:34px;top:936px"><span>C</span>STATE + DATA FRESHNESS</div>
+<div class="lane" style="top:1110px;height:170px"></div><div class="lh" style="left:34px;top:1126px"><span>D</span>PRODUCTION OPERATIONS</div>
+
+<!-- lane A -->
+<div class="b" style="left:30px;top:96px;width:160px;height:150px"><div class="t">RM</div><div class="d">CRM sidebar · chat app</div></div>
+<div class="b" style="left:266px;top:96px;width:270px;height:150px"><div class="t">API gateway + identity</div><div class="d">SSO · user token passed on · rate and token limits</div></div>
+<div class="b" style="left:612px;top:96px;width:270px;height:150px"><div class="t">Input guardrails</div><div class="d">injection checks · PII masking · scope check</div></div>
+<div class="b key" style="left:958px;top:96px;width:340px;height:150px"><div class="t">Intent router + orchestrator</div><div class="d">intent → tasks (rules, small model) · waves · step, token and time budgets · approval pause</div></div>
+<div class="b" style="left:1374px;top:96px;width:300px;height:150px"><div class="t">Output guardrails</div><div class="d">grounding · numbers · policy · PII · verify before release</div></div>
+<div class="b" style="left:1750px;top:96px;width:220px;height:150px"><div class="t">Answer to RM</div><div class="d">citations · safe decline</div></div>
+<div class="b off" style="left:612px;top:272px;width:300px;height:82px"><div class="t" style="font-size:20px">Semantic cache</div><div class="d" style="font-size:15.5px">public policy only · Phase 2</div></div>
+<div class="lbl c" style="left:1306px;top:112px">draft<br>answer</div>
+
+<!-- lane B -->
+<div class="b" style="left:300px;top:458px;width:1200px;height:102px"><div class="t">Specialist agents</div><div class="d">Brief agent · Policy agent · Follow-up agent: each reasons with its own tools and model tier, reports back to the orchestrator, never calls another agent</div></div>
+<div class="b" style="left:300px;top:620px;width:380px;height:110px"><div class="t">Retrieval / RAG</div><div class="d">hybrid search → rerank · retrieval gate before generation</div></div>
+<div class="b" style="left:720px;top:620px;width:380px;height:110px"><div class="t">Tool gateway (MCP)</div><div class="d">typed tools · RM ∩ agent ∩ workload identity</div></div>
+<div class="b" style="left:1140px;top:620px;width:360px;height:110px"><div class="t">Model gateway</div><div class="d">model per step · token budgets · retries · fallback</div></div>
+<div class="b hitl" style="left:1560px;top:620px;width:410px;height:110px"><div class="t">Human in the loop</div><div class="d">RM approves every write · weak evidence to credit desk</div></div>
+<div class="b" style="left:300px;top:800px;width:380px;height:84px"><div class="t">Vector + keyword index</div><div class="d">policy and product clauses</div></div>
+<div class="b" style="left:720px;top:800px;width:380px;height:84px"><div class="t">Systems of record</div><div class="d">CRM · core · lending · trade · cases</div></div>
+<div class="b" style="left:1140px;top:800px;width:360px;height:84px"><div class="t">Primary LLM / fallback LLM</div><div class="d">in-region</div></div>
+<div class="pill" style="left:924px;top:752px">Writes need RM approval</div>
+
+<!-- lane C -->
+<div class="b" style="left:300px;top:986px;width:380px;height:94px"><div class="t">Knowledge ingestion</div><div class="d">parse → PII scan → chunk → embed</div></div>
+<div class="b" style="left:720px;top:986px;width:780px;height:94px"><div class="t">Session + memory store</div><div class="d">checkpointer (pause, resume) · session · approved history · versioned prompts</div></div>
+<div class="b" style="left:1560px;top:986px;width:410px;height:94px"><div class="t">Secure storage</div><div class="d">keys · write-once audit log</div></div>
+
+<!-- lane D -->
+<div class="b" style="left:30px;top:1170px;width:462px;height:96px"><div class="t">Observability</div><div class="d">traces · p95 latency · tokens · cost · alerts</div></div>
+<div class="b" style="left:522px;top:1170px;width:462px;height:96px"><div class="t">Reliability + scale</div><div class="d">autoscaling · queues · circuit breakers</div></div>
+<div class="b" style="left:1014px;top:1170px;width:462px;height:96px"><div class="t">Release + recovery</div><div class="d">canary · kill switches · rollback</div></div>
+<div class="b" style="left:1506px;top:1170px;width:464px;height:96px"><div class="t">Evaluation</div><div class="d">runtime gates · RAGAS sampling · golden set</div></div>
+
+<div class="lbl c" style="left:884px;top:412px">tasks in waves · results back</div>
+<div class="lbl a" style="left:1580px;top:440px">APPROVE / ESCALATE</div>
+<div class="lbl a" style="left:1780px;top:880px">sign + audit</div>
+<div class="lbl v" style="left:500px;top:928px">publish: re-embed</div>
+<div class="lbl v" style="left:1300px;top:1125px">5% sampled answers</div>
+
+<svg width="2000" height="1500" viewBox="0 0 2000 1500" id="w"></svg>
+
+<div class="legend"><span><i style="border-color:var(--cyan)"></i>Request / response</span><span><i style="border-color:var(--amber)"></i>Human approval</span><span><i style="border-color:var(--violet);border-top-style:dashed"></i>State / ingestion</span><span style="margin-left:auto">Fictional bank · cloud-agnostic view</span></div>
+<div class="caps">
+<div><b>A · Online request path</b>Gateway, input guardrails, intent router + orchestrator, output guardrails. Every request flows through it.</div>
+<div><b>B · Controlled execution</b>Specialist agents reach data only through retrieval, the tool gateway and the model gateway; the RM approves every write.</div>
+<div><b>C · State + data freshness</b>Policy ingestion into the index, session and memory for pause and resume, keys and the audit log.</div>
+<div><b>D · Production operations</b>Observability, reliability and scale, safe release, and evaluation of live answers.</div>
+</div>
+</div>
+<script>
+const W = [
+ // [points, colour, dashed, both-ends]
+ [[[190,171],[266,171]],'c'], [[[536,171],[612,171]],'c'], [[[882,171],[958,171]],'c'],
+ [[[1298,171],[1374,171]],'c'], [[[1674,171],[1750,171]],'c'],
+ [[[1000,246],[1000,313],[912,313]],'c',1,1],                       // router <-> cache
+ [[[1130,246],[1130,458]],'c',0,1],                                 // router <-> agents
+ [[[490,560],[490,620]],'c',0,1], [[[910,560],[910,620]],'c',0,1], [[[1320,560],[1320,620]],'c',0,1],
+ [[[490,730],[490,800]],'c',0,1], [[[910,730],[910,800]],'c',0,1], [[[1320,730],[1320,800]],'c',0,1],
+ [[[1260,246],[1260,432],[1765,432],[1765,620]],'a'],               // orchestrator -> human in the loop
+ [[[1765,730],[1765,986]],'a'],                                     // sign + audit
+ [[[490,986],[490,884]],'v',1],                                     // ingestion -> index
+ [[[1530,246],[1530,1170]],'v',1],                                  // output -> evaluation (sampled)
+];
+const col = {c:'#22D3EE', a:'#F5B82E', v:'#B98DFF'};
+let s = '<defs>' + Object.entries(col).map(([k,v]) => `<marker id="m${k}" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" fill="${v}"/></marker>`).join('') + '</defs>';
+for (const [p,k,d,b] of W) s += `<polyline points="${p.map(q=>q.join(',')).join(' ')}" fill="none" stroke="${col[k]}" stroke-width="3" ${d?'stroke-dasharray="9 7"':''} marker-end="url(#m${k})" ${b?`marker-start="url(#m${k})"`:''}/>`;
+document.getElementById('w').innerHTML = s;
+</script></body></html>
