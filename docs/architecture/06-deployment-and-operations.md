@@ -563,7 +563,7 @@ Each runbook is stored in the operations wiki with exact commands and links; bel
 - **Trigger:** an agent identity is suspected compromised or over-privileged (access review finding, FM-77), agent token
   issuance failing (FM-70), or Sentinel flags calls from an agent identity outside its pod.
 - **Steps:** 1) Disable the affected agent's service principal in Entra ID (or remove the federated credential from the
-  workload identity); the supervisor routes that use case to degraded mode automatically. 2) Revoke active tokens and
+  workload identity); the orchestrator sends that use case to degraded mode automatically. 2) Revoke active tokens and
   confirm the MCP gateway rejects the agent (probe). 3) Review its app role assignments against the agent catalogue
   (02 §15) and remove anything extra. 4) Check the audit chain for calls by that agent since the last good review.
   5) Re-enable only after the root cause is fixed, with a four-eyes approval.

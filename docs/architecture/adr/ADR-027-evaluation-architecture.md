@@ -100,7 +100,7 @@ Adopt **option 4**: four evaluation tiers with RAGAS metric definitions througho
    - **Retry and decline.** On a failed post-generation gate, retry once with the strict prompt only if ≥ 4 s of the
      deadline remain (plan §4.3 step 10); otherwise, or on a second failure, decline. UC1 drops failing lines and
      degrades to facts only if none remain.
-   - **Budget guards.** Tokens (≤ 12k input, 1.5k output per request), tool steps (≤ 6), hops (≤ 2) and the deadline
+   - **Budget guards.** Tokens (≤ 12k input, 1.5k output per request), tool steps (≤ 6), waves (≤ 2) and the deadline
      are checked before every model or tool call.
    - Every gate outcome (passed, retried, declined, degraded, dropped) is counted (`rmc_runtime_gate_total`), and
      thresholds are App Configuration keys owned by MRM that change only through tier 4.

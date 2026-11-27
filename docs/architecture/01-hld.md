@@ -1,6 +1,6 @@
 # SME RM Copilot on Azure: high-level design
 
-Status: **Draft for ARB** · Workstream A1 · Owner: solution architecture · Date: 26 Nov 2026 · Baseline: `00-plan.md` v2.6 (aligned to v2.4 after the ARB review, `07-review-log.md`; v2.6 adds the supervisor-led agents, the MCP gateway, agent identities and memory: §5, §5.1, §7, §7.1, §8.2; v2.7 adds the evaluation architecture and runtime operations metrics: §5.2, §12)
+Status: **Draft for ARB** · Workstream A1 · Owner: solution architecture · Date: 26 Nov 2026 · Baseline: `00-plan.md` v2.6 (aligned to v2.4 after the ARB review, `07-review-log.md`; v2.6 adds the multi-agent orchestration (orchestrator and specialist agents, named per plan v2.9), the MCP gateway, agent identities and memory: §5, §5.1, §7, §7.1, §8.2; v2.7 adds the evaluation architecture and runtime operations metrics: §5.2, §12; v2.9 names the intent classifier, the orchestrator and the specialist agents and replaces agent hops with waves: §5, §7.1)
 
 This document is the high-level design (HLD) for the SME RM Copilot on Microsoft Azure. It is derived from
 `00-plan.md` (the contract) and uses its service names, flows, step numbers, targets and phases unchanged. Where
@@ -16,7 +16,7 @@ service mapping · 12 Quality attributes · 13 Cross-references · 14 Glossary �
 
 ---
 
-> Rendered images of every diagram in this document are in [`diagrams/`](diagrams/) (`hld-*.png` and `.svg`), rebuilt with `diagrams/render-hld.js`.
+> Rendered images of every diagram in this document are in [`diagrams/`](diagrams/) (`hld-*.png` and `.svg`).
 
 ## 1. Purpose and scope
 
@@ -156,8 +156,11 @@ products: the **AI gateway** (in front of Azure OpenAI) and the **system API fac
 record). Solid arrows are synchronous calls on the request path; dotted arrows are asynchronous, batch or
 telemetry paths.
 
-From plan v2.6 (§3.7, ADR-025 amending ADR-005) the `orchestrator` is a graph runtime hosting four agents: the
-`supervisor` and three specialists (`brief-agent`, `policy-agent`, `followup-agent`). Agents reach data only through
+From plan v2.6 (§3.7, ADR-025 amending ADR-005; names from plan v2.9) the `orchestrator` service hosts the **intent
+classifier** (rules first, `gen-small` only for free text), the **orchestrator** itself (a deterministic workflow
+engine in code that never calls a model; it has no agent identity and runs under the `orchestrator` workload
+identity, with no data tools) and three
+**specialist agents** (`brief-agent`, `policy-agent`, `followup-agent`). Agents reach data only through
 MCP servers exposed by `tool-gateway` (`customer-data`, `policy-search`, `crm-drafts`, `memory`) behind a third APIM
 API product, the **MCP gateway** (ADR-023). The commit and the internal audit endpoint are not MCP tools: they stay
 direct REST calls from deterministic graph nodes. Memory stores (plan §3.8, ADR-026) are Cosmos DB containers in the
@@ -175,8 +178,8 @@ flowchart LR
   subgraph AKS["AKS private cluster, namespace rm-copilot"]
     BFF["web-bff"]
     subgraph ORCHG["orchestrator pods, one workload managed identity"]
-      ORCH["graph runtime<br/>checkpointer, budgets, checks in code"]
-      SUP["supervisor<br/>gen-small, no data tools"]
+      SUP["intent classifier<br/>rules first, gen-small for free text, tasks JSON"]
+      ORCH["orchestrator, code, no model<br/>waves, budgets, approval pause, checkpointer, checks"]
       BRA["brief-agent UC1"]
       POA["policy-agent UC2"]
       FUA["followup-agent UC3"]
@@ -242,11 +245,11 @@ flowchart LR
   BFF -->|"sign approval token"| KV
   BFF -->|"drafts, approval state"| COSMOS
   BFF -->|"sessions, rm-profile"| MEM
-  BFF -->|"intent, RM OBO token, deadline"| ORCH
-  ORCH -->|"runs, hop counter"| SUP
-  SUP -->|"one handoff"| BRA
-  SUP -->|"one handoff"| POA
-  SUP -->|"one handoff"| FUA
+  BFF -->|"request after input guardrails, RM OBO token, deadline"| SUP
+  SUP -->|"tasks, confidence"| ORCH
+  ORCH -->|"tasks in at most 2 waves"| BRA
+  ORCH -->|"tasks in at most 2 waves"| POA
+  ORCH -->|"write task last, after approval"| FUA
   BRA -->|"tools/call, three tokens"| MCPGW
   POA -->|"tools/call, three tokens"| MCPGW
   FUA -->|"tools/call, three tokens"| MCPGW
@@ -305,7 +308,7 @@ Responsibilities are exactly as in plan §3.2; the points an ARB reviewer usuall
 | Where do system-of-record calls go? | Only from `tool-gateway`, through the APIM system API facade. `tool-gateway` also owns the Graph calendar call (`get_upcoming_meetings`) and the UC1 fan-out (`get_brief_inputs`). |
 | Who produces audit events? | Only `tool-gateway` (plan v2.3). `orchestrator` and `web-bff` post use-case events to its internal audit endpoint. If Event Hubs does not acknowledge, events go to the Cosmos `audit-spool`, which `audit-writer` drains; a commit needs the Event Hubs ack of `approval_verified` before any CRM write (ADR-013). |
 | Why separate `outbox-worker` and `audit-writer`? | Different scaling, failure and privilege profiles: the outbox worker needs CRM write paths; the audit writer needs storage and key access but no business APIs. |
-| How do agents reach data? (v2.6) | Only through `tool-gateway` MCP servers behind the APIM MCP gateway, with three tokens per call (§7.1). The `supervisor` has no data tools; each specialist's agent identity holds app roles for exactly its tools; `tool-gateway` stays the policy decision point. Agents never call each other freely; the supervisor hands off once (at most 2 agent hops, C28). |
+| How do agents reach data? (v2.6) | Only through `tool-gateway` MCP servers behind the APIM MCP gateway, with three tokens per call (§7.1). The orchestrator has no agent identity and no data tools (it runs under its workload identity); each specialist's agent identity holds app roles for exactly its tools; `tool-gateway` stays the policy decision point. Agents never call each other and report back to the orchestrator; at most 2 waves per request (C28). |
 | Can an agent commit a write? (v2.6) | No. The commit is a deterministic graph node that calls `POST /internal/v1/commits` with the RM-signed approval token, not an MCP tool (plan §3.7). `crm-drafts` only creates drafts in the copilot's own store. |
 | Where does memory live? (v2.6) | Cosmos DB containers `checkpoints`, `sessions`, `episodes`, `rm-profile`; AI Search for semantic memory; Git plus App Configuration pins for procedural memory (§5.1). |
 
@@ -319,7 +322,7 @@ and approved, and how the system is configured to work.
 |---|---|---|---|---|---|---|
 | Working | The current request's graph state: messages, tool results, plan | In-process, then checkpointed | One request | Request | Graph runtime | The agent running the node |
 | Checkpointer | Graph state after every node; pause for RM approval (interrupt) and resume; replay for debugging | Cosmos DB `checkpoints`, state encrypted with a per-customer data key | Thread = RM session (UC3: the draft's thread); one checkpoint per node | 7 days; 30 days while a UC3 draft is open | Graph runtime (`orchestrator`) | Graph runtime; PIM-gated replay (C29) |
-| Session | Last turns and a rolling summary of the current session | Cosmos DB `sessions` | RM `oid` + session | 24 h | `web-bff` persists; `supervisor` proposes the summary | `web-bff`, passed to the `supervisor` as context |
+| Session | Last turns and a rolling summary of the current session | Cosmos DB `sessions` | RM `oid` + session | 24 h | `web-bff` persists; the session summariser (small model, after release, outside orchestration) proposes the summary | `web-bff`, passed to the intent classifier as context |
 | Episodic | What happened before with this customer: past briefs (metadata), approved call reports, RM notes; the CRM stays the source of truth | CRM (via tools) plus Cosmos DB `episodes` (the RM's own interactions) | RM `oid` + customer; entitlement re-checked at recall | Episode log 90 days | `tool-gateway`, only from RM-approved or RM-authored content | `brief-agent` via the `memory` MCP server |
 | Semantic | Bank knowledge: policies, products | AI Search (versioned, effective-dated) | Clearance filter | Per policy lifecycle | `ingestion-worker` | `policy-agent` via `policy-search` |
 | Procedural | Prompts, graph definitions, tool schemas, few-shot examples, guardrail rules | Git and the prompt registry, pinned in App Configuration | Global, versioned, hashed | Versioned forever | Engineers, through the eval gate only | Graph runtime at start-up and on pin change |
@@ -368,7 +371,7 @@ path.
 
 | Tier | Where it runs | When | What it decides |
 |---|---|---|---|
-| 1 Runtime gates | `orchestrator`, inline | Every request | UC2: decline before calling the model when the best passage is below threshold (weak passages dropped, context relevance monitored); after generation, faithfulness (every claim cited and supported) and answer relevancy; retry once if ≥ 4 s remain, else decline. UC1: no brief without the CRM profile; lines with invented numbers or promises dropped. Budget guards on tokens, steps, hops and deadline |
+| 1 Runtime gates | `orchestrator`, inline | Every request | UC2: decline before calling the model when the best passage is below threshold (weak passages dropped, context relevance monitored); after generation, faithfulness (every claim cited and supported) and answer relevancy; retry once if ≥ 4 s remain, else decline. UC1: no brief without the CRM profile; lines with invented numbers or promises dropped. Budget guards on tokens, steps, waves and deadline |
 | 2 Online sampled | `eval-runner` online worker in prod, in-region judge (`gen-large`) | Minutes after the answer | 5% of UC1 and UC2 answers (cap 200 per day) scored from masked audit content; alert if faithfulness < 0.90 or answer relevancy < 0.80 over 1 h |
 | 3 Scheduled | `eval-runner` CronJobs, pre-prod Azure OpenAI with the production configuration | Nightly, weekly, monthly | Golden-set regression with reference-based metrics; drift report; red team of ≥ 1,000 attacks; a regression opens an incident |
 | 4 Release gate | CI stage on pre-prod | Every prompt, model, tool, index or threshold change | Ships only if every RAGAS, security, latency and token threshold holds |
@@ -508,7 +511,7 @@ sequenceDiagram
   participant CL as CRM sidebar or Teams tab
   participant ENTRA as Entra ID
   participant BFF as web-bff
-  participant ORCH as orchestrator (supervisor and agents)
+  participant ORCH as orchestrator service (intent classifier, orchestrator, agents)
   participant GW as APIM MCP gateway
   participant TG as tool-gateway
   participant APIM as APIM system API facade
@@ -573,14 +576,29 @@ Identities and the memory stores (v2.6; data-plane RBAC per container, `disableL
 
 ### 7.1 Agents, MCP gateway and identities
 
-Plan §3.7 (ADR-023, ADR-024, ADR-025). The orchestrator runs a fixed graph per use case. The `supervisor` classifies
-the intent (from the launch context; `gen-small` only for free text), enforces step, time, token and hop budgets,
-hands off once to one specialist and assembles the reply. Specialists call tools only through the MCP gateway.
-Verification (numeric, policy and groundedness checks) stays deterministic code, and the commit stays outside MCP.
+Plan §3.7 (ADR-023, ADR-024, ADR-025). Four terms, used with these meanings throughout (plan v2.9):
 
-| Agent | Job | MCP tools it may call | Agent app roles (on `tool-gateway`) | Model |
+| Term | What it is |
+|---|---|
+| Intent classifier | First step after the input guardrails. Rules first (button, launch context, clear phrase: no model call); `gen-small` only for free text, with structured output `{tasks: [{id, intent, query, depends_on}], confidence}`. Confidence ≥ 0.8 proceeds, 0.5 to 0.8 asks the RM to clarify, below 0.5 or out of scope declines. Decides whether the semantic cache may be consulted (public policy intents only). One decision, no loop |
+| Orchestrator | Deterministic workflow engine in code; never calls or picks a model, never writes to the CRM. Plans tasks from a fixed intent table into at most 2 waves, splits and enforces the budgets (12k tokens, the request deadline), reads each agent's typed result and acts by fixed rules, checkpoints, pauses for approval, combines results for the output guardrails |
+| Specialist agents | `brief-agent`, `policy-agent`, `followup-agent`. Each reasons with a model and calls only its own tools through the MCP gateway; agents never call each other and report back to the orchestrator |
+| Supervisor (LLM planner) | Phase 2 option only, not in the pilot: a model proposes the plan and the orchestrator validates it against the intent table, falling back to the fixed table if it is invalid |
+
+We deliberately use a deterministic orchestrator instead of an LLM supervisor: the model understands the request
+(intent classifier) and the specialist agents reason, but code controls execution, so ordering, budgets and
+approvals are guaranteed and auditable. An LLM supervisor (planner) is a Phase 2 option, with the orchestrator still
+validating every plan.
+
+Independent read tasks run concurrently in wave 1; a dependent task (for example, only if the first answer is "no")
+or a write task runs in wave 2; a write runs last and alone, after RM approval. Specialists call tools only through
+the MCP gateway. Verification (numeric, policy and groundedness checks) stays deterministic code, and the commit
+stays outside MCP.
+
+| Component | Job | MCP tools it may call | Agent app roles (on `tool-gateway`) | Model |
 |---|---|---|---|---|
-| `supervisor` | Intent, budgets, one handoff, assemble the reply | none | none | `gen-small` |
+| Intent classifier (in the `orchestrator` service, uses the `orchestrator` workload identity for the model gateway) | Task list and confidence | none | none (no agent identity) | rules; `gen-small` for free text only |
+| Orchestrator (`orchestrator` workload identity; no agent identity, cannot obtain agent or tool tokens) | Plan, waves, budgets, approval pause, combine results | none | none (no agent identity) | none |
 | `brief-agent` (UC1) | Customer brief | `customer-data` (profile, facilities, transactions summary, KYC status, news, the composite `get_brief_inputs`); `memory` (`recall_episodes`) | `Tools.CustomerData.Read`, `Tools.Memory.Recall` | `gen-large` |
 | `policy-agent` (UC2) | Cited policy answers | `policy-search` (`search_policies`) only | `Tools.PolicySearch` | `gen-small` rewrite, `gen-large` answer |
 | `followup-agent` (UC3) | Notes to drafts | `customer-data` (`get_customer_profile` only); `crm-drafts` (`create_followup_draft`, no commit) | `Tools.CustomerData.Profile`, `Tools.CrmDrafts.Create` | `gen-small` |
@@ -640,8 +658,12 @@ sequenceDiagram
 ```
 
 Design points:
-- The supervisor hands off once; at most 2 agent hops per request; a request still has at most 6 tool steps across
-  agents (plan §5, C28). Agents never talk to each other freely.
+- At most 2 waves per request; independent reads run concurrently in wave 1; dependent or write tasks in wave 2;
+  agents never call each other. A request still has at most 6 tool steps across agents (plan §5, C28). The pilot
+  runs one task per request (a single wave: the orchestrator plus one specialist); multi-task waves are the
+  production design.
+- Agent identities exist only for the three specialist agents. The orchestrator has none: it runs under the
+  `orchestrator` workload identity, which can neither obtain agent tokens nor tool tokens from the MCP gateway.
 - In the pilot no agent uses model function calling: each specialist's tool calls are nodes of its fixed graph, and
   the model only fills bounded arguments (for example the rewritten UC2 query) validated against the pinned schema.
   The filtered `tools/list` and the roles still hold if model-selected tool calls are enabled later (ADR-025).
@@ -654,7 +676,7 @@ Design points:
 ## 8. Data flows
 
 Step numbers below match plan §4 exactly. Where one plan step involves several messages, each message carries the
-same step number. From plan v2.6 the `orchestrator` steps run as the `supervisor` plus one specialist agent, and tool
+same step number. From plan v2.6 the `orchestrator` steps run as the intent classifier, the orchestrator and a specialist agent, and tool
 calls pass through the APIM MCP gateway with three tokens (§7.1); the step numbers do not change. §8.1 and §8.3 keep
 the v2.4 drawing with `orchestrator` as one participant; §8.2 shows the agents, the MCP gateway and the checkpointer
 because the approval pause and resume depend on them.
@@ -681,7 +703,7 @@ sequenceDiagram
   AGW->>BFF: 2. WAF-inspected request
   BFF->>BFF: 2. validate token, request id, traceparent, deadline 8 s
   BFF->>ENTRA: 2. OBO for tool-gateway (cached)
-  BFF->>ORCH: 3. intent customer_brief, fixed workflow, no router call
+  BFF->>ORCH: 3. intent customer_brief, fixed workflow, intent classifier by rule, no model call
   ORCH->>TG: 4. read tools with RM token plus workload token
   TG->>COS: 4. entitlement check first (cache up to 60 s, event invalidation)
   alt not entitled
@@ -721,7 +743,7 @@ ingestion via AMPLS, and the news feed through the firewall allow-list.
 
 ### 8.2 Write path: UC3 follow-up agent (plan §4.2)
 
-v2.6 additions (plan §3.7, §3.8; ADR-025, ADR-026): the `supervisor` hands off to `followup-agent`; the profile read
+v2.6 additions (plan §3.7, §3.8; ADR-025, ADR-026): the orchestrator plans one write task for `followup-agent`; the profile read
 and the draft creation go through the MCP gateway; when the drafts are ready the graph **interrupts** for RM
 approval and the checkpointer saves the paused state (status `interrupted`, TTL 30 days while the draft is open).
 Approve **resumes** the same thread from that checkpoint on any pod; the commit is a deterministic node, not an
@@ -734,7 +756,7 @@ sequenceDiagram
   participant BFF as web-bff
   participant ENTRA as Entra ID
   participant KV as Key Vault Premium
-  participant ORCH as orchestrator, supervisor and followup-agent
+  participant ORCH as orchestrator and followup-agent
   participant CKPT as Cosmos checkpoints
   participant SAFE as Content Safety and AI Language
   participant AIGW as APIM AI gateway
@@ -749,7 +771,7 @@ sequenceDiagram
 
   RM->>BFF: 1. paste notes (Phase 2: voice memo via Speech to text)
   BFF->>ORCH: 1. notes, RM OBO token, deadline 10 s
-  ORCH->>ORCH: 1. supervisor routes to followup-agent, one handoff, thread id from the session
+  ORCH->>ORCH: 1. intent classifier returns one write task, orchestrator plans it for followup-agent, thread id from the session
   ORCH->>SAFE: 2. Prompt Shields user prompt check
   ORCH->>ORCH: 2. quarantine quoted instructions
   ORCH->>SAFE: 2. mask PII (AI Language plus regex)
@@ -1013,11 +1035,11 @@ illustrative and is sized in `06-deployment-and-operations.md`. No prices are gi
 | Attribute | Target (plan §5) | How the architecture achieves it | Residual risk / where detailed |
 |---|---|---|---|
 | Availability | Pilot 99.0% business hours; scale 99.5%; degraded counted as available | Every stateful and gateway service zone-redundant across 3 zones; AKS Standard tier; ≥ 3 replicas per service; per-source circuit breakers; partial brief when non-critical sources fail; degraded mode per use case when models fail; region loss handled as BCP (RTO 24 h best effort) | No in-country model DR (C3); scale 99.5% depends on CRM ≥ 99.9%, the application tier ≥ 99.85% and Event Hubs Premium. Composite maths in `04` §9: pilot UC1 99.31%, UC2 99.41%, UC3 draft 99.31%, commit 99.25% |
-| Latency | UC1 ≤ 8 s, UC2 ≤ 7 s, UC3 draft ≤ 10 s, commit ≤ 2 s (p95) | Deadline set at `web-bff` and propagated; hop timeout = min(own cap, remaining deadline − reserve); tool cap 2 s; parallel fan-out; PII and shields overlapped with tool calls; no router call when launched from a CRM record; `gen-small` for extraction and routing; failover only if ≥ 4 s remain; runtime eval gates use no LLM judge and fit the existing checks lines (≤ 250 ms p95 on UC2); a weak retrieval declines without a model call; p95 measured per stage and alerted against the plan §5 budget for 15 min | Buffer-then-release adds perceived wait (C18); Regional Standard has no latency guarantee, PTU is the post-pilot lever (ADR-004). Budget table in plan §5; stage metrics in `02` §11.8 |
+| Latency | UC1 ≤ 8 s, UC2 ≤ 7 s, UC3 draft ≤ 10 s, commit ≤ 2 s (p95) | Deadline set at `web-bff` and propagated; hop timeout = min(own cap, remaining deadline − reserve); tool cap 2 s; parallel fan-out; PII and shields overlapped with tool calls; no intent classifier model call when launched from a CRM record; `gen-small` for extraction and free-text intent classification; failover only if ≥ 4 s remain; runtime eval gates use no LLM judge and fit the existing checks lines (≤ 250 ms p95 on UC2); a weak retrieval declines without a model call; p95 measured per stage and alerted against the plan §5 budget for 15 min | Buffer-then-release adds perceived wait (C18); Regional Standard has no latency guarantee, PTU is the post-pilot lever (ADR-004). Budget table in plan §5; stage metrics in `02` §11.8 |
 | Security | Entitlement leaks = 0; injection success = 0 | Entitlements in `tool-gateway` with dual token validation; signed draft-bound approvals with sign/verify key split; Prompt Shields plus local rules; plain-text rendering with strict CSP; private endpoints and egress allow-list; signed images and admission policy; PIM | STRIDE and threat model in `05`; ADR-008, ADR-009, ADR-011, ADR-017 |
 | Privacy | No PII to models beyond need; data stays in the UAE | Live reads, no customer index (ADR-007); field minimisation; PII masking before every model call; `store=false`; Regional deployments; modified abuse monitoring as a go-live gate; Document Intelligence and Speech results deleted | Masking is imperfect (C21): content store is per-customer-key encrypted and crypto-shreddable. Arabic PII coverage **[confirm]** |
 | Auditability | Every call, approval and write traceable to an RM and a model version | One audit event per tool call; `brief_built`, `approval_issued`, `write_*` with lineage (model version, prompt hash, tool contract versions, guardrail version); hash chain in immutable GZRS Blob with 5-minute seals; `tool-gateway` (the only producer) waits for the Event Hubs ack, with the Cosmos `audit-spool` as fallback; CRM records marked "AI-assisted, RM-approved" | Audit query in Log Analytics in Phase 1; ADX in Phase 2 if needed. ADR-013 |
-| Cost | Per request ≤ 6 tool steps, ≤ 12k input and 1.5k output tokens; 400k tokens per RM per day | APIM `llm-token-limit` per RM and per use case; budget guards before every call; `gen-small` for high-volume steps; deterministic UC1 workflow without a router call; Phase 1 cuts (no PTU, Redis, Service Bus, ADX, warm DR, bot); tokens per request and estimated cost per request measured on every request (price table in App Configuration), alerts at p95 tokens > 1.2 × the 7-day baseline and daily cost > 80% of budget; online judge capped at 200 items per day; Azure budgets per environment with 80% alerts | Fixed platform cost (APIM Premium, Firewall, AKS) dominates at pilot scale; model and capacity in `05`/`06` |
+| Cost | Per request ≤ 6 tool steps, ≤ 12k input and 1.5k output tokens; 400k tokens per RM per day | APIM `llm-token-limit` per RM and per use case; budget guards before every call; `gen-small` for high-volume steps; deterministic UC1 workflow without an intent classifier model call; Phase 1 cuts (no PTU, Redis, Service Bus, ADX, warm DR, bot); tokens per request and estimated cost per request measured on every request (price table in App Configuration), alerts at p95 tokens > 1.2 × the 7-day baseline and daily cost > 80% of budget; online judge capped at 200 items per day; Azure budgets per environment with 80% alerts | Fixed platform cost (APIM Premium, Firewall, AKS) dominates at pilot scale; model and capacity in `05`/`06` |
 | AI output quality | Release: faithfulness and citation accuracy ≥ 0.95, context recall ≥ 0.90, context precision, answer relevancy and answer correctness ≥ 0.85, correct-decline ≥ 0.90 (lower bounds); online faithfulness ≥ 0.90 and answer relevancy ≥ 0.80 over 1 h | Four evaluation tiers (§5.2): runtime gates on every request, online sampled RAGAS scoring with an in-region judge, nightly, weekly and monthly scheduled evals, and the release gate; thresholds pinned in App Configuration and changed only through the gate; judge prompts versioned as procedural memory | Runtime approximations are weaker than the judge, so some unfaithful answers are caught only on the 5% sample; pilot volume makes 1 h windows noisy (sample-size guard). ADR-018, ADR-027; `05` §8.5 |
 | Evolvability | Model upgrades about yearly; Phase 2 and 3 additions without rewrite | Model access only via APIM with version pins and auto-upgrade off; eval gate before upgrade (C12); typed tool contracts with versions; feature flags per use case; mock-Azure prototype with identical REST shapes; Bicep AVM modules | Framework lock-in avoided by thin orchestrator (ADR-005) at the price of owning more code |
 
@@ -1040,7 +1062,7 @@ Full index: [`adr/README.md`](adr/README.md).
 | [ADR-009](adr/ADR-009-approval-token-es256-key-vault.md) to [ADR-022](adr/ADR-022-no-unverified-streaming.md) | Approval token, write reliability, guardrails, PII masking, audit, observability, resilience, channels, network, evaluation and MRM, state store, feature flags, IaC and CI/CD, no unverified streaming | See index |
 | ADR-023 (v2.6) | APIM as the MCP gateway in front of `tool-gateway` MCP servers | 5, 7.1, 9.1 |
 | ADR-024 (v2.6) | Agent identity: one identity per agent, workload managed identity as its federated credential, intersection of user, agent and workload | 2, 7, 7.1 |
-| ADR-025 (v2.6) | Supervisor-led multi-agent orchestration, amends ADR-005 | 5, 7.1, 8.2 |
+| ADR-025 (v2.6, v2.9) | Multi-agent orchestration: deterministic orchestrator instead of an LLM supervisor, amends ADR-005 | 5, 7.1, 8.2 |
 | ADR-026 (v2.6) | Memory architecture: working, checkpointer, session, episodic, semantic, procedural, profile | 5.1, 8.2, 9.4 |
 | [ADR-027](adr/ADR-027-evaluation-architecture.md) (v2.7) | Evaluation architecture in four tiers: runtime gates, online sampling, scheduled evals, release gate (extends ADR-018) | 5.2, 12 |
 
@@ -1071,6 +1093,8 @@ Full index: [`adr/README.md`](adr/README.md).
 | Agent identity | The Entra identity (Entra Agent ID or a service principal) of one agent; holds app roles for that agent's tools only (ADR-024) |
 | Checkpointer | The graph runtime component that saves graph state after every node, so a graph can pause (interrupt) for RM approval and resume on any pod |
 | Interrupt | A deliberate pause of a graph at a node, here to wait for the RM's approval of UC3 drafts |
+| Intent classifier, orchestrator, specialist agents, Supervisor (LLM planner) | The four orchestration terms, defined in §7.1 |
+| Wave | A set of tasks the orchestrator runs together; independent reads share wave 1, dependent or write tasks run in wave 2; at most 2 per request |
 
 ## 15. Open points for the lead
 

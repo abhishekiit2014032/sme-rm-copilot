@@ -67,7 +67,7 @@ Adopt **option 1**.
 |---|---|---|---|---|---|---|
 | Working | Current request's graph state: messages, tool results, plan | In process, then checkpointed | One request | Request | Graph runtime | The running graph |
 | Checkpointer | Graph state after every node; interrupt for approval and resume; replay | Cosmos DB `checkpoints`, encrypted | Hierarchical key `/rm_oid`, `/thread_id` (thread = RM session); one item per node | 7 days; 30 days while a UC3 draft is open | Graph runtime (`orchestrator` workload identity) | Graph runtime; PIM-gated replay tool |
-| Session | Conversation turns and a rolling summary | Cosmos DB `sessions` (ADR-019) | RM `oid` + session | 24 h | `web-bff` persists; the summary is authored by `supervisor` and returned with the reply | `web-bff`, sent with each request |
+| Session | Conversation turns and a rolling summary | Cosmos DB `sessions` (ADR-019) | RM `oid` + session | 24 h | `web-bff` persists; the summary is authored by the session summariser (after release, `gen-small`) and returned with the reply | `web-bff`, sent with each request |
 | Episodic | What happened before with this customer: approved call reports, open tasks, briefs viewed, RM notes | CRM is the source of truth (read via tools); copilot episode log in Cosmos DB `episodes` | Hierarchical key `/rm_oid`, `/customer_id` | Episode log 90 days | `tool-gateway` only, on approved or RM-authored events | `brief-agent` via `memory.recall_episodes` |
 | Semantic | Policies and products | AI Search, versioned and effective-dated (ADR-006) | Clearance filter | Policy lifecycle | Ingestion pipeline | `policy-agent` via `policy-search` |
 | Procedural | Prompts, graph definitions, tool schemas and descriptions, few-shot examples, guardrail rules | Git and the prompt registry, pinned in App Configuration | Global, versioned | Versions kept indefinitely | Engineers, through the ADR-018 eval gate only | Graph runtime (read-only) |
@@ -108,8 +108,8 @@ Adopt **option 1**.
   about 2.5k, tool facts about 5k, recalled episodes ≤ 1k (≤ 10 items), session summary ≤ 500 plus the last 4 turns
   ≤ 2k, remainder as headroom. The graph's state reducer decides what enters the prompt; the checkpoint holds more
   than the model ever sees.
-- **Rolling summary.** When a session passes 6 turns or 3k tokens, the `supervisor` summarises older turns with
-  `gen-small` into a structured summary (topics, open questions, customer ids referenced, preferences stated),
+- **Rolling summary.** When a session passes 6 turns or 3k tokens, the session summariser (a post-release job in the orchestrator service, not part of orchestration) summarises older
+  turns with `gen-small` after the reply is released into a structured summary (topics, open questions, customer ids referenced, preferences stated),
   with figures replaced by references ("see brief b-123"). The summary passes the quarantine rules, carries
   provenance, and is never a source for figures or for policy citations.
 - **Tool results** are dropped from the prompt after the node that used them, keeping source references.

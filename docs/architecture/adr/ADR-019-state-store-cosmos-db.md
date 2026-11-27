@@ -150,4 +150,4 @@ Risks and mitigations
 - Code: `code/rm_copilot/tools.py` (in-memory `AUDIT_LOG`, `CRM_WRITES` and the stateless HMAC verify that this
   replaces).
 
-Amendment (26 Nov 2026, plan v2.6): with supervisor-led agents (ADR-025) the orchestrator now holds graph checkpoints; the memory containers above follow ADR-026.
+Amendment (26 Nov 2026, plan v2.6): with specialist agents run by the orchestrator (ADR-025) the orchestrator now holds graph checkpoints; the memory containers above follow ADR-026.

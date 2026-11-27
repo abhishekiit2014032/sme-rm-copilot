@@ -10,8 +10,8 @@
 
 ## Context
 
-Plan v2.6 turns the `orchestrator` into a supervisor-led graph of agents (ADR-025), each with its own identity
-(ADR-024). The agents need tools: `brief-agent` reads customer data and recalls episodes, `policy-agent` searches
+Plan v2.6 turns the `orchestrator` into a deterministic orchestrator running specialist agents (ADR-025), each
+agent with its own identity (ADR-024). The agents need tools: `brief-agent` reads customer data and recalls episodes, `policy-agent` searches
 policies, `followup-agent` reads a profile and creates drafts. Until v2.5 the orchestrator called `tool-gateway`
 over a typed REST client (ADR-008). v2.6 exposes the same tools as **Model Context Protocol (MCP) servers** hosted by
 `tool-gateway` (`customer-data`, `policy-search`, `crm-drafts`, `memory`) behind **APIM as the MCP gateway** (plan
@@ -136,7 +136,7 @@ Authorization decision for one `tools/call` (deny on the first failure; every de
     to `customer_id` (cache ≤ 60 s plus event invalidation, ADR-008). Denied: 403 `NOT_ENTITLED`, no data moves.
 12. **Classification.** The tool's output classification is ≤ the RM's clearance (policy search also filters on
     clearance, ADR-006).
-13. **Budgets.** Request step count ≤ 6 tool steps and the hop deadline (plan §5); else `BUDGET_EXCEEDED`.
+13. **Budgets.** Request step count ≤ 6 tool steps and the per-call deadline (plan §5); else `BUDGET_EXCEEDED`.
 14. **Execute, minimise, mask** (ADR-012), attach provenance (source system, record ids, retrieval time, tool
     version), write the audit event (RM `oid`, agent client id, workload, server, tool, definition hash, decision,
     latency) and return.

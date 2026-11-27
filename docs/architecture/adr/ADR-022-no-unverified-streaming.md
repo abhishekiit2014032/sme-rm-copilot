@@ -22,7 +22,7 @@ The latency cost of not streaming is real. Figures from the §5 latency budget (
 | Moment the RM sees text | UC1 brief | UC2 answer | UC3 draft |
 |---|---|---|---|
 | Deterministic facts ready (edge + entitlement + fan-out) | 150 + 20 + 1,500 = **1,670** | n/a (no facts section) | n/a |
-| First model token (edge + entitlement + retrieval or fan-out + PII/Shields + router + time to first token) | 150 + 20 + 1,500 + 300 + 0 + 1,000 = **2,970** | 150 + 700 + 400 + 600 + 1,000 = **2,850** | 150 + 20 + 300 + 400 + 0 + 700 = **1,570** |
+| First model token (edge + entitlement + retrieval or fan-out + PII/Shields + intent classification + time to first token) | 150 + 20 + 1,500 + 300 + 0 + 1,000 = **2,970** | 150 + 700 + 400 + 600 + 1,000 = **2,850** | 150 + 20 + 300 + 400 + 0 + 700 = **1,570** |
 | First verified unit if released per sentence or per talking point (first token + about 50 tokens for UC1, about 30 tokens for UC2 at about 16.5 ms per token, + about 50 ms check) | ≈ **3,850** | ≈ **3,400** | n/a (JSON object must be complete to validate) |
 | Full verified output (§5 total) | ≈ **6,400** (table: ≈ 6,500, target 8,000) | ≈ **5,750** (table: ≈ 5,900, target 7,000) | ≈ **4,970** (table: ≈ 5,100, target 10,000) |
 

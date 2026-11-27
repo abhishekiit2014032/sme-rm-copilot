@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Amended by ADR-025 (supervisor-led agents on the same deterministic principles) |
+| Status | Amended by ADR-025 (deterministic orchestrator with specialist agents on the same principles) |
 | Date | 26 Nov 2026 |
 | Deciders | Solution architecture, engineering lead, model risk management |
 | Plan references | §2 (patterns), §3.2 `orchestrator`, §4.1 to §4.3, §5 (deadlines, budgets), §6 C3, C10, C18, C23 |
@@ -110,10 +110,11 @@ Adopt **option 1: a thin custom orchestrator**.
 
 ## Amendment (26 Nov 2026, ADR-025)
 
-Plan v2.6 replaces the single orchestrator with a supervisor-led fixed graph of agents (`supervisor`,
-`brief-agent`, `policy-agent`, `followup-agent`) run by a graph framework with a Cosmos DB checkpointer inside the
-same `orchestrator` deployment. What changes: each agent has its own identity and tool roles (ADR-024) and reaches
+Plan v2.6 replaces the single orchestrator with an intent classifier, a deterministic orchestrator in code and
+fixed graphs of specialist agents (`brief-agent`, `policy-agent`, `followup-agent`; names from plan v2.9) run by a
+graph framework with a Cosmos DB checkpointer inside the
+same `orchestrator` deployment. What changes: each specialist agent has its own identity and tool roles (ADR-024) and reaches
 tools through the MCP gateway (ADR-023); a framework, not our own functions, executes the graph; and graph state is
 checkpointed (ADR-026) instead of the orchestrator holding no state. What stays: the UC1 to UC3 workflows inside each
-agent, the deadline and budget object, verification in code, verify-then-release, no planner beyond one routing
-decision (at most 2 agent hops), and no keys in the orchestrator for approvals.
+agent, the deadline and budget object, verification in code, verify-then-release, no planner beyond one intent
+classification decision (at most 2 waves per request, agents never call each other), and no keys in the orchestrator for approvals.

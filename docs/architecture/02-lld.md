@@ -84,7 +84,7 @@ Contents
 | `x-rm-remaining-tokens` | response (internal) | APIM AI gateway | Remaining daily tokens for the RM; read by `orchestrator` for budget decisions, never shown in UI |
 | `x-rm-assertion` | request | APIM system API facade only | Signed RM identity for legacy systems of record (§7.2). Stripped if a caller sends it |
 | `x-agent-token` (v2.6) | request (internal) | `orchestrator` (one per agent) | The calling agent's app-only token (audience `tool-gateway`), sent on every MCP call next to `Authorization` (workload token) and `x-rm-token` (§15.4). Validated by the APIM MCP gateway and again by `tool-gateway`. Never logged |
-| `x-rmc-agent` (v2.6) | request (internal) | `orchestrator` | Agent id (`supervisor`, `brief-agent`, `policy-agent`, `followup-agent`) on AI gateway calls, used only as a metric dimension and per-agent token limit key; accepted only from the orchestrator's `azp`. Not an authorisation input |
+| `x-rmc-agent` (v2.6) | request (internal) | `orchestrator` | Agent id (`orchestrator` for intent classifier calls, `brief-agent`, `policy-agent`, `followup-agent`) on AI gateway calls, used only as a metric dimension and per-agent token limit key; accepted only from the orchestrator's `azp`. Not an authorisation input |
 | `MCP-Protocol-Version`, `Mcp-Session-Id` (v2.6) | both | MCP client (`orchestrator`), MCP server (`tool-gateway`) | Streamable HTTP transport headers (§15.6) **[confirm protocol version supported by APIM]** |
 
 Headers that must never be logged or put on spans: `Authorization`, `x-rm-token`, `x-agent-token`, `x-rm-assertion`, `Cookie`,
@@ -131,7 +131,7 @@ downstream error text. Upstream errors are mapped, never passed through.
 | `DRAFT_CONFLICT` | 412 | no | `web-bff` | `If-Match` etag stale. Client reloads the draft |
 | `GUARDRAIL_BLOCKED` | 422 | no | `orchestrator` | Input blocked: Prompt Shields user-prompt attack, harmful content, or content filter on input. Reasons: `PROMPT_ATTACK`, `HARMFUL_CONTENT`, `CONTENT_FILTER`. The message is generic; the RM can rephrase. Counted in the false-positive review |
 | `RATE_LIMITED` | 429 | yes | `web-bff`, APIM | Request-rate limit hit (per RM: 30 requests/min **[LLD decision]**; per backend at the facade). `Retry-After` set |
-| `BUDGET_EXCEEDED` | 429 | no (until reset) | `orchestrator` (mapping APIM), APIM | Token budget exhausted. Reasons: `RM_DAILY` (400k tokens/RM/day), `USE_CASE` (per-use-case limit), `REQUEST_STEPS` (> 6 tool steps), `REQUEST_TOKENS` (> 12k input or 1.5k output), `HOP_LIMIT` (v2.6: a second handoff, more than 2 agent hops, §15.2), `AGENT_STEPS` (v2.6: an agent's own tool-call budget). `details.resets_at` for `RM_DAILY` (midnight GST **[confirm APIM daily window is UTC or configurable]**) |
+| `BUDGET_EXCEEDED` | 429 | no (until reset) | `orchestrator` (mapping APIM), APIM | Token budget exhausted. Reasons: `RM_DAILY` (400k tokens/RM/day), `USE_CASE` (per-use-case limit), `REQUEST_STEPS` (> 6 tool steps), `REQUEST_TOKENS` (> 12k input or 1.5k output), `HOP_LIMIT` (v2.6 reason code, kept: a plan or call that would exceed 2 waves, or a specialist trying to start another agent, §15.1), `AGENT_STEPS` (v2.6: an agent's own tool-call budget). `details.resets_at` for `RM_DAILY` (midnight GST **[confirm APIM daily window is UTC or configurable]**) |
 | `FEATURE_DISABLED` | 503 | no | `web-bff`, `orchestrator`, `tool-gateway`, `outbox-worker` | Kill switch or feature flag off (`details.flag`). UI shows a banner and hides the action. Not counted against the SLO when set by an operator (counted separately) |
 | `DEPENDENCY_UNAVAILABLE` | 503 | yes | any | Circuit open or dependency down and no degraded path exists (for example Cosmos down during commit). Reasons: `CIRCUIT_OPEN`, `AUDIT` (neither Event Hubs nor the Cosmos `audit-spool` acknowledged, or Event Hubs did not acknowledge `approval_verified` on a commit, so nothing was released or written), `ENTITLEMENT_SOURCE`, `KEY_VAULT`, `STATE_STORE`. `Retry-After` set |
 | `DEPENDENCY_TIMEOUT` | 504 | yes | any | A required dependency did not answer within its deadline-derived timeout and no degraded path exists |
@@ -165,7 +165,7 @@ App registrations **[LLD decision on names]**:
 | `rmc-system-api` (`api://rm-copilot-system-api`) | app roles `SystemApi.Read`, `SystemApi.Write`, `SystemApi.DeferredWrite` | `tool-gateway` only |
 | `rmc-audit-admin` (`api://rm-copilot-audit-admin`) | app roles `Audit.Verify` (auditors), `Audit.Erase` (data protection officer, PIM, four-eyes) | `audit-writer` admin endpoints |
 | `rmc-tool-gateway` agent app roles (v2.6) | app roles `Tools.CustomerData.Read`, `Tools.CustomerData.Profile`, `Tools.PolicySearch`, `Tools.CrmDrafts.Create`, `Tools.Memory.Recall`; operator role `Ops.Replay` (PIM, checkpoint replay, §16.3) | agent identities (§15.2), operators |
-| `rmc-agent-supervisor`, `rmc-agent-brief`, `rmc-agent-policy`, `rmc-agent-followup` (v2.6) | nothing exposed; each is a client holding the agent app roles above. Entra Agent ID agent identities where available, else app registrations with a service principal **[confirm, plan §10 item 12]**. Only credential: a federated identity credential trusting the managed identity `id-rmc-orchestrator` (no secrets, no certificates) | `orchestrator` (§15.4) |
+| `rmc-agent-brief`, `rmc-agent-policy`, `rmc-agent-followup` (v2.6; v2.9 removes the former orchestrator-level agent identity) | nothing exposed; each is a client holding the agent app roles above. Entra Agent ID agent identities where available, else app registrations with a service principal **[confirm, plan §10 item 12]**. Only credential: a federated identity credential trusting the managed identity `id-rmc-orchestrator` (no secrets, no certificates) | `orchestrator` (§15.4) |
 
 Workload identities: one user-assigned managed identity per service, federated to its Kubernetes service account
 (`id-rmc-web-bff`, `id-rmc-orchestrator`, `id-rmc-tool-gateway`, `id-rmc-outbox-worker`, `id-rmc-ingestion-worker`,
@@ -220,7 +220,7 @@ before call:  remaining = deadline_at - now()
 | AI Search query | 600 ms | 100 ms | 100 ms |
 | Embedding (query) | 300 ms | 100 ms | 100 ms |
 | Model generation (orchestrator → APIM AI gateway) | = remaining deadline (plan) | min viable generation budget | post-generation reserve |
-| Router / rewrite (`gen-small`) | 1,000 ms | 300 ms | min viable generation budget + post reserve |
+| Intent classifier / rewrite (`gen-small`) | 1,000 ms | 300 ms | min viable generation budget + post reserve |
 | Content Safety Prompt Shields | 500 ms | 100 ms | n/a (parallel) |
 | AI Language PII | 500 ms | 100 ms | n/a (parallel); regex fallback always runs |
 | Key Vault `sign` (approve) | 400 ms | 100 ms | 150 ms |
@@ -548,7 +548,7 @@ On AI gateway calls it sends `x-rm-oid` (the `oid` of `x-rm-token`) as the per-R
 | `tool-gateway` read tools | `get_brief_inputs` (UC1): `min(2,000, remaining − 2,800)`; other tools: `min(2,000, remaining − reserve − min_gen)` | per §1.7 | per tool | non-critical source (LOS facilities, ODS transactions, KYC, news): section flagged, `mode=partial`; the only critical source is the CRM profile: `503`/`504` mapped (plan §4.1 step 5) |
 | `tool-gateway` `search_policies` | `min(1,000, remaining − 2,500)` | 0 | yes | UC2 `503 DEPENDENCY_UNAVAILABLE` (no answer without retrieval) |
 | APIM AI gateway `gen-large` | `remaining − post_reserve` (≥ min viable budget, else skip) | 0 in client; APIM retries to backend 2 only if ≥ 4 s remain | client breaker 20 s | degraded mode |
-| APIM AI gateway `gen-small` (router, rewrite, extract) | rewrite: `min(1,000, ...)`; extract: `remaining − 300` | 0 | yes | UC2 rewrite failure: use the raw masked question; UC3 extract failure: degraded (manual call report) |
+| APIM AI gateway `gen-small` (intent classifier, rewrite, extract) | rewrite: `min(1,000, ...)`; extract: `remaining − 300` | 0 | yes | UC2 rewrite failure: use the raw masked question; UC3 extract failure: degraded (manual call report) |
 | Content Safety Prompt Shields | 500 ms | 0 | yes | local injection rules decide (C2 floor) and `rmc_guardrail_fallback_total{service="content-safety"}` increments. UC1 and UC2: continue. UC3: continue with quote quarantine and a visible notice "safety check unavailable, review quoted text" (every draft is reviewed by the RM before approval) **[LLD decision]** |
 | AI Language PII | 500 ms | 0 | yes | regex masking always runs; on AI Language failure, person names are masked by the CRM-known names list for the customer (contact names from profile) |
 | App Configuration | background | n/a | n/a | last known values |
@@ -572,10 +572,11 @@ are replaced by the runtime gate keys `rmc:orchestrator:gate:*` (§17.2); stage 
 without a generated answer, UC3 manual call report form); entitlement denied → `403 NOT_ENTITLED` with no model
 call; budget exceeded → `429 BUDGET_EXCEEDED`; nothing unverified is ever returned (C18).
 
-**v2.6 changes (plan §3.7, §3.8).** The workflows above run as agent graphs: `supervisor` plus one specialist
-(§15.1, §15.2). New endpoint `POST /internal/v1/threads/{thread_id}/resume` (caller `web-bff`, `Idempotency-Key`
+**v2.6 changes (plan §3.7, §3.8).** The workflows above run as agent graphs: the intent classifier returns tasks, the
+orchestrator (code, no model call) plans them into at most 2 waves and hands each to a specialist agent (§15.1,
+§15.2). New endpoint `POST /internal/v1/threads/{thread_id}/resume` (caller `web-bff`, `Idempotency-Key`
 required) resumes an interrupted UC3 thread after approval (§16.3); `POST /internal/v1/uc3/commit` remains as the
-cold-resume path. Additional outbound rights: Entra token requests for the four agent identities (federated
+cold-resume path. Additional outbound rights: Entra token requests for the three specialist agent identities (federated
 credential from `id-rmc-orchestrator`, §15.4); APIM MCP gateway with workload token plus agent token; Cosmos
 data-plane RBAC on `checkpoints` only (read, create, replace); Key Vault `wrapKey` and `unwrapKey` (no `sign`, no
 `get` of private material) on the per-customer content keys for checkpoint encryption (§16.2) **[LLD decision; plan
@@ -2141,7 +2142,7 @@ policy), CRM platform team (publisher).
 
 | Template id | Alias | Temperature | Max output tokens | Response format | Input token cap | Notes |
 |---|---|---|---|---|---|---|
-| `router.intent` | `gen-small` | 0 | 50 | structured output `{intent, customer_mention}` | 1,000 | Only for free-text entry in the Teams tab; skipped when launched from a CRM record (plan §4.1). v2.6: owned by the `supervisor` agent |
+| `intent.classify` (v2.9, replaces `router.intent`) | `gen-small` | 0 | 150 | **structured outputs, strict JSON Schema** `{tasks: [{id, intent, query, depends_on}], confidence}` (§15.1) | 1,000 | Intent classifier, only for free-text entry in the Teams tab; skipped when launched from a CRM record (plan §4.1); runs under the `orchestrator` workload identity |
 | `uc1.brief` | `gen-large` | 0.2 | 400 | structured output `{talking_points: string[≤ 4]}` with placeholders | 6,000 | System prompt from `code/rm_copilot/llm.py` `BRIEF_SYSTEM`, extended with "no links, no Markdown" |
 | `uc2.rewrite` | `gen-small` | 0 | 120 | structured output `{query, language}` | 1,000 | |
 | `uc2.answer` | `gen-large` | 0 | 350 | plain text with `[n]` citations or exactly `INSUFFICIENT_EVIDENCE` | 5,000 | `POLICY_QA_SYSTEM` |
@@ -2152,7 +2153,7 @@ policy), CRM platform team (publisher).
 | `eval.judge.answer_relevancy` (v2.7) | `judge` | 0 | 200 | structured output `{questions[3], noncommittal}` | 2,000 | eval-runner only |
 | `eval.judge.context_precision`, `eval.judge.context_utilisation` (v2.7) | `judge` | 0 | 200 | structured output `{verdicts[{chunk_id, relevant}]}` | 8,000 | eval-runner only |
 | `eval.judge.context_recall`, `eval.judge.answer_correctness` (v2.7) | `judge` | 0 | 400 | structured output | 8,000 | eval-runner offline only (need a reference) |
-| `session.summarise` (v2.6) | `gen-small` | 0 | 300 | structured output `{summary, refs[]}` | 2,000 | `supervisor`, after the reply is released (§16.4) |
+| `session.summarise` (v2.6) | `gen-small` | 0 | 300 | structured output `{summary, refs[]}` | 2,000 | `orchestrator` service under the `orchestrator` workload identity, after the reply is released, outside the orchestrator's control flow (§16.4) |
 
 Per-request totals stay inside the plan's budget (≤ 12k input, ≤ 1.5k output): UC1 ≤ 7k / 450, UC2 ≤ 11k / 820
 (rewrite + answer + one strict retry), UC3 ≤ 4k / 900.
@@ -2162,7 +2163,7 @@ Per-request totals stay inside the plan's budget (≤ 12k input, ≤ 1.5k output
 | Alias | Model | Deployment name pattern | SKU | Notes |
 |---|---|---|---|---|
 | `gen-large` | latest GA frontier GPT-class model offered as Regional Standard in UAE North **[confirm]** | `gen-large-<yyyy-mm>` | Standard (Regional) | UC1 wording, UC2 answers, judge (eval env and online sampling) |
-| `gen-small` | small GPT-class model, Regional Standard **[confirm]** | `gen-small-<yyyy-mm>` | Standard (Regional) | router, rewrite, extraction |
+| `gen-small` | small GPT-class model, Regional Standard **[confirm]** | `gen-small-<yyyy-mm>` | Standard (Regional) | intent classifier, rewrite, extraction |
 | `embed` | `text-embedding-3-large`, 3,072 dimensions | `embed-<yyyy-mm>` | Standard (Regional) | query and ingestion embeddings |
 
 Each deployment: model version pinned, version upgrade option "no auto upgrade" **[confirm property name]**,
@@ -2705,7 +2706,7 @@ Names carry the `rmc_` prefix in production; the prototype emits the same names 
 | `rmc_guardrail_fallback_total` | counter | `service` (`content-safety`, `language`) | local rules decided |
 | `rmc_runtime_gate_total` | counter | `use_case`, `gate` (`retrieval`, `profile_present`, `citations`, `numeric`, `policy`, `rendering`, `placeholder`, `schema`, `faithfulness`, `answer_relevancy`, `cs_groundedness`), `outcome` (`passed`, `retried`, `declined`, `degraded`, `dropped`, `skipped`) | gate evaluations (§17.2; v2.7) |
 | `rmc_runtime_gate_score` | histogram | `use_case`, `gate` (`top_reranker` 0 to 4; `context_relevance`, `faithfulness`, `answer_relevancy` 0 to 1) | score per gate evaluation (v2.7; replaces `rmc_groundedness_score`) |
-| `rmc_budget_exceeded_total` | counter | `use_case`, `budget` (`request_input_tokens`, `request_output_tokens`, `tool_steps`, `hops`, `deadline`, `rm_daily`), `action` (`refused`, `degraded`) | refusals by the budget guard (§17.2 step 1; v2.7) |
+| `rmc_budget_exceeded_total` | counter | `use_case`, `budget` (`request_input_tokens`, `request_output_tokens`, `tool_steps`, `hops` (label value kept: wave limit, §15.1), `deadline`, `rm_daily`), `action` (`refused`, `degraded`) | refusals by the budget guard (§17.2 step 1; v2.7) |
 | `rmc_online_eval_score` | histogram | `use_case`, `metric` (`faithfulness`, `answer_relevancy`, `context_precision`, `context_utilisation`) | 0 to 1, one observation per judged item; buckets 0.1 to 1.0 by 0.1 (§17.3; v2.7) |
 | `rmc_online_eval_items_total` | counter | `use_case`, `outcome` (`sampled`, `judged`, `skipped_cap`, `skipped_erased`, `skipped_stale`, `judge_error`) | online sampler throughput and coverage (v2.7) |
 | `rmc_online_eval_alert` | gauge | `use_case`, `metric`, `window` (`1h`, `3d`) | 1 when the window breaches its threshold with enough items, else 0 (§17.3 step 8; v2.7) |
@@ -2846,7 +2847,7 @@ is read from its trace.
 | `retrieval` | `embeddings embed`, `search.query` (embed + search + rerank) | `-` | n/a / 700 / n/a |
 | `pii` | `guardrail.pii` | `-` | 300 / 400 / 400 (with `prompt_shields`, parallel where possible) |
 | `prompt_shields` | `guardrail.prompt_shields`, `guardrail.quarantine` | `-` | as `pii` |
-| `routing` | supervisor rule evaluation (no model call in the pilot, plan v2.7a) | `-` | 0 / 0 / 0 |
+| `routing` | intent classifier rule evaluation (no model call in the pilot, plan v2.7a) | `-` | 0 / 0 / 0 |
 | `retrieval_gate` | `gate.retrieval` (§17.2 step 4) | `-` | n/a / ≤ 5 / n/a |
 | `model` | `chat {deployment}` | prompt template id (`uc1.brief`, `uc2.rewrite`, `uc2.answer`, `uc2.answer.strict`, `uc3.extract`, `session.summarise`) | 4,300 (`uc1.brief`) / 600 (`uc2.rewrite`) + 3,500 (`uc2.answer`) / 4,000 (`uc3.extract`) |
 | `post_gates` | `gate.post` (placeholder, numeric, policy, rendering, faithfulness, answer relevancy; §17.2 step 7) | `-` | 100 / 400 / 100 |
@@ -3051,7 +3052,7 @@ named exactly.
 | C25 | MCP tool poisoning, rogue MCP servers | §15.3 (registered servers, definition hashes, pins), §15.5 steps G1, G5 and T3, §15.6 (filtered `tools/list`) | `test_changed_tool_description_rejected`, `test_tools_list_filtered_per_agent`, `test_unregistered_mcp_server_unreachable` (network policy), `test_server_instructions_not_passed_to_model` |
 | C26 | Memory poisoning | §16.2 (`episodes` provenance), §16.5 (write rules, re-check on recall), §9 (quarantine) | `test_injected_text_never_written_to_episodes`, `test_only_approved_or_rm_authored_episodes`, `test_recalled_episode_with_attack_dropped`, red-team memory slice |
 | C27 | Memory leaking across RMs or customers | §16.2 (partition keys by RM `oid`), §16.5 (entitlement re-check), §16.4 (session per RM) | `test_cross_rm_recall_returns_nothing`, `test_recall_after_portfolio_change_denied`, `test_delegate_does_not_see_delegator_episodes`, `test_checkpoint_resume_other_rm_404` |
-| C28 | Multi-agent error compounding, cost and latency | §15.1, §15.2 (one handoff, at most 2 hops, per-agent budgets), §1.4 (`HOP_LIMIT`, `AGENT_STEPS`), §11.8 (per-stage p95, tokens per request by agent), §17.2 step 1 | `test_second_handoff_refused_hop_limit`, `test_request_tool_steps_capped_across_agents`, latency budget regression in the load test |
+| C28 | Multi-agent error compounding, cost and latency | §15.1, §15.2 (at most 2 waves, agents never call each other, per-agent budgets), §1.4 (`HOP_LIMIT`, `AGENT_STEPS`), §11.8 (per-stage p95, tokens per request by agent), §17.2 step 1 | `test_second_handoff_refused_hop_limit`, `test_request_tool_steps_capped_across_agents`, latency budget regression in the load test |
 | C29 | Checkpoints hold customer data | §16.2 (`checkpoints`, encryption, TTL), §16.3 (replay under PIM), §16.7 (erasure) | `test_checkpoint_state_encrypted_with_customer_key`, `test_replay_requires_pim_role_and_acrs`, `test_erasure_makes_checkpoint_unreadable`, `test_checkpoint_ttl_7_days_30_when_draft_open` |
 
 ---
@@ -3133,7 +3134,7 @@ v2.2 with **2 APIM units**; item 11 in v2.3; item 15 in v2.3 with the backends n
 | 16 (v2.6) | §3.3 Keys "orchestrator: none" vs §3.8 "erasure crypto-shreds checkpoints with the customer key" | The checkpointer runs in the orchestrator; encrypting state under the customer key needs at least `unwrapKey` on resume | Orchestrator gets `wrapKey` and `unwrapKey` only on per-customer content keys (no `sign`, never the approval key); data keys cached in-process ≤ 5 min. Alternative if rejected: no per-customer encryption of checkpoints, relying on the 7-day TTL (30 days for open UC3 drafts) to meet erasure deadlines. Plan §3.3 Keys row to be updated |
 | 17 (v2.6) | §3.7 "`crm-drafts`: create drafts (no commit)" vs LLD v1.1 where `web-bff` stores drafts | Two writers of `drafts` | `crm-drafts` creates the draft (partition = token `oid`, `origin: followup-agent`); `web-bff` keeps edits (`PUT` with `If-Match`), approval and reads. `tool-gateway` gets create only on `drafts` |
 | 18 (v2.6) | §3.7 item 1 "`web-bff` gets an OBO token ... carrying ... the agent as actor" | An OBO token obtained by `web-bff` names `web-bff` as the client, not the agent; only the agent itself can do an agent OBO | Default: the RM OBO token from `web-bff` is forwarded unchanged and the agent is proven by the separate agent token (§15.4). Where Entra Agent ID agent OBO is confirmed, the orchestrator exchanges the RM token as the agent and the actor claim must equal the agent token's `azp` (`ACTOR_MISMATCH` otherwise) |
-| 19 (v2.6) | §3.8 Session "written by `web-bff`, `supervisor`" | The orchestrator has no access to `sessions` | The `supervisor` proposes the rolling summary in its response; `web-bff` persists it with an ETag (§16.4) |
+| 19 (v2.6) | §3.8 Session "written by `web-bff`, `orchestrator`" | The orchestrator has no access to `sessions` | The `orchestrator` service proposes the rolling summary in its response; `web-bff` persists it with an ETag (§16.4) |
 
 ### 14.3 Prototype alignment (workstream C, `code/azmock/`, `code/services/`)
 
@@ -3163,22 +3164,35 @@ mock simplifications (the plan and this LLD win):
 
 ## 15. Agents, MCP gateway and identities (plan §3.7, v2.6)
 
-Decisions: ADR-023 (APIM as the MCP gateway), ADR-024 (agent identity), ADR-025 (supervisor-led multi-agent
-orchestration, amends ADR-005). HLD view: `01-hld.md` §7.1. Everything in §1 to §14 still applies; this section
+Decisions: ADR-023 (APIM as the MCP gateway), ADR-024 (agent identity), ADR-025 (multi-agent orchestration with a
+deterministic orchestrator instead of an LLM supervisor, amends ADR-005). HLD view: `01-hld.md` §7.1. Everything in §1 to §14 still applies; this section
 adds the agent layer on top of the tool contracts of §3.
 
 ### 15.1 Runtime and graph model
 
-- One deployment, `orchestrator`, hosts the graph runtime and the four agents; one workload identity,
-  `id-rmc-orchestrator`. The framework (Microsoft Agent Framework workflows or LangGraph) is chosen in ADR-025; this
-  LLD uses neutral terms: **graph**, **node**, **thread**, **checkpoint**, **interrupt**.
-- Graphs are procedural memory (§16.6), versioned and hashed: `supervisor.graph`, `uc1.brief.graph`,
-  `uc2.policy.graph`, `uc3.followup.graph`.
-- Each request carries a run state object: `{request_id, use_case, hop, tool_steps, tokens_in, tokens_out,
-  deadline_at, agent_path[]}`. The `supervisor` is hop 1; its single handoff to a specialist is hop 2. A specialist
-  returns to the `supervisor` for assembly (not a hop) and cannot hand off. Any further handoff is refused with
-  `BUDGET_EXCEEDED/HOP_LIMIT` and the `supervisor` answers with what it has (for a mixed request: "ask the policy
-  question separately") (C28).
+Names follow plan v2.9: **intent classifier** (what is asked?), **orchestrator** (in what order, within what
+limits?), **specialist agents** (`brief-agent`, `policy-agent`, `followup-agent`), and **Supervisor (LLM planner)**
+as a Phase 2 option only. The orchestrator is a deterministic workflow engine in code: it never calls a model, never
+picks a model and never writes to the CRM.
+
+- One deployment, `orchestrator`, hosts the intent classifier, the orchestrator and the three specialist agents; one
+  workload identity, `id-rmc-orchestrator`. Agent identities exist only for the three specialists (§15.4). The
+  orchestrator has no agent identity (the former `supervisor` agent identity is removed in v2.9): it runs under the
+  workload identity, cannot obtain agent tokens or MCP gateway tool tokens and holds no data tools; the intent
+  classifier and the session summariser use the workload identity for the AI gateway. The framework (Microsoft Agent Framework workflows or LangGraph) is chosen in
+  ADR-025; this LLD uses neutral terms: **graph**, **node**, **thread**, **checkpoint**, **interrupt**, **task**,
+  **wave**.
+- Graphs are procedural memory (§16.6), versioned and hashed: `orchestrator.graph`, `uc1.brief.graph`,
+  `uc2.policy.graph`, `uc3.followup.graph`. The intent table below is procedural memory too
+  (`rmc:orchestrator:intent_table` pin, eval-gated like a prompt).
+- Each request carries a run state object: `{request_id, tasks[], wave, tool_steps, tokens_in, tokens_out,
+  deadline_at, agent_path[], results{}}`. A specialist reports its typed result back to the orchestrator and cannot
+  start another agent; agents never call each other. A plan or call that would open a third wave, or a specialist
+  trying to hand off, is refused with `BUDGET_EXCEEDED/HOP_LIMIT` (reason code kept from v2.6) and the orchestrator
+  answers with what it has and offers the rest as a follow-up turn (C28).
+- **Prototype deviation.** The pilot prototype runs one task per request (a single wave: the orchestrator plus one
+  specialist, so its hop limit stays 2 agent nodes). Multi-task waves below, at most 2 per request, are the
+  production design.
 - **No model function calling in the pilot.** Each specialist's tool calls are nodes of its fixed graph. The model
   may fill bounded arguments (the UC2 rewritten query, the UC3 draft body) that are validated against the pinned
   input schema before the call. §8.3 ("no `tools`") is unchanged. Model-selected tool calls over the filtered
@@ -3186,19 +3200,95 @@ adds the agent layer on top of the tool contracts of §3.
 - Verification (placeholder fill, numeric, policy and groundedness checks) is code in the specialist graphs, not an
   agent. The commit is a code node that calls `POST /internal/v1/commits` (§4.4), never an MCP tool.
 
+**Intent classifier output.** Rules first: a CRM-record launch, a tab button or a clear phrase produces the task
+list in code with `confidence = 1.0` and no model call. Free text in the Teams tab (after the input guardrails, PII
+masked) goes to template `intent.classify` (`gen-small`, strict JSON Schema, §8.1):
+
+```json
+{"tasks": [
+   {"id": "t1", "intent": "customer_brief", "query": "Prep me for [CUSTOMER_1]", "depends_on": []},
+   {"id": "t2", "intent": "policy_question", "query": "Which documents refresh an expiring KYC review?", "depends_on": ["t1"]}
+ ],
+ "confidence": 0.86}
+```
+
+| Field | Rule |
+|---|---|
+| `tasks[].id` | `t1`, `t2`; unique within the request |
+| `tasks[].intent` | Enum from the intent table: `customer_brief`, `policy_question`, `followup_draft`, `out_of_scope` |
+| `tasks[].query` | The masked sub-request for that task; a customer mention stays a placeholder and is resolved by code, then entitlement-checked on the tool call |
+| `tasks[].depends_on` | Ids of earlier tasks this task needs; empty for independent tasks; must be acyclic |
+| `confidence` | One value for the whole decomposition, 0 to 1 |
+
+| Confidence | Action |
+|---|---|
+| ≥ 0.8 | Proceed: the orchestrator plans the tasks |
+| 0.5 to < 0.8 | Clarify: return a short question with a menu of the matching intents; no agent runs |
+| < 0.5, or any task `out_of_scope` | Decline with the menu of supported requests; no agent runs |
+
+After classification, code sets `cache_eligible = true` only when every task is `policy_question` and the Phase 2
+semantic cache is enabled; customer intents are never cache-eligible. A schema-invalid output counts as confidence 0.
+One decision per request, no loop.
+
+**Orchestrator intent table** (fixed, versioned):
+
+| Intent | Agent | Kind | `depends_on` allowed | Wave | Budget share (alone / first task / second task) | Condition for a dependent run |
+|---|---|---|---|---|---|---|
+| `customer_brief` | `brief-agent` | read | none | 1 | 100% / 60% / 40% | n/a |
+| `policy_question` | `policy-agent` | read | none, or one `customer_brief` task | 1 if independent, else 2 | 100% / 60% / 40% | Run only if the brief finished `ok` or `partial` and the field the pair is defined on holds (for example `kyc_status` is not `current`) |
+| `followup_draft` | `followup-agent` | write (draft, then commit after RM approval) | none, or one read task | Last wave, alone | 100% / n/a / 40% | Run only if the read it depends on finished `ok` or `partial` |
+| `out_of_scope` | none | n/a | n/a | n/a | n/a | Declined by the intent classifier |
+
+Budget share applies to the request budget of plan §5 (12k input and 1.5k output tokens, ≤ 6 tool steps); each
+agent's own caps (§15.2) still apply, whichever is lower. Up to 2 tasks are planned per request; a further task is
+returned as a suggested follow-up turn. A task whose share is below its minimum viable budget first drops optional
+steps (the UC2 strict retry, the UC1 episodic recall); if it still does not fit, it is not started and is offered as
+a follow-up turn. The time budget is the request deadline: tasks in one wave share it concurrently; with two waves,
+wave 1 gets 60% of the remaining deadline and wave 2 the rest, each still bounded by the §1.6 timeout rule.
+
+**Wave planning** (code, in `orchestrator.graph` node `plan`):
+1. Validate the task list against the intent table: known intents, ≤ 2 tasks, `depends_on` ids exist and are
+   acyclic, at most one write task. Anything else is a clarify (no agent runs).
+2. Wave 1: every read task with empty `depends_on`. Tasks for the same agent are bundled into one agent call (for
+   example two policy questions become one `policy-agent` call with two queries). Wave 1 tasks run concurrently.
+3. Wave 2: dependent tasks, run only if their condition holds, and the write task. A write runs last and alone; a
+   request that is only a write runs it as its single wave.
+4. A plan needing a third wave is refused (`HOP_LIMIT`); the orchestrator keeps the first two waves and offers the
+   rest as a follow-up turn.
+5. Split the budget by the shares above, checkpoint the plan, run wave 1, read the typed results, then decide wave 2
+   by the table below.
+
+**Typed result from a specialist** (one per task): `{task_id, agent, status, output, sources[], scores{faithfulness,
+answer_relevancy, top_reranker}, missing[], reason, usage{tokens_in, tokens_out, tool_steps, ms}}`.
+
+| `status` | Meaning | Orchestrator action |
+|---|---|---|
+| `ok` | Complete and verified by the specialist's checks | Use the output; run dependent tasks whose condition holds |
+| `partial` | Verified, but sections listed in `missing[]` are unavailable (for example LOS facilities timed out) | Use the output with the missing sections flagged; run a dependent task only if its inputs are not in `missing[]` |
+| `declined` | The specialist declined (insufficient evidence, not entitled, policy check) with a `reason` | Show the decline reason; skip dependent tasks; no retry by the orchestrator |
+| `needs_approval` | A write task produced drafts that wait for the RM | Checkpoint and interrupt at `await_approval`; return the drafts; resume on approval (§16.3); nothing runs after it |
+| `error` | Timeout, dependency failure or budget exceeded | Degraded mode for that task where defined (plan C3); skip dependent tasks; other wave 1 results are still returned |
+
+The orchestrator then combines the results in task order and sends them to the output guardrails; nothing is
+released before every included result has passed them (C18).
+
+**Phase 2 option: Supervisor (LLM planner).** A model may propose the plan as JSON in the same shape as the output
+of `plan`. The orchestrator validates it against the intent table (known agents, ≤ 2 waves, writes last, valid
+dependencies, budget shares) and falls back to the fixed table if it is invalid. Not in the pilot (ADR-025).
+
 | Graph | Nodes in order (MCP calls in bold, model calls in italics) | Interrupt |
 |---|---|---|
-| `supervisor.graph` | `route` (rules on the launch context; *`router.intent`* only for Teams free text) → `handoff` → specialist → `assemble` → (after release) *`session.summarise`* | none |
+| `orchestrator.graph` | `classify` (rules on the launch context; *`intent.classify`* only for Teams free text) → `plan` (intent table, waves, budget split) → wave 1 specialist call(s), concurrent → (if needed) wave 2 → `combine` → output guardrails → (after release) *`session.summarise`* | none (the specialist graph interrupts) |
 | `uc1.brief.graph` | **`customer-data.get_brief_inputs`** in parallel with **`memory.recall_episodes`** → `mask_and_shield` → *`uc1.brief`* → `fill_and_check` | none |
 | `uc2.policy.graph` | `shield_and_mask` → *`uc2.rewrite`* → **`policy-search.search_policies`** → `evidence_gate` → *`uc2.answer`* → `groundedness` → (retry rule §9.3) | none |
 | `uc3.followup.graph` | `guard_input` → **`customer-data.get_customer_profile`** → *`uc3.extract`* → `validate` → **`crm-drafts.create_followup_draft`** → `await_approval` → `commit` (REST, code) | `await_approval` |
 
 ### 15.2 Agent catalogue
 
-| Agent id | Entra identity and app roles (on `rmc-tool-gateway`) | Allowed MCP tools | Model alias and templates | Budgets per request | Max hops |
+| Agent id | Entra identity and app roles (on `rmc-tool-gateway`) | Allowed MCP tools | Model alias and templates | Budgets per request | Waves and handoffs |
 |---|---|---|---|---|---|
-| `supervisor` | `rmc-agent-supervisor`; **no app roles** (it is never issued a tool token; its identity is used for attribution) | none | `gen-small`: `router.intent` (free text only), `session.summarise` (after release) | 0 tool calls; ≤ 1 routing call (≤ 1,000 input, ≤ 50 output tokens, ≤ 1,000 ms); summary ≤ 2,000 / 300 tokens off the request deadline, counted in the RM daily quota | may hand off once (hop 1 → 2) |
-| `brief-agent` (UC1) | `rmc-agent-brief`; `Tools.CustomerData.Read`, `Tools.Memory.Recall` | `customer-data`: `get_brief_inputs`, `get_customer_profile`, `get_facilities`, `get_transaction_signals`, `get_kyc_status`, `get_news`; `memory`: `recall_episodes` | `gen-large`: `uc1.brief` | ≤ 2 tool calls (composite plus recall); ≤ 7k input, ≤ 450 output tokens; tool timeout `min(2,000, remaining − 2,800)`, recall `min(300, ...)` | 0 (cannot hand off) |
+| `orchestrator` (not an agent; formerly `supervisor`) | **No agent identity** (v2.9): runs under the workload identity `id-rmc-orchestrator`, which cannot obtain agent tokens or MCP gateway tool tokens; `x-rmc-agent: orchestrator` on its AI gateway calls is a metric dimension only | none | The orchestrator itself: none. The intent classifier in the same service: `gen-small` `intent.classify` (free text only); the session summariser: `session.summarise` (after release) | 0 tool calls; ≤ 1 classification call (≤ 1,000 input, ≤ 150 output tokens, ≤ 1,000 ms); summary ≤ 2,000 / 300 tokens off the request deadline, counted in the RM daily quota | plans ≤ 2 waves, ≤ 2 tasks |
+| `brief-agent` (UC1) | `rmc-agent-brief`; `Tools.CustomerData.Read`, `Tools.Memory.Recall` | `customer-data`: `get_brief_inputs`, `get_customer_profile`, `get_facilities`, `get_transaction_signals`, `get_kyc_status`, `get_news`; `memory`: `recall_episodes` | `gen-large`: `uc1.brief` | ≤ 2 tool calls (composite plus recall); ≤ 7k input, ≤ 450 output tokens; tool timeout `min(2,000, remaining − 2,800)`, recall `min(300, ...)` | 0 (reports back, cannot start another agent) |
 | `policy-agent` (UC2) | `rmc-agent-policy`; `Tools.PolicySearch` | `policy-search`: `search_policies` | `gen-small`: `uc2.rewrite`; `gen-large`: `uc2.answer`, `uc2.answer.strict` | ≤ 1 tool call (the strict retry reuses the passages); ≤ 11k input, ≤ 820 output tokens | 0 |
 | `followup-agent` (UC3) | `rmc-agent-followup`; `Tools.CustomerData.Profile`, `Tools.CrmDrafts.Create` | `customer-data`: `get_customer_profile` only; `crm-drafts`: `create_followup_draft` | `gen-small`: `uc3.extract` | ≤ 2 tool calls; ≤ 4k input, ≤ 900 output tokens | 0 |
 
@@ -3512,7 +3602,7 @@ Example `checkpoints` document (UC3, paused for approval):
  "checkpoint_ns": "uc3:01937a50-0f00-7000-8000-0000000000aa", "checkpoint_id": "01937a50-1199-7000-8000-000000000006",
  "parent_checkpoint_id": "01937a50-1180-7000-8000-000000000005", "step": 6,
  "rm_oid": "6b1f8a2e-...", "customer_ref": "hmac:7c2f...", "use_case": "uc3_draft",
- "graph": {"id": "uc3.followup.graph", "version": 2, "sha256": "0d9a..."}, "node": "await_approval", "agent": "followup-agent", "hop": 2,
+ "graph": {"id": "uc3.followup.graph", "version": 2, "sha256": "0d9a..."}, "node": "await_approval", "agent": "followup-agent", "wave": 1,
  "status": "interrupted", "interrupt": {"kind": "approval", "draft_id": "01937a50-1111-7000-8000-000000000abc", "draft_etag": "4"},
  "state_enc": {"alg": "A256GCM", "kek_kid": "https://kv-rmc-cust.vault.azure.net/keys/cust-7c2f/91ab", "wrapped_dek": "b64...", "iv": "b64...", "ct": "b64..."},
  "state_sha256": "e3b1...", "budgets_used": {"tool_calls": 2, "tokens_in": 3120, "tokens_out": 640},
@@ -3532,7 +3622,7 @@ v2.6 fields in `sessions` (session memory, §16.4):
    "turns": [{"role": "rm", "use_case": "uc2", "text": "What trading history do we need for an unsecured line?", "at": "2026-11-26T05:30:02Z"},
              {"role": "copilot", "use_case": "uc2", "text": "Credit Policy 4.2 clause 3.1 requires 3 years of trading history ... [1]", "refs": ["DOC-CP-4.2#3.1"], "at": "2026-11-26T05:30:08Z"}],
    "summary": {"text": "RM asked about unsecured lending eligibility; answered from Credit Policy 4.2 clause 3.1.",
-               "refs": ["DOC-CP-4.2#3.1"], "by": "supervisor/session.summarise@1", "updated_at": "2026-11-26T05:30:10Z"},
+               "refs": ["DOC-CP-4.2#3.1"], "by": "orchestrator/session.summarise@1", "updated_at": "2026-11-26T05:30:10Z"},
    "tokens_estimate": 210},
  "ttl": 86400}
 ```
@@ -3614,10 +3704,10 @@ after a portfolio change grants nothing.
 | Rule | Value **[LLD decision]** |
 |---|---|
 | Turns kept verbatim | Last N = 6 turns (3 exchanges), each ≤ 1,000 characters, PII masked (AI Language plus regex; the placeholder mapping is not stored) |
-| Rolling summary | ≤ 300 tokens, template `session.summarise@1` (`gen-small`), produced by the `supervisor` **after** the reply is released (adds no latency); turns older than N are folded in |
+| Rolling summary | ≤ 300 tokens, template `session.summarise@1` (`gen-small`), produced in the `orchestrator` service **after** the reply is released (adds no latency); turns older than N are folded in |
 | Summary hygiene | Numbers replaced by `[n]` (digits and number words, English and Arabic: the numeric check vocabulary), quarantine rules applied, only references kept (customer ids, document and clause ids); customer facts are not kept (plan §3.8) |
 | Context budget | ≤ 1,500 tokens of the 12k request input budget: summary first, then the newest turns until the budget is used; `rmc:orchestrator:session:context_tokens` |
-| Who receives it | `supervisor` (intent and references such as "that customer") and `policy-agent` (follow-up policy questions). `brief-agent` and `followup-agent` receive only the resolved `customer_id` and the RM profile, because their facts must come from tools |
+| Who receives it | The intent classifier (intent and references such as "that customer") and `policy-agent` (follow-up policy questions). `brief-agent` and `followup-agent` receive only the resolved `customer_id` and the RM profile, because their facts must come from tools |
 | Authority | None: a `customer_id` resolved from context still goes through the entitlement check on the tool call |
 | Persistence | `web-bff` appends the turns after release (ETag on the session document); the orchestrator returns `context_update {summary, refs, base_version}` and `web-bff` applies it only if `base_version` matches |
 | Lifetime | The session's 24 h TTL; sign-out deletes the session document |
@@ -3760,9 +3850,9 @@ the gate configuration version in its lineage (`eval.runtime: {top, context_rele
 answer_relevancy_rt, attempts, gate_version}`), never in telemetry content.
 
 1. **Budget guard (before every tool or model call, all use cases).** Refuse the call if `tool_steps_used ≥ 6`,
-   `hops ≥ 2`, `input_used + count_tokens(prompt) > 12,000`, or `output_used + max_completion_tokens > 1,500`
+   a call that would open a third wave, `input_used + count_tokens(prompt) > 12,000`, or `output_used + max_completion_tokens > 1,500`
    (counted with the model's tokenizer before calling, §8.4); or if `remaining_ms < floor` for that dependency
-   (§1.6). Token and step breaches return `429 BUDGET_EXCEEDED/REQUEST_*` (`AGENT_STEPS`, `HOP_LIMIT` as §15.2); a
+   (§1.6). Token and step breaches return `429 BUDGET_EXCEEDED/REQUEST_*` (`AGENT_STEPS`, `HOP_LIMIT` as §15.1); a
    deadline breach on a model call switches to degraded mode. Each refusal increments
    `rmc_budget_exceeded_total{use_case, budget, action}`.
 2. **Input guardrails** as §9.3 steps 1 to 4 (unchanged).

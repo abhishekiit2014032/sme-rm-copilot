@@ -1,6 +1,6 @@
 # AI system design walkthrough: the SME RM Copilot, step by step
 
-Status: v1.3, 27 Nov 2026 (opens with the complete architecture and the 14 build-up frames; plan v2.6: block 07 moves to a supervisor and specialist agents; blocks 12 and 13 added; plan v2.7: block 11 rewritten around four evaluation tiers, block 10 adds tokens per request, per-stage p95 and cost) · Companion to `00-plan.md` (baseline), `01-hld.md`, `02-lld.md` and the ADRs.
+Status: v1.3, 27 Nov 2026 (opens with the complete architecture and the 14 build-up frames; plan v2.6: block 07 moves to an orchestrator and specialist agents (names per plan v2.9: intent classifier, orchestrator, specialist agents); blocks 12 and 13 added; plan v2.7: block 11 rewritten around four evaluation tiers, block 10 adds tokens per request, per-stage p95 and cost) · Companion to `00-plan.md` (baseline), `01-hld.md`, `02-lld.md` and the ADRs.
 
 ## The complete architecture
 
@@ -48,9 +48,9 @@ Each frame shows the architecture after one step; the part added in that step is
 
 ![Step 04 · Semantic cache (off by design)](diagrams/system-design/step-04.png)
 
-**Added:** A semantic cache beside the router, not on the main path: once the router knows the intent, it may consult the cache for public policy questions only (Phase 2). Customer data is never cached, and the cache is off in the pilot.
+**Added:** A semantic cache beside the intent classifier, not on the main path: once the intent classifier knows the intent, it may consult the cache for public policy questions only (Phase 2). Customer data is never cached, and the cache is off in the pilot.
 
-**Why:** Only the router knows whether a request is a public policy question or about a customer, so the cache decision belongs after it. A cached answer reaching the wrong RM would be a leak, and at 300 RMs the saving is small.
+**Why:** Only the intent classifier knows whether a request is a public policy question or about a customer, so the cache decision belongs after it. A cached answer reaching the wrong RM would be a leak, and at 300 RMs the saving is small.
 
 ### Step 05 · Knowledge freshness
 
@@ -68,13 +68,13 @@ Each frame shows the architecture after one step; the part added in that step is
 
 **Why:** Notes say "I'll get your limit raised"; the copilot can never approve credit, pricing or limits, and every CRM change has an accountable RM.
 
-### Step 07 · Model routing (supervisor)
+### Step 07 · Model routing (intent classifier and orchestrator)
 
-![Step 07 · Model routing (supervisor)](diagrams/system-design/step-07.png)
+![Step 07 · Model routing (intent classifier and orchestrator)](diagrams/system-design/step-07.png)
 
-**Added:** A supervisor routes each request; rules where possible, the small model for routing and extraction, the large model only for writing; the model gateway in front of Azure OpenAI.
+**Added:** An intent classifier (rules where possible, the small model only for free text) and a deterministic orchestrator (code, no model call) that plans the work; the small model for classification and extraction, the large model only for writing; the model gateway in front of Azure OpenAI.
 
-**Why:** All-frontier would cost about $7.4k a month (illustrative); routing brings it to about $5k and cuts latency on the small steps.
+**Why:** All-frontier would cost about $7.4k a month (illustrative); model tiering brings it to about $5k and cuts latency on the small steps.
 
 ### Step 08 · Fault tolerance and fallback
 
@@ -112,7 +112,7 @@ Each frame shows the architecture after one step; the part added in that step is
 
 ![Step 12 · Agent identity and the MCP gateway](diagrams/system-design/step-12.png)
 
-**Added:** Brief, policy and follow-up agents behind the supervisor; tools only through the MCP gateway (APIM) to internal MCP servers; access = RM (OIDC/OBO) ∩ agent service principal ∩ pod managed identity; tool lists filtered per agent, tool definitions pinned.
+**Added:** Brief, policy and follow-up agents behind the orchestrator; tools only through the MCP gateway (APIM) to internal MCP servers; access = RM (OIDC/OBO) ∩ agent service principal ∩ pod managed identity; tool lists filtered per agent, tool definitions pinned.
 
 **Why:** Least privilege per agent: the policy agent cannot touch customer data, and a hijacked prompt, stolen token or compromised pod alone cannot reach data.
 
@@ -245,13 +245,13 @@ first. Guardrails also block some legitimate banking language; the false-positiv
 
 **Key questions.** *What must it never say?* Approval, pricing or limit commitments, figures not from a system of
 record, uncited policy, other customers' data; the list is owned by Credit Risk and Compliance. *Is it leaking PII?*
-PII is masked before every model call and telemetry carries metadata only; tests assert nothing reaches the model
-mock (ADR-011, ADR-012).
+PII is masked before every model call and telemetry carries metadata only; testing verifies that no unmasked PII reaches
+a model (ADR-011, ADR-012).
 
 ### 04 · Semantic caching (cache layer)
 **Situation.** Hundreds of RMs ask "What documents do I need to open an SME account?" in slightly different words.
 
-**Decision.** The cache sits **beside the router, not in front of it**: only after the router has classified the intent
+**Decision.** The cache sits **beside the intent classifier, not in front of it**: only after the intent classifier has classified the intent
 can it know whether a request is a public policy question (possibly cacheable) or about a customer (never). **No
 caching of anything customer-specific, ever**: a cached brief served to the wrong RM is an entitlement leak, and
 loose thresholds return answers to questions nobody asked. In the pilot the semantic cache is **off** entirely. A Phase 2 option for
@@ -304,26 +304,39 @@ every change in the system of record, which is what the regulator and model-risk
 **Key questions.** *Which intents are never handled by AI?* The four above. *Can it offer anything on its own?* No:
 any retention or pricing gesture is a business rule decided by people, not by the model.
 
-### 07 · Model routing and minimum sufficient intelligence (supervisor and specialist agents)
+### 07 · Model routing and minimum sufficient intelligence (intent classifier, orchestrator, specialist agents)
 **Situation.** Sending every step to the frontier model would cost about $7.4k/month and add latency for no gain. And
 one generalist agent holding every tool would be both expensive and over-privileged: the policy question would run
 next to tools that read customer accounts.
 
-**Component (plan v2.6).** A **supervisor** agent and three **specialist** agents, run as small fixed graphs in the
-orchestrator on AKS (ADR-025, amending ADR-005). The supervisor classifies the intent (rules on the launch context; a
-`gen-small` call only for free text in the Teams tab), sets the step, time and token budgets, hands off **once** to one
-specialist and assembles the reply. The specialists are `brief-agent` (UC1), `policy-agent` (UC2) and
-`followup-agent` (UC3), each with its own model, prompts and tools (block 12). Verification (numeric, policy and
-groundedness checks) stays deterministic code, not an agent, and the commit is not an agent tool.
+**Component (plan v2.6, names from v2.9).** Three roles, run in the orchestrator service on AKS (ADR-025, amending
+ADR-005):
+- The **intent classifier** understands the request: rules on the launch context first, a `gen-small` call only for
+  free text in the Teams tab. It returns a task list with a confidence: at 0.8 or above the request proceeds, between
+  0.5 and 0.8 the RM is asked to clarify, below 0.5 or out of scope it declines. One decision, no loop.
+- The **orchestrator** is deterministic code that never calls a model. It plans the tasks from a fixed intent table,
+  runs independent reads together in wave 1 and dependent or write tasks in wave 2 (at most 2 waves; writes last and
+  alone, after RM approval), sets and enforces the step, time and token budgets, reads each agent's typed result and
+  combines the reply.
+- The **specialist agents** are `brief-agent` (UC1), `policy-agent` (UC2) and `followup-agent` (UC3), each with its
+  own model, prompts and tools (block 12). They reason; they never call each other.
+
+Verification (numeric, policy and groundedness checks) stays deterministic code, not an agent, and the commit is not
+an agent tool.
+
+We deliberately use a deterministic orchestrator instead of an LLM supervisor: the model understands the request
+(intent classifier) and the specialist agents reason, but code controls execution, so ordering, budgets and
+approvals are guaranteed and auditable. An LLM supervisor (planner) is a Phase 2 option, with the orchestrator still
+validating every plan.
 
 **Decision.** Climb only as high as the task needs:
 
 | Task | Agent | Approach |
 |---|---|---|
-| Open a brief from a CRM record | `supervisor` | Rules on the launch context, no router call; `brief-agent` runs a fixed fan-out of read tools |
+| Open a brief from a CRM record | intent classifier, orchestrator | Rules on the launch context, no model call; `brief-agent` runs a fixed fan-out of read tools |
 | Every figure in a brief | `brief-agent` graph | Rules: filled from tool output via placeholders, never generated |
 | Next-best actions from transaction signals | `brief-agent` graph | Rules (`rules` step in the trace) |
-| Intent of free text (Teams tab) | `supervisor` | `gen-small` |
+| Intent of free text (Teams tab) | intent classifier | `gen-small` with structured output |
 | Query rewrite | `policy-agent` | `gen-small` |
 | Notes → JSON call report, tasks, signals | `followup-agent` | `gen-small` with schema validation |
 | Brief wording, policy answer with citations | `brief-agent`, `policy-agent` | `gen-large` |
@@ -331,14 +344,14 @@ groundedness checks) stays deterministic code, not an agent, and the commit is n
 
 **Trade-off.** More moving parts and two model versions to evaluate and pin, against roughly a third of the cost of
 all-frontier and lower latency on the small steps. Specialists keep each agent's prompt and toolset small and give
-least privilege per agent; the price is one identity per agent to govern and a supervisor step (no extra model call
-when the launch context decides). We do not let agents converse freely: one handoff, at most two agent hops, fixed
-graphs and per-agent budgets, so errors cannot compound (Q10). Each tier is gated on the golden set (block 11)
+least privilege per agent; the price is one identity per agent to govern and an intent classification step (no
+extra model call when the launch context decides). We do not let agents converse: at most two waves per request,
+fixed graphs and per-agent budgets, so errors cannot compound (Q10). Each tier is gated on the golden set (block 11)
 (ADR-004, ADR-005, ADR-025).
 
 **Key questions.** *Which queries deserve the expensive model?* Only writing for humans: brief wording and cited
 policy answers. *Why not one agent with all tools?* A larger toolset means more wrong tool choices and more privilege
-for an injected prompt to use; a supervisor with three narrow specialists keeps each one testable. *What if the cost
+for an injected prompt to use; a deterministic orchestrator with three narrow specialists keeps each one testable. *What if the cost
 threshold is crossed?* Azure budget alert at 80%, per-use-case and per-agent token reports, and APIM caps stop
 runaway use.
 
@@ -356,7 +369,7 @@ residency rules keep inference in the UAE (ADR-001, ADR-015). Graceful degradati
 
 **Key questions.** *Uptime target and what users see?* 99.0% pilot; a degraded answer is clearly flagged and counts as
 available. *Is the fallback tested on the eval set?* Yes: the secondary deployment pins the same model version and
-runs the same golden-set gate; degraded modes are covered by stack tests (model backends down → degraded responses).
+runs the same golden-set gate; degraded modes are covered by failure-injection tests (model backends down → degraded responses).
 
 ### 09 · Scaling for traffic spikes (autoscaling, queue)
 **Situation.** Quarter-end portfolio reviews triple traffic on Monday morning, and the core banking replica starts to
@@ -420,7 +433,7 @@ rate (plan §3.9, ADR-027, `02-lld.md` §17).
    returned passage, ≥ 0.9 of claims supported by word overlap and embedding similarity, no number missing from the
    source), answer relevancy (≥ 0.7, question-to-answer similarity calibrated to the RAGAS score), and the numeric and
    policy checks. A failure retries once with a stricter prompt if ≥ 4 s remain, else declines. Budget guards check
-   tokens, steps, hops and the deadline before every call. Every outcome is counted.
+   tokens, steps, waves and the deadline before every call. Every outcome is counted.
 2. **Online sampled, minutes later.** 5% of UC1 and UC2 answers (cap 200 a day) are scored by an **in-region judge**
    on faithfulness, answer relevancy, context precision and context utilisation, reading masked content from the
    audit store; RM thumbs-up or down joins them. Rolling 1 h scores go to Grafana; an alert fires if faithfulness drops
@@ -459,8 +472,8 @@ judge about 1.6 M tokens a day at scale (≈ 5% of user traffic); nightly and re
 release, a tool description is changed so that it tells the model to "also list the RM's other customers". And an
 agent token copied from a log is replayed from a laptop.
 
-**Component.** Each agent has its **own Entra identity** (Entra Agent ID where available, else a service principal)
-with app roles for exactly its tools; its only credential is the orchestrator pod's **managed identity** (federated
+**Component.** Each specialist agent has its **own Entra identity** (Entra Agent ID where available, else a service
+principal) with app roles for exactly its tools (the orchestrator has none and cannot obtain agent or tool tokens); its only credential is the orchestrator pod's **managed identity** (federated
 credential), so there is no secret to steal and an agent token cannot be minted outside the pod. Tools are **MCP
 servers** in `tool-gateway` (`customer-data`, `policy-search`, `crm-drafts`, `memory`) behind **APIM as the MCP
 gateway**. Every tool call carries three tokens: the RM (OBO from the sign-in), the agent, and the workload. The
@@ -471,14 +484,14 @@ is not a tool (ADR-023, ADR-024; `01-hld.md` §7.1, `02-lld.md` §15).
 
 **Decision and trade-off.** The intersection, not either identity alone. The RM's token alone (the v2.4 design) would
 let any agent do anything the RM can; the agent's identity alone would make each agent a super-user over every
-customer. Cost: three token validations per call (about 30 ms at the gateway [estimate]), four more identities to
+customer. Cost: three token validations per call (about 30 ms at the gateway [estimate]), three more identities to
 review every quarter, and a dependency on Entra Agent ID and APIM MCP features that are **[confirm]** in UAE North;
 the fallback is plain app registrations and a standard APIM API with the same checks, so the design does not depend
 on preview features.
 
 **Key questions.** *Which identity does a tool call run as?* All three: the RM's for data access, the agent's for the
 tool, the workload's for where it runs. *Can a manipulated agent do more than the RM?* No, and not more than its own
-tools either. *What can the supervisor touch?* No data tools at all. *Can a tool description be changed to steer the
+tools either. *What can the orchestrator touch?* No data tools at all, and it never calls a model. *Can a tool description be changed to steer the
 model?* A changed definition no longer matches its pinned hash and is refused (C25). *Who reviews agent privileges?* The Bank identity team, quarterly, against
 the agent manifests; a token with extra roles is rejected at the gateway (C24).
 
@@ -518,7 +531,7 @@ the eval gate; never the model at runtime.
 
 | Lane | What it holds |
 |---|---|
-| A · Online request path | What every request flows through: identity (01), limits (02), input guardrails (03), the supervisor as router and orchestrator (07) with the semantic cache beside it (04, consulted only for public policy intents, off for customer data), output guardrails (03), answer |
+| A · Online request path | What every request flows through: identity (01), limits (02), input guardrails (03), the intent classifier and the orchestrator (07) with the semantic cache beside the intent classifier (04, consulted only for public policy intents, off for customer data), output guardrails (03), answer |
 | B · Controlled execution | Retrieval over the policy index (05), bank tools as MCP servers behind the MCP gateway with three identities per call (12), entitlement checks and RM-approved writes, the model gateway with fallback (07, 08), human in the loop (06) |
 | C · State and data freshness | Knowledge ingestion with versioned, effective-dated chunks (05), memory: checkpoints, session, episodic, profile and procedural pins (13), approval state in Cosmos DB, secure storage (Key Vault, immutable audit) |
 | D · Production operations | Observability (10), evaluation (11), reliability and scale (08, 09), release and recovery |
@@ -534,10 +547,10 @@ Built one block at a time: `diagrams/system-design/step-00.png` (v1) to `step-13
 1. **API gateway + identity:** App Gateway and `web-bff` confirm Layla is signed in, exchange her token for a
    tool-gateway token, and set an 8 s deadline. APIM checks her token budget.
 2. **Input guardrails:** the request text is checked for injection and masked for PII.
-3. **Supervisor (router + orchestrator):** opened from a CRM record, so no model call is needed to classify it as a
-   customer brief. A customer brief is never cacheable, so the supervisor does not consult the semantic cache. It
-   sets the step, time, token and hop budgets and hands off once to `brief-agent`; the graph checkpoints its state
-   after every node.
+3. **Intent classifier, then orchestrator:** opened from a CRM record, so a rule (no model call) classifies it as one
+   customer brief task. A customer brief is never cacheable, so the intent classifier does not consult the semantic
+   cache. The orchestrator (code, no model) plans a single wave, sets the step, time and token budgets and hands the
+   task to `brief-agent`; it checkpoints the state after every step.
 4. **Specialist agent:** `brief-agent` plans the fixed brief workflow within its budget.
 5. **Bank tools through the MCP gateway:** `brief-agent` calls `customer-data` and `memory` through APIM with three
    tokens (Layla's, the agent's, the pod's). The gateway checks the agent may use these tools; the tool-gateway checks
@@ -548,7 +561,7 @@ Built one block at a time: `diagrams/system-design/step-00.png` (v1) to `step-13
    if needed); the model writes wording with `{placeholders}`, never figures.
 7. **Output guardrails:** placeholders are filled from tool output; the numeric and policy checks drop any line with an
    invented number or a promise; the verified talking points are released.
-8. **Throughout:** one trace links every hop; the audit chain records what was read and shown; samples feed the
+8. **Throughout:** one trace links every step; the audit chain records what was read and shown; samples feed the
    evals.
 
 A follow-up adds: notes → guardrails → `followup-agent` reads the profile and `gen-small` drafts → the draft is saved
@@ -568,13 +581,13 @@ before the pilot or go-live (owner in `07-review-log.md`).
 |---|---|---|
 | Requirements with numeric targets for latency, uptime, cost and safety | Designed | Plan §5, this doc Step 1 |
 | Back-of-envelope estimate for peak traffic, tokens and monthly spend | Designed | Step 1, `05` §2 |
-| Every user authenticated; identity enforced in tools, not prompts | Prototyped | Block 01; stack identity tests |
-| Per-user rate limits and quotas | Prototyped | Block 02; APIM mock token limits |
+| Every user authenticated; identity enforced in tools, not prompts | Prototyped | Block 01; identity tests |
+| Per-user rate limits and quotas | Prototyped | Block 02; token limits per RM |
 | Input and output guardrails, "never say" list signed off by legal/compliance | Prototyped · **Gate** (sign-off) | Block 03 |
 | Cache policy: what is cacheable, similarity, expiry, invalidation | Designed (off in pilot) | Block 04 |
 | Ingestion pipeline with a freshness target per data source | Prototyped · target set (60 min) | Block 05 |
 | Clear escalation rules: intents AI never handles, approval thresholds | Prototyped (approval on every write) | Block 06 |
-| Router sending each request type to the cheapest approach that meets quality | Designed · partly prototyped | Block 07 |
+| Intent classifier and model tiers sending each request type to the cheapest approach that meets quality | Designed · partly prototyped | Block 07 |
 | Timeouts, retries and a tested fallback | Prototyped (secondary deployment, degraded modes) | Block 08 |
 | Load test at peak; queue for long-running work; streaming | Prototyped (load test, outbox); streaming deliberately off | Block 09 |
 | End-to-end tracing, dashboards and alerts on latency, errors and cost; per-stage p95, tokens per request and cost per request (v2.7) | Prototyped (traces, metrics) · stage, token and cost metrics Designed · dashboards **Gate** | Block 10 |
@@ -626,10 +639,12 @@ and pricing are never handled by AI; it prepares context and points the RM to th
 patterns (dates, next-best-action signals), `gen-small` for extraction, `gen-large` only for writing.
 
 **Q10 · A 10-step agent succeeds 60% of the time.** Why our agents are fixed graphs, not open planners: errors
-compound (0.95¹⁰ ≈ 0.6). The supervisor hands off once (at most two agent hops), each specialist runs a fixed graph
-with its own step budget, the whole request is capped at 6 tool steps, tool inputs are validated against pinned
-schemas, and every check is code. Open planning (model-chosen tool calls) stays a later-phase option behind the same
-gateway and eval gate (ADR-025).
+compound (0.95¹⁰ ≈ 0.6). The intent classifier makes one decision; the orchestrator, in code, runs at most two waves
+(independent reads together in the first, dependent or write tasks in the second, writes last); agents never call each
+other; each specialist runs a fixed graph with its own step budget, the whole request is capped at 6 tool steps, tool
+inputs are validated against pinned schemas, and every check is code. Open planning (an LLM supervisor proposing the
+plan, or model-chosen tool calls) stays a later-phase option behind the same validation, gateway and eval gate
+(ADR-025).
 
 **Q11 · A Friday prompt change broke answers over the weekend.** Prompts are versioned and hashed; no change ships
 without the golden-set gate; canary, kill switch and one-click rollback; the online faithfulness and answer-relevancy
@@ -660,6 +675,6 @@ citations and access filtering; fine-tuning cannot cite or forget a superseded c
 | Human in the loop | Above a refund threshold | Every write approved and signed by the RM | Accountability for every change in the system of record |
 | Data freshness | CDC events refresh the index | Customer data read live; only policies are indexed, versioned and effective-dated | No second copy of customer data to secure or keep fresh |
 | Channel | Public chat for 10,000 shoppers | Internal copilot for 300 staff on managed devices | Private network only; no public endpoint |
-| Agents and tools (v2.6) | An agent that plans and calls tools (Q10) | Supervisor plus three specialists on fixed graphs; tools as internal MCP servers behind APIM; three identities per call, permission = their intersection; commit is not a tool | Least privilege per agent and per RM; an injected prompt cannot reach a tool its agent was not given |
+| Agents and tools (v2.6) | An agent that plans and calls tools (Q10) | Intent classifier, deterministic orchestrator and three specialist agents on fixed graphs; tools as internal MCP servers behind APIM; three identities per call, permission = their intersection; commit is not a tool | Least privilege per agent and per RM; an injected prompt cannot reach a tool its agent was not given |
 | Evals (v2.7) | LLM-as-judge on a golden set, human spot checks | Deterministic runtime gates (a weak retrieval declines before the model), judge only on a 5% online sample and offline, RAGAS definitions in every tier | An inline judge breaks the latency budget and adds about 70% to token cost |
 | Memory (v2.6) | Conversation history kept for context | Seven typed memories; customer facts never memorised; only RM-approved or RM-authored episodes; keyed by RM; procedural memory changed only through the eval gate | Memory is a new place for injected text to hide and for data to cross RMs |

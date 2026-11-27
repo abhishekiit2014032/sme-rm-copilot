@@ -12,8 +12,8 @@
 ## Context
 
 ADR-008 gives `tool-gateway` two principals per call: the RM (OBO token, `oid`) and the calling service (the
-orchestrator's workload identity). With the supervisor-led agents of ADR-025 there are now four agents inside that
-one service, each meant to call a different, small set of tools through the MCP gateway (ADR-023). If they all
+orchestrator's workload identity). With the multi-agent orchestration of ADR-025 there are now three specialist agents
+inside that one service, run by a deterministic orchestrator in code, each meant to call a different, small set of tools through the MCP gateway (ADR-023). If they all
 present the same service identity, `tool-gateway` cannot tell `policy-agent` from `brief-agent`, and the tool
 separation that contains prompt injection exists only in our own runtime code.
 
@@ -53,7 +53,7 @@ Forces:
 | RM entitlement enforced | **Yes**, from the `oid` of a signed user token (ADR-008) | Yes | Yes | **No**: identity asserted by the caller (rejected in ADR-008 option 2) | Yes |
 | Least privilege per agent visible at `tool-gateway` | **Yes**, `roles` claim per agent | **No**, only in runtime code | No | Yes | Yes |
 | Audit: who, which agent, which workload | **Complete** | RM and service only | RM only | Agent only | Complete |
-| Identity sprawl (C24) | Medium: four agent identities, four (later separable) managed identities, role assignments as code | **Lowest** | Lowest | Medium | Medium plus secret inventory |
+| Identity sprawl (C24) | Medium: three agent identities, three (later separable) managed identities, role assignments as code | **Lowest** | Lowest | Medium | Medium plus secret inventory |
 | Product dependency | **Entra Agent ID, managed identity as FIC and agent OBO [confirm]**; works today with app registrations and a two-token form | None new | None | None new | None new |
 | Latency | Agent tokens cached and refreshed in the background; no hot-path cost | None | None | None | None |
 
@@ -68,16 +68,20 @@ Adopt **option 1**. A tool call is allowed only if **all three** layers allow it
    claims Entra supports for agent identities]**. **Baseline form (available today):** the user OBO token is
    forwarded unchanged in `Authorization`, and the agent token travels in a second header (`x-agent-token`);
    `tool-gateway` records the agent as the actor.
-2. **Agent (service principal per agent).** `supervisor`, `brief-agent`, `policy-agent` and `followup-agent` each
+2. **Agent (service principal per specialist agent).** `brief-agent`, `policy-agent` and `followup-agent` each
    have their own identity: an Entra Agent ID agent identity where available, else a single-tenant app registration
    with a service principal **[confirm]**. Each holds app roles on the `tool-gateway` API for exactly its tools:
 
    | Agent | App roles on `tool-gateway` |
    |---|---|
-   | `supervisor` | none (it has no data tools; a call it makes is always denied) |
    | `brief-agent` | `Tools.CustomerData.Read`, `Tools.Memory.Recall` |
    | `policy-agent` | `Tools.PolicySearch` |
    | `followup-agent` | `Tools.CustomerData.Profile`, `Tools.CrmDrafts.Create` |
+
+   The orchestrator is not an agent and has **no agent identity** (plan v2.9; it replaces the former `supervisor`
+   agent identity): it runs under the `orchestrator` workload identity, cannot obtain agent tokens or MCP gateway
+   tool tokens, and holds no data tools. The intent classifier in the same service uses that workload identity for
+   the AI gateway only.
 
    No agent holds any role on the write API. Role assignments are made as code from the tool registry (ADR-023),
    admin-consented once per environment, and reviewed quarterly (C24) against the registry.
@@ -90,7 +94,8 @@ Adopt **option 1**. A tool call is allowed only if **all three** layers allow it
    the data-plane endpoints they need: App Configuration, Cosmos DB, the memory-keys Key Vault), and Azure RBAC on
    those resources (read-only App Configuration, `checkpoints` container, wrap and unwrap on memory keys; ADR-026).
 4. **Phase 1 runtime topology.** All agents run in the `orchestrator` deployment (ADR-025), so one service account
-   can reach all four managed identities. Each agent still has its **own** managed identity, so splitting a
+   can reach the orchestrator's workload identity and the three specialist agents' managed identities. Each
+   specialist agent still has its **own** managed identity, so splitting a
    specialist into its own deployment later changes one federation subject, not the identity model. Until then the
    workload layer separates the agent runtime from every other pod, not one agent from another (see Consequences).
 5. **`tool-gateway` evaluates the intersection** (ADR-023 steps 5 to 11): user token valid with the tool's scope,
@@ -122,7 +127,7 @@ Continuous Access Evaluation]**; agent tokens are cached per agent and refreshed
 | Stolen user tool token (for example from a log or a heap dump) | Limited to that RM's entitlements and `Tools.Read`, for the token's life | **Blocks use alone**: no agent token, so APIM and `tool-gateway` reject the call | The agent token cannot be minted outside the pod | Attacker who also holds a live agent token can read as that RM until expiry |
 | Stolen agent token | **Blocks customer data**: no user token, no `oid`, no entitlement | Limited to that agent's tools | Cannot be renewed outside the pod | Calls that need no customer (policy search) work until expiry; per-agent limits and Sentinel on unusual source |
 | Compromised agent prompt (indirect injection in news, a policy or RM notes) | Cannot exceed the RM's entitlements (another RM's customer: `NOT_ENTITLED`) | **Blocks other tools**: `policy-agent` cannot read customers; `brief-agent` cannot draft; nobody can commit | n/a (code is not compromised) | Misuse within the agent's own tools for the RM's own customers; bounded by schemas, budgets and verified release (ADR-011) |
-| Compromised agent runtime pod (code execution) | Only RMs with in-flight requests, only `Tools.Read` (a commit also needs an approval token the pod cannot mint) | **Not a barrier in Phase 1**: the pod can mint all four agent tokens | **Bounds reach**: Cilium allows only APIM and the runtime's own data planes; no approval-signing role; no other managed identities | Read access as active RMs until detection; Defender for Containers, Sentinel on per-RM volume (C15), kill switch (ADR-020); per-agent deployments reduce this (review trigger) |
+| Compromised agent runtime pod (code execution) | Only RMs with in-flight requests, only `Tools.Read` (a commit also needs an approval token the pod cannot mint) | **Not a barrier in Phase 1**: the pod can mint all three agent tokens | **Bounds reach**: Cilium allows only APIM and the runtime's own data planes; no approval-signing role; no other managed identities | Read access as active RMs until detection; Defender for Containers, Sentinel on per-RM volume (C15), kill switch (ADR-020); per-agent deployments reduce this (review trigger) |
 | Rogue pod elsewhere in the cluster | n/a | Cannot obtain any agent token (federation trusts only the agent runtime's service account) | **Blocks**: network policy and federation subject | None identified |
 
 ## Consequences
@@ -135,7 +140,7 @@ Continuous Access Evaluation]**; agent tokens are cached per agent and refreshed
 - The design works today in its baseline form and becomes tighter (one bound token) when agent OBO is confirmed.
 
 **Negative**
-- More identities to govern: four agent identities, four managed identities and their role assignments per
+- More identities to govern: three agent identities, three managed identities and their role assignments per
   environment (C24).
 - In the baseline form the user token and the agent token are two independent bearer tokens; `tool-gateway` can
   check both but cannot prove cryptographically that this agent was acting for this RM. The agent OBO target closes

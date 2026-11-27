@@ -583,7 +583,7 @@ IF-19 (a third API product next to the AI gateway and the system API facade).
 
 | Attribute | Agreement |
 |---|---|
-| Purpose | Agents in `orchestrator` (`brief-agent`, `policy-agent`, `followup-agent`; the `supervisor` has no tools) discover and call tools on the `tool-gateway` MCP servers `customer-data`, `policy-search`, `crm-drafts` and `memory` |
+| Purpose | Agents in `orchestrator` (`brief-agent`, `policy-agent`, `followup-agent`; the orchestrator is not an agent and has no tools) discover and call tools on the `tool-gateway` MCP servers `customer-data`, `policy-search`, `crm-drafts` and `memory` |
 | Direction and operations | `orchestrator` → APIM `/mcp/{server}` → `tool-gateway` `/mcp/{server}`. JSON-RPC 2.0 over the MCP Streamable HTTP transport with single JSON responses: `initialize`, `notifications/initialized`, `ping`, `tools/list` (filtered per agent), `tools/call` (02 §15.6). The commit and the audit endpoint are **not** on this interface |
 | Protocol and auth | HTTPS inside the spoke. Three tokens on every call, audience `tool-gateway`: workload token in `Authorization`, agent token in `x-agent-token`, RM OBO token in `x-rm-token`; APIM `validate-jwt` on all three, agent-to-workload binding, agent tool allow-list, then `tool-gateway` re-validates and decides (02 §15.5). MCP protocol version `2025-06-18` **[confirm APIM MCP support, GA status and UAE North, plan §10 item 12]** |
 | Data classification | Confidential (minimised customer facts, drafts, episodes); Internal (policy passages, filtered by clearance) |
@@ -620,7 +620,7 @@ agent identities, their federated credentials and the agent token flow are new a
 
 | Attribute | Agreement |
 |---|---|
-| Purpose | Tokens for the four agent identities (`rmc-agent-supervisor`, `rmc-agent-brief`, `rmc-agent-policy`, `rmc-agent-followup`): Microsoft Entra Agent ID agent identities where available, else app registrations with service principals **[confirm, plan §10 item 12]**. The orchestrator's workload managed identity is each agent's only credential (federated identity credential) |
+| Purpose | Tokens for the three specialist agent identities (`rmc-agent-brief`, `rmc-agent-policy`, `rmc-agent-followup`; the orchestrator has no agent identity and runs under its workload identity): Microsoft Entra Agent ID agent identities where available, else app registrations with service principals **[confirm, plan §10 item 12]**. The orchestrator's workload managed identity is each agent's only credential (federated identity credential) |
 | Direction and operations | `orchestrator` → Entra `/oauth2/v2.0/token`: (1) AKS workload identity exchange of the pod's service account token for managed identity tokens (audience `api://AzureADTokenExchange` for use as a client assertion, audience `tool-gateway` for the workload token); (2) client credentials for the agent identity with that managed identity token as `client_assertion`; (3) agent OBO of the RM token only where Entra supports it **[confirm]** (02 §15.4) |
 | Protocol and auth | OAuth 2.0 over HTTPS to Entra (Microsoft backbone, firewall allow-list); no client secrets or certificates on agent identities |
 | Data classification | Confidential (credentials) |

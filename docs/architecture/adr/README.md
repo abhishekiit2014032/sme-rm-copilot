@@ -22,7 +22,7 @@ before go-live.
 | ADR-002 | AKS private cluster for compute | Accepted | [ADR-002-aks-compute.md](ADR-002-aks-compute.md) |
 | ADR-003 | API Management as AI gateway and system API facade | Accepted | [ADR-003-apim-ai-gateway.md](ADR-003-apim-ai-gateway.md) |
 | ADR-004 | Model hosting and tiering on Azure OpenAI in Azure AI Foundry | Accepted (PTU gate Proposed) | [ADR-004-model-hosting-and-tiering.md](ADR-004-model-hosting-and-tiering.md) |
-| ADR-005 | Thin custom orchestrator with deterministic workflows | Amended by ADR-025 (supervisor-led agents on the same deterministic principles) | [ADR-005-orchestration-approach.md](ADR-005-orchestration-approach.md) |
+| ADR-005 | Thin custom orchestrator with deterministic workflows | Amended by ADR-025 (deterministic orchestrator with specialist agents on the same principles) | [ADR-005-orchestration-approach.md](ADR-005-orchestration-approach.md) |
 | ADR-006 | Retrieval on Azure AI Search with hybrid query and semantic ranker | Accepted | [ADR-006-retrieval-azure-ai-search.md](ADR-006-retrieval-azure-ai-search.md) |
 | ADR-007 | Customer data is read live as the RM, not embedded or indexed | Accepted | [ADR-007-customer-data-live-not-indexed.md](ADR-007-customer-data-live-not-indexed.md) |
 | ADR-008 | Entra OBO plus workload identity; entitlements enforced in tool-gateway | Accepted | [ADR-008-identity-obo-and-entitlements.md](ADR-008-identity-obo-and-entitlements.md) |
@@ -42,7 +42,7 @@ before go-live.
 | ADR-022 | No unverified streaming: buffer, verify, release | Accepted | [ADR-022-no-unverified-streaming.md](ADR-022-no-unverified-streaming.md) |
 | ADR-023 | APIM as the MCP gateway in front of tool-gateway MCP servers | Accepted (APIM-native MCP features used where confirmed) | [ADR-023-mcp-gateway-and-tool-access.md](ADR-023-mcp-gateway-and-tool-access.md) |
 | ADR-024 | Three identities on every tool call: user, agent and workload | Accepted (Entra Agent ID used where available) | [ADR-024-agent-identity-three-way.md](ADR-024-agent-identity-three-way.md) |
-| ADR-025 | Supervisor-led multi-agent orchestration on a fixed graph | Accepted (graph framework choice Proposed until the Phase 0 spike) | [ADR-025-multi-agent-orchestration.md](ADR-025-multi-agent-orchestration.md) |
+| ADR-025 | Multi-agent orchestration: deterministic orchestrator instead of an LLM supervisor | Accepted (graph framework choice Proposed until the Phase 0 spike) | [ADR-025-multi-agent-orchestration.md](ADR-025-multi-agent-orchestration.md) |
 | ADR-026 | Memory architecture: seven typed memories, partitioned by RM, no customer facts memorised | Accepted | [ADR-026-memory-architecture.md](ADR-026-memory-architecture.md) |
 | ADR-027 | Evaluation architecture in four tiers: runtime gates, online sampling, scheduled evals, release gate | Accepted (RAGAS library offline only, subject to the Bank's open-source approval) | [ADR-027-evaluation-architecture.md](ADR-027-evaluation-architecture.md) |
 

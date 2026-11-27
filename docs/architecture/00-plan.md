@@ -113,19 +113,31 @@ CRM, core banking (via an ODS read replica), lending and trade finance (LOS), KY
 (Graph), news and company registry (licensed external feed through the Azure Firewall egress allow-list).
 
 ### 3.7 Agents, identities and the MCP gateway (v2.6)
-**Multi-agent orchestration, supervisor-led.** The orchestrator becomes a small, fixed graph of agents, run in code
-on AKS (graph-based framework such as Microsoft Agent Framework workflows or LangGraph, with a checkpointer; ADR-025):
+**Multi-agent orchestration: intent classifier, orchestrator, specialist agents (names from v2.9).** The
+`orchestrator` service runs a small, fixed set of agent graphs in code on AKS (graph-based framework such as
+Microsoft Agent Framework workflows or LangGraph, with a checkpointer; ADR-025). Flow: input guardrails → intent
+classifier (what is asked?) → orchestrator (in what order, within what limits?) → specialist agent(s) → model gateway
+(which model?) → checks in code → output guardrails → RM.
 
-| Agent | Job | Tools it may call (MCP) | Model |
+| Component | Job | Tools it may call (MCP) | Model |
 |---|---|---|---|
-| `supervisor` | Classifies intent, picks one specialist, enforces step, time and token budgets, assembles the reply | none (no data tools) | `gen-small` |
+| Intent classifier (in the `orchestrator` service) | Understands the RM's text: rules first (button click, launch context, clear phrase), the small model only for free text, with structured output. Returns a task list `{tasks: [{id, intent, query, depends_on}], confidence}`; ≥ 0.8 routes, 0.5 to 0.8 asks the RM to clarify, < 0.5 or `out_of_scope` declines. Decides whether the semantic cache may be consulted (public policy intents only). One decision, no loop | none | rules; `gen-small` for free text only |
+| Orchestrator (code, runs under the `orchestrator` workload identity) | Deterministic workflow engine. Builds the plan from the intent table (read or write, dependencies, budget share), runs the waves, splits (60/40 between two tasks) and enforces step, time and token budgets, reads each agent's typed result and acts by fixed rules, checkpoints, pauses for approval and resumes, combines results for the output guardrails | none (no data tools) | none: never calls a model, never picks a model, never writes to CRM |
 | `brief-agent` (UC1) | Customer brief | `customer-data`: profile, facilities, transactions summary, KYC status, news; `memory`: episodic recall | `gen-large` |
 | `policy-agent` (UC2) | Cited policy answers | `policy-search` only (no customer data) | `gen-small` rewrite, `gen-large` answer |
 | `followup-agent` (UC3) | Notes to drafts | `customer-data`: profile; `crm-drafts`: create drafts (no commit) | `gen-small` |
 
-Rules: the supervisor hands off once (at most 2 agent hops per request); agents never talk to each other freely;
-verification (numeric, policy, groundedness checks) is deterministic code, not an agent; **commit is not an agent
-tool**: it runs only through the write API with the RM-signed approval token (§4.2).
+Rules: **at most 2 waves per request**; independent read tasks run concurrently in wave 1 (tasks for the same agent
+are bundled into one call); dependent or write tasks run in wave 2; a write runs last and alone, with RM approval;
+agents never call each other and report back to the orchestrator; internal loops stay inside an agent (≤ 6 tool
+steps, ≤ 2 retrieval rounds); verification (numeric, policy, groundedness checks) is deterministic code, not an
+agent; **commit is not an agent tool**: it runs only through the write API with the RM-signed approval token (§4.2).
+A **Supervisor (LLM planner)** is a Phase 2 option only, not in the pilot: a model proposes the plan as JSON and the
+orchestrator validates it against the intent table (known agents, ≤ 2 waves, writes last, dependencies, budget),
+falling back to the fixed table if it is invalid.
+
+**Prototype deviation.** The pilot prototype runs one task per request (a single wave: the orchestrator plus one
+specialist). Multi-task waves, at most 2 per request, are the production design above.
 
 **Three identities on every tool call.** Effective permission is the **intersection** of:
 1. **User (OIDC):** the RM signs in with Entra ID (OpenID Connect); `web-bff` gets an OBO token for the tool audience
@@ -134,7 +146,10 @@ tool**: it runs only through the write API with the RM-signed approval token (§
    added only where Entra agent OBO is confirmed **[confirm]** (ADR-024).
 2. **Agent (service principal):** each agent has its own Entra identity (Entra Agent ID where available, else an app
    registration with a service principal) **[confirm]**, holding app roles for exactly its tools (e.g.
-   `Tools.CustomerData.Read` for `brief-agent`, `Tools.PolicySearch` for `policy-agent`).
+   `Tools.CustomerData.Read` for `brief-agent`, `Tools.PolicySearch` for `policy-agent`). Agent identities
+   exist only for the three specialist agents. The orchestrator has no agent identity: it runs under the
+   `orchestrator` workload identity, cannot obtain agent tokens or MCP gateway tool tokens, and holds no data tools;
+   the intent classifier runs inside the orchestrator service and uses that workload identity for the model gateway.
 3. **Workload (managed identity):** the agent runtime pod's workload identity. It is the federated credential the agent
    identity uses to get its token, so there are **no client secrets**, and a stolen agent token cannot be minted
    outside the pod.
@@ -152,7 +167,7 @@ descriptions and schemas are versioned and hashed so a changed description is re
 |---|---|---|---|---|---|
 | Working | The current request's graph state: messages, tool results, plan | In-process, then checkpointed | One request | Request | Graph runtime |
 | Checkpointer | Graph state after every node; pauses for human approval (interrupt) and resumes; replay for debugging | Cosmos DB `checkpoints` (encrypted) | Thread = RM session; checkpoint per node | 7 days (30 while a UC3 draft is open) | Graph runtime |
-| Session | Conversation turns and a rolling summary for the current session | Cosmos DB `sessions` | RM `oid` + session | 24 h | `web-bff`, `supervisor` |
+| Session | Conversation turns and a rolling summary for the current session | Cosmos DB `sessions` | RM `oid` + session | 24 h | `web-bff`; rolling summary by the session summariser (small model, after release; hosted in the orchestrator service but not part of orchestration) |
 | Episodic | What happened before with this customer: past briefs, approved call reports, open tasks | CRM is the source of truth (read via tools); copilot episode log of the RM's own interactions | RM `oid` + customer; entitlement re-checked at recall | Episode log 90 days | Only RM-approved or RM-authored content |
 | Semantic | Bank knowledge: policies, products | AI Search (versioned, effective-dated) | Clearance filter | Per policy lifecycle | Ingestion pipeline |
 | Procedural | How to do the job: prompts, graph definitions, tool schemas, few-shot examples, guardrail rules | Git + prompt registry, pinned in App Configuration | Global, versioned | Versioned forever | Engineers, through the eval gate only |
@@ -191,7 +206,7 @@ retrieval-gate decline rate up 5 points on its 7-day baseline, faithfulness gate
 ### 4.1 Read path: UC1 pre-meeting brief
 1. RM opens the brief from the CRM sidebar or the Teams tab; Entra ID SSO token attached.
 2. Application Gateway (WAF) → `web-bff` validates the token, gets the OBO token for `tool-gateway`, creates the request id and W3C `traceparent`, sets the request deadline (8 s).
-3. `web-bff` → `orchestrator`: intent `customer_brief` (fixed workflow; no router call when launched from a CRM record).
+3. `web-bff` → `orchestrator`: intent `customer_brief` (fixed workflow; the intent classifier uses rules, no model call, when launched from a CRM record).
 4. `orchestrator` → `tool-gateway`: read tools with the RM's token. **Entitlement check first** (≤ 60 s in total: 50 s in Cosmos DB + 10 s in-process; invalidated by CRM portfolio-change events delivered through APIM to the Event Hub `crm-portfolio-events`). Denied → 403 `NOT_ENTITLED`, no data moves.
 5. `tool-gateway` (tool `get_brief_inputs`) fans out → APIM system API facade → CRM, core banking ODS, LOS, KYC, news, in parallel, each with a deadline-derived timeout and a circuit breaker. **Only the CRM profile is critical**; if LOS facilities, ODS transactions, KYC or news fail, the brief is returned with that section flagged as unavailable (partial brief).
 6. `tool-gateway` minimises and masks fields (no national ID; transactions aggregated), returns **facts** with source references, and writes one audit event per call to Event Hubs (Cosmos `audit-spool` if Event Hubs does not acknowledge).
@@ -250,7 +265,7 @@ Latency budget per use case (p95, ms):
 | Entitlement (cached / miss) | 20 / 150 | n/a | 20 / 150 |
 | Tool fan-out or retrieval (embed + search + rerank) | 1,500 | 700 | 300 (profile only) |
 | PII + Prompt Shields (parallel with fan-out where possible) | 300 | 400 | 400 |
-| Supervisor routing and query rewrite (`gen-small`; rules when the intent is known: brief opened from a CRM record, follow-up tab) | 0 | 600 (one call does both) | 0 |
+| Intent classification and query rewrite (`gen-small`; rules when the intent is known: brief opened from a CRM record, follow-up tab) | 0 | 600 (one call does both) | 0 |
 | Generation (time to first token + output) | 1,000 + 3,300 (≈200 tokens) | 1,000 + 2,500 (≈150 tokens) | 700 + 3,300 (≈400 tokens on `gen-small`) |
 | Checks (numeric, policy, groundedness) | 100 | 400 | 100 |
 | Total p95 | ≈ 6,500 (target 8,000) | ≈ 5,900 (target 7,000) | ≈ 5,100 (target 10,000) |
@@ -286,7 +301,7 @@ Latency budget per use case (p95, ms):
 | C25 | MCP tool poisoning or rogue MCP servers | Internal registered MCP servers only; tool descriptions and schemas versioned and hashed; `tools/list` filtered per agent; no external MCP servers |
 | C26 | Memory poisoning (injected text saved, recalled later as fact) | Only RM-approved or RM-authored content enters episodic memory; quarantine runs before any memory write; provenance on every item |
 | C27 | Memory leaking across RMs or customers | Memory partitioned by RM `oid`; entitlement re-checked at recall; no shared memory; tests for cross-RM recall |
-| C28 | Multi-agent error compounding, cost and latency | Supervisor hands off once, at most 2 agent hops; fixed graphs; step budgets; verification in code |
+| C28 | Multi-agent error compounding, cost and latency | Intent classifier makes one decision; deterministic orchestrator runs at most 2 waves per request, writes last; agents never call each other; fixed graphs; step budgets; verification in code |
 | C29 | Checkpoints hold customer data | Encrypted, UAE-resident, short TTL, PIM-gated replay, crypto-shredded on erasure |
 
 ## 7. Data retention (defaults, [confirm] with records management)
@@ -388,22 +403,35 @@ fixes. 4. Verification: tests, evals, stack smoke and load run, slide layout, pr
 - v2.5 (26 Nov): walkthrough against the AI system design method (`08-ai-system-design-walkthrough.md`). Added a
   policy freshness target (searchable within 60 minutes of publish); prompt caching allowed where the model supports
   it (no answers cached) [confirm]; semantic cache stays off in the pilot.
-- v2.6 (26 Nov): owner review. Added §3.7 supervisor-led multi-agent orchestration (supervisor, brief, policy and
-  follow-up agents; at most 2 hops; commit is not an agent tool), the three-identity model (RM via OIDC/OBO, agent
+- v2.6 (26 Nov): owner review. Added §3.7 multi-agent orchestration (orchestrator, brief, policy and
+  follow-up agents; bounded handoffs; commit is not an agent tool), the three-identity model (RM via OIDC/OBO, agent
   service principal, workload managed identity as its federated credential; effective permission = intersection) and
   APIM as the MCP gateway in front of `tool-gateway` MCP servers; §3.8 memory architecture (working, checkpointer,
   session, episodic, semantic, procedural, profile); C24 to C29; retention rows; new [confirm] facts. ADR-023 to
   ADR-026; ADR-005 amended.
-- v2.6a (26 Nov): ADR feedback. Orchestrator Key Vault role limited to memory-key wrap/unwrap; supervisor routing shares the UC2 rewrite call and uses rules where the intent is known, so the latency budget is unchanged; ADR-019 gains the memory containers.
+- v2.6a (26 Nov): ADR feedback. Orchestrator Key Vault role limited to memory-key wrap/unwrap; intent classification shares the UC2 rewrite call and uses rules where the intent is known, so the latency budget is unchanged; ADR-019 gains the memory containers.
 - v2.6b (26 Nov): §3.7 wording: two-token baseline (RM token forwarded unchanged plus the agent's own token); actor claim only once agent OBO is confirmed. `crm-drafts` creates drafts in Cosmos (create only); web-bff keeps edits and approval. Runbooks RB-17 to RB-19 added.
 - v2.7 (26 Nov): owner review. Added §3.9 evaluation architecture in four tiers (runtime gates including a
   pre-generation retrieval gate and post-generation faithfulness and answer-relevancy checks; online sampled RAGAS
   metrics with an in-region judge; scheduled nightly, weekly and monthly evals; release gate), RAGAS release
   thresholds, and runtime operations metrics (per-stage p95, tokens per request, cost) with alerts. ADR-027.
 - v2.7a (26 Nov): prototype feedback. Each agent performs its own token exchange from the RM token (web-bff cannot
-  know the agent in advance); the supervisor routes by rules in the pilot (every entry point carries its intent),
+  know the agent in advance); the intent classifier uses rules in the pilot (every entry point carries its intent),
   so it makes no model call; memory persistence and per-customer memory keys sit behind tool-gateway's internal API
   (the orchestrator keeps no Cosmos or key access); agents hold read-only memory roles and only an approval-verified
   commit creates an episode; episodes are approved call reports only.
 - v2.7b (26 Nov): prototype finding. Context relevance no longer declines on its own (one strong clause with weak neighbours is a valid answer and was wrongly declined in 22 of 120 test questions); the hard decline is the best passage below threshold; weak passages are dropped before generation; context relevance is a monitored, alerted metric.
-- v2.8 (27 Nov): review feedback. The router and orchestrator (supervisor) follows input guardrails directly; the semantic cache moves beside it, consulted only after intent classification and only for public policy intents (Phase 2), never for customer data. Presentation documents carry no external source references.
+- v2.8 (27 Nov): review feedback. Intent classification and orchestration follow input guardrails directly; the semantic cache moves beside them, consulted only after intent classification and only for public policy intents (Phase 2), never for customer data. Presentation documents carry no external source references.
+- v2.9 (27 Nov): naming and orchestration wording. Reviewers read "supervisor" as a model that loops and "router" as
+  code, the opposite of this design, so the names now match the usual meaning: the **intent classifier** (rules
+  first, `gen-small` only for free text, returns a task list with confidence; ≥ 0.8 routes, 0.5 to 0.8 clarifies,
+  below 0.5 declines) replaces the router; the **orchestrator** (deterministic code, no model call) replaces the
+  supervisor; the `supervisor` agent service principal is removed, so agent identities exist only for the three
+  specialists and the orchestrator runs under the `orchestrator` workload identity (no agent or tool tokens, no data
+  tools; the intent classifier uses it for the model gateway); **specialist agents** are unchanged; a **Supervisor
+  (LLM planner)** is recorded as a Phase 2 option whose plans the orchestrator validates. §3.7, HLD §7.1, LLD §15.1,
+  ADR-024, ADR-025 and the walkthrough updated. The limit "hands off once, at most 2 agent
+  hops" becomes "at most 2 waves per request; independent reads run concurrently in wave 1; dependent or write tasks
+  in wave 2; writes last; agents never call each other". Prototype deviation recorded in §3.7: the pilot prototype
+  runs one task per request (a single wave: orchestrator plus one specialist). ADR-025 now records the decision
+  "deterministic orchestrator instead of an LLM supervisor".
