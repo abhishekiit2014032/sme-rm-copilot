@@ -44,7 +44,9 @@ svg { position:absolute; left:0; top:0; pointer-events:none; }
 <div class="lbl c" style="left:1306px;top:112px">draft<br>answer</div>
 
 <!-- lane B -->
-<div class="b" style="left:300px;top:458px;width:1200px;height:102px"><div class="t">Specialist agents</div><div class="d">Brief agent · Policy agent · Follow-up agent: each reasons with its own tools and model tier, reports back to the orchestrator, never calls another agent</div></div>
+<div class="b" style="left:300px;top:452px;width:380px;height:110px"><div class="t">Brief agent</div><div class="d">customer brief · customer data tools · large model</div></div>
+<div class="b" style="left:720px;top:452px;width:380px;height:110px"><div class="t">Policy agent</div><div class="d">policy + product Q&amp;A · policy search only · cited answers</div></div>
+<div class="b" style="left:1140px;top:452px;width:360px;height:110px"><div class="t">Follow-up agent</div><div class="d">follow-up actions · drafts only · RM approves</div></div>
 <div class="b" style="left:300px;top:620px;width:380px;height:110px"><div class="t">Retrieval / RAG</div><div class="d">hybrid search → rerank · retrieval gate before generation</div></div>
 <div class="b" style="left:720px;top:620px;width:380px;height:110px"><div class="t">Tool gateway (MCP)</div><div class="d">typed tools · RM ∩ agent ∩ workload identity</div></div>
 <div class="b" style="left:1140px;top:620px;width:360px;height:110px"><div class="t">Model gateway</div><div class="d">model per step · token budgets · retries · fallback</div></div>
@@ -65,8 +67,9 @@ svg { position:absolute; left:0; top:0; pointer-events:none; }
 <div class="b" style="left:1014px;top:1170px;width:462px;height:96px"><div class="t">Release + recovery</div><div class="d">canary · kill switches · rollback</div></div>
 <div class="b" style="left:1506px;top:1170px;width:464px;height:96px"><div class="t">Evaluation</div><div class="d">runtime gates · RAGAS sampling · golden set</div></div>
 
-<div class="lbl c" style="left:884px;top:412px">tasks in waves · results back</div>
-<div class="lbl a" style="left:1580px;top:440px">APPROVE / ESCALATE</div>
+<div class="lbl c" style="left:1146px;top:300px">tasks in waves<br>results back</div>
+<div class="lbl c" style="left:1336px;top:582px">via gateways only</div>
+<div class="lbl a" style="left:1580px;top:410px">APPROVE / ESCALATE</div>
 <div class="lbl a" style="left:1780px;top:880px">sign + audit</div>
 <div class="lbl v" style="left:500px;top:928px">publish: re-embed</div>
 <div class="lbl v" style="left:1300px;top:1125px">5% sampled answers</div>
@@ -76,7 +79,7 @@ svg { position:absolute; left:0; top:0; pointer-events:none; }
 <div class="legend"><span><i style="border-color:var(--cyan)"></i>Request / response</span><span><i style="border-color:var(--amber)"></i>Human approval</span><span><i style="border-color:var(--violet);border-top-style:dashed"></i>State / ingestion</span><span style="margin-left:auto">Fictional bank · cloud-agnostic view</span></div>
 <div class="caps">
 <div><b>A · Online request path</b>Gateway, input guardrails, intent router + orchestrator, output guardrails. Every request flows through it.</div>
-<div><b>B · Controlled execution</b>Specialist agents reach data only through retrieval, the tool gateway and the model gateway; the RM approves every write.</div>
+<div><b>B · Controlled execution</b>One agent per use case. Agents reach data only through the gateways; the RM approves every write.</div>
 <div><b>C · State + data freshness</b>Policy ingestion into the index, session and memory for pause and resume, keys and the audit log.</div>
 <div><b>D · Production operations</b>Observability, reliability and scale, safe release, and evaluation of live answers.</div>
 </div>
@@ -87,16 +90,18 @@ const W = [
  [[[190,171],[266,171]],'c'], [[[536,171],[612,171]],'c'], [[[882,171],[958,171]],'c'],
  [[[1298,171],[1374,171]],'c'], [[[1674,171],[1750,171]],'c'],
  [[[1000,246],[1000,313],[912,313]],'c',1,1],                       // router <-> cache
- [[[1130,246],[1130,458]],'c',0,1],                                 // router <-> agents
- [[[490,560],[490,620]],'c',0,1], [[[910,560],[910,620]],'c',0,1], [[[1320,560],[1320,620]],'c',0,1],
+ [[[1130,246],[1130,432]],'c',0,-1], [[[490,432],[1320,432]],'c',0,-1],      // orchestrator -> bus
+ [[[490,432],[490,452]],'c'], [[[910,432],[910,452]],'c'], [[[1320,432],[1320,452]],'c'],
+ [[[490,591],[1320,591]],'c',0,-1],                                     // agents -> gateways bus
+ [[[490,562],[490,620]],'c',0,1], [[[910,562],[910,620]],'c',0,1], [[[1320,562],[1320,620]],'c',0,1],
  [[[490,730],[490,800]],'c',0,1], [[[910,730],[910,800]],'c',0,1], [[[1320,730],[1320,800]],'c',0,1],
- [[[1260,246],[1260,432],[1765,432],[1765,620]],'a'],               // orchestrator -> human in the loop
+ [[[1280,246],[1280,400],[1765,400],[1765,620]],'a'],               // orchestrator -> human in the loop
  [[[1765,730],[1765,986]],'a'],                                     // sign + audit
  [[[490,986],[490,884]],'v',1],                                     // ingestion -> index
  [[[1530,246],[1530,1170]],'v',1],                                  // output -> evaluation (sampled)
 ];
 const col = {c:'#22D3EE', a:'#F5B82E', v:'#B98DFF'};
 let s = '<defs>' + Object.entries(col).map(([k,v]) => `<marker id="m${k}" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" fill="${v}"/></marker>`).join('') + '</defs>';
-for (const [p,k,d,b] of W) s += `<polyline points="${p.map(q=>q.join(',')).join(' ')}" fill="none" stroke="${col[k]}" stroke-width="3" ${d?'stroke-dasharray="9 7"':''} marker-end="url(#m${k})" ${b?`marker-start="url(#m${k})"`:''}/>`;
+for (const [p,k,d,b] of W) s += `<polyline points="${p.map(q=>q.join(',')).join(' ')}" fill="none" stroke="${col[k]}" stroke-width="3" ${d?'stroke-dasharray="9 7"':''} ${b===-1?'':`marker-end="url(#m${k})"`} ${b===1?`marker-start="url(#m${k})"`:''}/>`;
 document.getElementById('w').innerHTML = s;
 </script></body></html>
