@@ -1,0 +1,11 @@
+{
+  "_note": "Signal-to-product rules owned by the product team (mock of the product rules engine).",
+  "rules": [
+    {"id": "PR-01", "signal": "working_capital_utilisation_pct", "operator": ">=", "threshold": 80,
+     "product": "Secured working capital top-up", "reason": "Working capital limit is {value}% utilised"},
+    {"id": "PR-02", "signal": "import_volume_12m_aed", "operator": ">=", "threshold": 5000000,
+     "product": "Import invoice financing", "reason": "Import LC volume of {value} in the last 12 months"},
+    {"id": "PR-03", "signal": "idle_balance_aed", "operator": ">=", "threshold": 1000000,
+     "product": "Business fixed deposit", "reason": "Combined account balances of {value}"}
+  ]
+}

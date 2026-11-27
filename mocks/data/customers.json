@@ -1,0 +1,193 @@
+{
+  "_note": "All customers, people and figures are fictional. Amounts are in AED.",
+  "as_of": {
+    "crm": "2026-11-27T09:14:00+04:00",
+    "core_banking": "2026-11-27T02:00:00+04:00",
+    "lending": "2026-11-27T02:00:00+04:00",
+    "trade_finance": "2026-11-27T08:30:00+04:00",
+    "case_management": "2026-11-27T09:05:00+04:00"
+  },
+  "users": [
+    {"user_id": "rm-1", "name": "Layla Haddad", "roles": ["rm"]},
+    {"user_id": "rm-2", "name": "Omar Saeed", "roles": ["rm"]},
+    {"user_id": "cd-1", "name": "Credit desk analyst", "roles": ["credit_desk"]}
+  ],
+  "customers": [
+    {
+      "customer_id": "C-1001",
+      "rm_id": "rm-1",
+      "crm": {
+        "profile": {
+          "name": "Gulf Star Trading LLC",
+          "industry": "Electronics import and wholesale",
+          "segment": "SME",
+          "relationship_since": "2017",
+          "risk_rating": "4 (satisfactory)",
+          "key_contact": "Faisal Rahman, owner and managing director",
+          "contact_email": "faisal.rahman@gulfstar.example",
+          "next_meeting": {"date": "2026-12-02", "purpose": "Annual review and request to raise the working capital limit"}
+        },
+        "interactions": [
+          {"date": "2026-11-12", "channel": "call", "summary": "Owner expects Q1 import volumes to rise by about 40 percent and asked for a higher working capital limit."},
+          {"date": "2026-10-20", "channel": "visit", "summary": "Discussed slow LC amendments and the plan to open a branch in Sharjah."},
+          {"date": "2026-09-03", "channel": "email", "summary": "Customer sent the renewed trade licence."}
+        ],
+        "open_requests": [
+          {"id": "REQ-7781", "type": "Limit increase", "detail": "Raise working capital limit to AED 3.5m", "status": "Awaiting audited financials", "waiting_on": "customer"},
+          {"id": "REQ-7790", "type": "Documents", "detail": "Audited financials FY2025", "status": "Pending from customer", "waiting_on": "customer"},
+          {"id": "REQ-7792", "type": "Online banking", "detail": "Add a second authorised signatory", "status": "In progress", "waiting_on": "bank"}
+        ]
+      },
+      "core_banking": {
+        "accounts": [
+          {"account": "Current account ****4421", "currency": "AED", "balance_aed": 842300},
+          {"account": "Call deposit ****7710", "currency": "AED", "balance_aed": 310000}
+        ],
+        "avg_monthly_credits_aed": 4150000,
+        "returned_cheques_12m": 0
+      },
+      "lending": {
+        "facilities": [
+          {"id": "WCL-2219", "type": "Working capital limit", "limit_aed": 2000000, "utilised_aed": 1650000, "secured": false, "expiry": "2027-03-31"},
+          {"id": "TL-1140", "type": "Term loan", "limit_aed": 600000, "utilised_aed": 420000, "secured": true, "expiry": "2028-06-30"}
+        ],
+        "requested_limit_aed": 3500000
+      },
+      "trade_finance": {
+        "letters_of_credit": [
+          {"ref": "LC-55102", "type": "Import LC", "amount_aed": 780000, "status": "Issued", "expiry": "2027-01-15"},
+          {"ref": "LC-55117", "type": "Import LC", "amount_aed": 1240000, "status": "Amendment pending", "expiry": "2027-02-10"}
+        ],
+        "guarantees": [
+          {"ref": "BG-2031", "type": "Performance guarantee", "amount_aed": 250000, "status": "Active"}
+        ],
+        "import_volume_12m_aed": 9600000
+      },
+      "case_management": {
+        "complaints": [
+          {"id": "CMP-3310", "summary": "Delay in amendment of LC-55117", "status": "Open", "sla_due": "2026-11-30"}
+        ],
+        "service_requests": [
+          {"id": "SR-9921", "summary": "Cheque book request", "status": "Closed"}
+        ]
+      },
+      "episodic_memory": [
+        {"date": "2026-09-10", "summary": "RM-approved meeting summary: owner plans to expand into Oman next year and is interested in import invoice financing."}
+      ]
+    },
+    {
+      "customer_id": "C-1002",
+      "rm_id": "rm-1",
+      "crm": {
+        "profile": {
+          "name": "Al Noor Foodstuff LLC",
+          "industry": "Food distribution",
+          "segment": "SME",
+          "relationship_since": "2020",
+          "risk_rating": "3 (good)",
+          "key_contact": "Mariam Aziz, finance manager",
+          "contact_email": "mariam.aziz@alnoorfood.example",
+          "next_meeting": {"date": "2026-12-08", "purpose": "Quarterly check-in"}
+        },
+        "interactions": [
+          {"date": "2026-11-02", "channel": "call", "summary": "Asked about fees for a new import LC line."}
+        ],
+        "open_requests": [
+          {"id": "REQ-7802", "type": "Trade line", "detail": "New import LC line of AED 1.0m", "status": "Under review", "waiting_on": "bank"}
+        ]
+      },
+      "core_banking": {
+        "accounts": [
+          {"account": "Current account ****1180", "currency": "AED", "balance_aed": 1265000}
+        ],
+        "avg_monthly_credits_aed": 2300000,
+        "returned_cheques_12m": 1
+      },
+      "lending": {
+        "facilities": [
+          {"id": "WCL-3301", "type": "Working capital limit", "limit_aed": 1000000, "utilised_aed": 350000, "secured": false, "expiry": "2027-08-31"}
+        ]
+      },
+      "trade_finance": {"letters_of_credit": [], "guarantees": [], "import_volume_12m_aed": 0},
+      "case_management": {"complaints": [], "service_requests": []},
+      "episodic_memory": []
+    },
+    {
+      "customer_id": "C-2001",
+      "rm_id": "rm-2",
+      "crm": {
+        "profile": {
+          "name": "Palm Coast Engineering LLC",
+          "industry": "MEP contracting",
+          "segment": "SME",
+          "relationship_since": "2019",
+          "risk_rating": "5 (acceptable)",
+          "key_contact": "Rashid Karim, owner",
+          "contact_email": "rashid.karim@palmcoast.example",
+          "next_meeting": {"date": "2026-12-04", "purpose": "Guarantee renewal"}
+        },
+        "interactions": [
+          {"date": "2026-11-15", "channel": "visit", "summary": "Needs two new performance guarantees for a hotel project."}
+        ],
+        "open_requests": [
+          {"id": "REQ-7810", "type": "Guarantee", "detail": "Two performance guarantees, AED 400,000 each", "status": "Draft", "waiting_on": "customer"}
+        ]
+      },
+      "core_banking": {
+        "accounts": [
+          {"account": "Current account ****6603", "currency": "AED", "balance_aed": 214500}
+        ],
+        "avg_monthly_credits_aed": 1450000,
+        "returned_cheques_12m": 2
+      },
+      "lending": {
+        "facilities": [
+          {"id": "WCL-4410", "type": "Working capital limit", "limit_aed": 1500000, "utilised_aed": 1380000, "secured": true, "expiry": "2027-05-31"}
+        ]
+      },
+      "trade_finance": {
+        "letters_of_credit": [],
+        "guarantees": [
+          {"ref": "BG-4120", "type": "Performance guarantee", "amount_aed": 600000, "status": "Active"}
+        ],
+        "import_volume_12m_aed": 0
+      },
+      "case_management": {
+        "complaints": [],
+        "service_requests": [
+          {"id": "SR-9950", "summary": "Statement reissue", "status": "Open"}
+        ]
+      },
+      "episodic_memory": []
+    },
+    {
+      "customer_id": "C-2002",
+      "rm_id": "rm-2",
+      "crm": {
+        "profile": {
+          "name": "Desert Rose Logistics FZE",
+          "industry": "Freight forwarding",
+          "segment": "SME",
+          "relationship_since": "2022",
+          "risk_rating": "4 (satisfactory)",
+          "key_contact": "Nadia Farouk, operations director",
+          "contact_email": "nadia.farouk@desertrose.example",
+          "next_meeting": {"date": "2026-12-10", "purpose": "Introduce receivables finance"}
+        },
+        "interactions": [],
+        "open_requests": []
+      },
+      "core_banking": {
+        "accounts": [
+          {"account": "Current account ****9022", "currency": "AED", "balance_aed": 590000}
+        ],
+        "avg_monthly_credits_aed": 1900000,
+        "returned_cheques_12m": 0
+      },
+      "lending": {"facilities": []},
+      "trade_finance": {"letters_of_credit": [], "guarantees": [], "import_volume_12m_aed": 0},
+      "case_management": {"complaints": [], "service_requests": []},
+      "episodic_memory": []
+    }
+  ]
+}
