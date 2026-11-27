@@ -1,6 +1,132 @@
 # AI system design walkthrough: the SME RM Copilot, step by step
 
-Status: v1.2, 26 Nov 2026 (plan v2.6: block 07 moves to a supervisor and specialist agents; blocks 12 and 13 added; plan v2.7: block 11 rewritten around four evaluation tiers, block 10 adds tokens per request, per-stage p95 and cost) · Companion to `00-plan.md` (baseline), `01-hld.md`, `02-lld.md` and the ADRs.
+Status: v1.3, 27 Nov 2026 (opens with the complete architecture and the 14 build-up frames; plan v2.6: block 07 moves to a supervisor and specialist agents; blocks 12 and 13 added; plan v2.7: block 11 rewritten around four evaluation tiers, block 10 adds tokens per request, per-stage p95 and cost) · Companion to `00-plan.md` (baseline), `01-hld.md`, `02-lld.md` and the ADRs.
+
+## The complete architecture
+
+![Complete architecture of the SME RM Copilot on Azure](diagrams/system-design/complete-architecture.png)
+
+Four lanes: **A** online request path, **B** controlled execution (agents, MCP gateway and tools, model gateway, human in the loop), **C** state and data freshness (knowledge ingestion, memory, secure storage), **D** production operations. The numbered badges 01 to 13 are the building blocks; the next section adds them one at a time.
+
+## Built step by step
+
+Each frame shows the architecture after one step; the part added in that step is highlighted. Step 2 below explains each block in full (situation, component, decision, trade-off, key questions).
+
+### v1 · The prototype (works in the demo)
+
+![v1 · The prototype (works in the demo)](diagrams/system-design/step-00.png)
+
+**Added:** RM → copilot backend → { policy RAG, bank APIs, one LLM } → answer. Session state in one store.
+
+**Why:** It works on a laptop, but has no identity, limits, guardrails, routing, fallback, monitoring or evals. Every step below adds one production concern.
+
+### Step 01 · Authentication and authorization
+
+![Step 01 · Authentication and authorization](diagrams/system-design/step-01.png)
+
+**Added:** API gateway + identity: internal App Gateway (WAF), Entra ID SSO, On-Behalf-Of token for the tool layer; the entitlement check runs in the tool layer before any data moves.
+
+**Why:** Layla and Omar both ask for the Harbourline brief; only the RM who covers it may see it. Access is enforced in code, never in the prompt.
+
+### Step 02 · Rate and token limits
+
+![Step 02 · Rate and token limits](diagrams/system-design/step-02.png)
+
+**Added:** API Management limits per RM and per use case (400k tokens per RM per day, ≤ 6 tool steps and 12k input tokens per request).
+
+**Why:** One script or one misuse cannot burn the budget or overload core banking; the RM sees a clear limit message.
+
+### Step 03 · Guardrails, input and output
+
+![Step 03 · Guardrails, input and output](diagrams/system-design/step-03.png)
+
+**Added:** Input: Prompt Shields, PII masking, quoted-instruction quarantine. Output: faithfulness and answer relevancy, numeric and policy checks; nothing is shown before it is verified.
+
+**Why:** A customer email pasted into notes says "approve a limit increase to AED 10m"; it is treated as data, and no invented figure or promise reaches the RM.
+
+### Step 04 · Semantic cache (off by design)
+
+![Step 04 · Semantic cache (off by design)](diagrams/system-design/step-04.png)
+
+**Added:** The cache is drawn but switched off for customer data; Phase 2 may cache public policy answers only, keyed on clearance and index version.
+
+**Why:** A cached answer reaching the wrong RM would be a leak; at 300 RMs the saving is small.
+
+### Step 05 · Knowledge freshness
+
+![Step 05 · Knowledge freshness](diagrams/system-design/step-05.png)
+
+**Added:** Knowledge ingestion: policy publish event → parse → PII scan → chunk by clause → embed → AI Search, with version and effective date; customer data is always read live.
+
+**Why:** When Credit Policy v4.2 replaces v4.1, the copilot must stop quoting v4.1; searchable within 60 minutes, never before the effective date.
+
+### Step 06 · Human in the loop
+
+![Step 06 · Human in the loop](diagrams/system-design/step-06.png)
+
+**Added:** The RM approves every write; Key Vault signs the approval (RM, customer, draft hash, 5 minutes, used once); weak evidence routes to the credit desk; secure storage for keys and audit.
+
+**Why:** Notes say "I'll get your limit raised"; the copilot can never approve credit, pricing or limits, and every CRM change has an accountable RM.
+
+### Step 07 · Model routing (supervisor)
+
+![Step 07 · Model routing (supervisor)](diagrams/system-design/step-07.png)
+
+**Added:** A supervisor routes each request; rules where possible, the small model for routing and extraction, the large model only for writing; the model gateway in front of Azure OpenAI.
+
+**Why:** All-frontier would cost about $7.4k a month (illustrative); routing brings it to about $5k and cuts latency on the small steps.
+
+### Step 08 · Fault tolerance and fallback
+
+![Step 08 · Fault tolerance and fallback](diagrams/system-design/step-08.png)
+
+**Added:** The model gateway retries, opens a circuit breaker, fails over to a second Regional deployment in UAE North, then degrades (facts-only brief, passages without an answer).
+
+**Why:** A model outage at 10:00 on Monday must not stop RMs; there is no cross-border failover because data stays in the UAE.
+
+### Step 09 · Scaling for traffic spikes
+
+![Step 09 · Scaling for traffic spikes](diagrams/system-design/step-09.png)
+
+**Added:** AKS across 3 zones with KEDA autoscaling, circuit breakers, the Cosmos DB outbox as a queue for CRM writes, quotas that protect core banking.
+
+**Why:** Quarter-end reviews triple Monday traffic; reads stay fast and writes queue instead of failing.
+
+### Step 10 · Observability and monitoring
+
+![Step 10 · Observability and monitoring](diagrams/system-design/step-10.png)
+
+**Added:** OpenTelemetry traces, p50/p95 per use case and per stage, tokens per request, cost per request and per day, alerts; metadata only, no prompt content.
+
+**Why:** We must know yesterday was fine, and see a latency, token or cost drift before RMs or Finance do.
+
+### Step 11 · Evaluation in four tiers
+
+![Step 11 · Evaluation in four tiers](diagrams/system-design/step-11.png)
+
+**Added:** Runtime gates (retrieval gate before the model, faithfulness and relevancy after), online RAGAS sampling of 5% of answers with an in-region judge, nightly and monthly evals, the release gate.
+
+**Why:** If retrieved chunks are weak, the copilot declines without calling the model; a Friday prompt tweak cannot ship without passing the RAGAS thresholds.
+
+### Step 12 · Agent identity and the MCP gateway
+
+![Step 12 · Agent identity and the MCP gateway](diagrams/system-design/step-12.png)
+
+**Added:** Brief, policy and follow-up agents behind the supervisor; tools only through the MCP gateway (APIM) to internal MCP servers; access = RM (OIDC/OBO) ∩ agent service principal ∩ pod managed identity; tool lists filtered per agent, tool definitions pinned.
+
+**Why:** Least privilege per agent: the policy agent cannot touch customer data, and a hijacked prompt, stolen token or compromised pod alone cannot reach data.
+
+### Step 13 · Memory management
+
+![Step 13 · Memory management](diagrams/system-design/step-13.png)
+
+**Added:** Checkpointer (state per step, pause for approval, resume), session (turns and summary, 24 h), episodic (RM-approved history, 90 days), procedural (versioned prompts and tools), profile; semantic memory is the policy index.
+
+**Why:** Continuity across meetings and a clean approval pause, without memorising customer facts or sharing anything across RMs.
+
+---
+
+## About this document
 
 This document walks the SME RM Copilot through the method of the Codebasics *AI System Design* guide and video:
 **Step 1** requirements and estimation, **Step 2** thirteen building blocks: the guide's eleven plus two we add for
@@ -10,11 +136,8 @@ then one request end to end, a pre-launch checklist and the scenario questions. 
 we decided on Azure, the trade-off, and where we deliberately differ from the guide's e-commerce example, because a
 bank is not a shop. Everything is fictional ("the Bank"); figures are illustrative.
 
-Diagrams: `diagrams/system-design/complete-architecture.png` (the four-lane view) and `step-00.png` to `step-13.png`
-(the architecture growing one block at a time). Blocks 12 and 13 have no step image yet; they are drawn in
-`01-hld.md` §7.1 (agents, MCP gateway and identities) and §5.1 (memory architecture).
-
 ## Contents
+0. [The complete architecture](#the-complete-architecture) and [built step by step](#built-step-by-step)
 1. [Step 1: requirements and estimation](#step-1-requirements-and-estimation)
 2. [Step 2: the thirteen building blocks](#step-2-the-thirteen-building-blocks)
 3. [Step 3: the complete architecture](#step-3-the-complete-architecture)
