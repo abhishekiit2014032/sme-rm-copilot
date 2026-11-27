@@ -40,7 +40,7 @@ pre .k { color:var(--cyan); } pre .ok { color:var(--green); font-weight:600; } p
 .foot { margin-top:16px; color:var(--muted); font-size:14.5px; }
 </style></head><body><div id="canvas">
 <div class="kicker">SME RM COPILOT · ONE REQUEST, END TO END · FICTIONAL BANK, ILLUSTRATIVE FIGURES</div>
-<h1>How one RM question flows to the supervisor and agents</h1>
+<h1>How one RM question flows to the orchestrator and agents</h1>
 <div class="q"><span>RM TYPES IN THE CRM SIDEBAR (ON GULF STAR'S PAGE)</span>"Prepare me for Gulf Star tomorrow. Can we go to AED 3.5m unsecured? If not, what collateral is acceptable?"</div>
 
 <div class="layer"><div class="lname"><b>A</b>Online request path</div><div>
@@ -52,8 +52,8 @@ pre .k { color:var(--cyan); } pre .ok { color:var(--green); font-weight:600; } p
   <pre><span class="k">injection</span>: none   <span class="k">PII</span>: owner name → [PERSON_1]   <span class="ok">✓ clean</span></pre></div>
 </div></div>
 
-<div class="layer"><div class="lname"><b>R</b>Router<br>(understands)</div><div>
-  <div class="row"><div class="n">4</div><div class="node rt"><div class="t">Intent router · classify + split</div><div class="d">No button clicked, so the small model (via the model gateway, tier <i>classify</i>) splits the text into tasks. Customer data in scope, so no cache.</div></div>
+<div class="layer"><div class="lname"><b>I</b>Intent classifier<br>(understands)</div><div>
+  <div class="row"><div class="n">4</div><div class="node rt"><div class="t">Intent classifier · classify + split</div><div class="d">No button clicked, so the small model (via the model gateway, tier <i>classify</i>) splits the text into tasks. Customer data in scope, so no cache.</div></div>
   <pre>{ <span class="k">"tasks"</span>: [
   { "id": "t1", "intent": "customer_brief",  "customer": "C-1042" },
   { "id": "t2", "intent": "policy_question", "q": "3.5m unsecured allowed?" },
@@ -62,8 +62,8 @@ pre .k { color:var(--cyan); } pre .ok { color:var(--green); font-weight:600; } p
   <span class="k">"confidence"</span>: 0.91 }</pre></div>
 </div></div>
 
-<div class="layer"><div class="lname"><b>S</b>Supervisor<br>(code, no model)</div><div>
-  <div class="row"><div class="n">5</div><div class="node sup"><div class="t">Supervisor · make the plan</div><div class="d">Applies the rules table: independent reads run together; t3 needs t2, so it waits and runs only if t2 says "no". Splits the budget. Checkpoint saved.</div></div>
+<div class="layer"><div class="lname"><b>O</b>Orchestrator<br>(code, no model)</div><div>
+  <div class="row"><div class="n">5</div><div class="node sup"><div class="t">Orchestrator · make the plan</div><div class="d">Applies the rules table: independent reads run together; t3 needs t2, so it waits and runs only if t2 says "no". Splits the budget. Checkpoint saved.</div></div>
   <pre><span class="k">wave 1</span> (concurrent): brief_agent[t1]  ‖  policy_agent[t2]
 <span class="k">wave 2</span> (conditional): policy_agent[t3]  <span class="w">if t2 = "no"</span>
 <span class="k">budget</span>: 12k tokens · 8 s · max 2 waves
@@ -89,7 +89,7 @@ pre .k { color:var(--cyan); } pre .ok { color:var(--green); font-weight:600; } p
 <span class="k">answer</span>: <span class="w">"No."</span> Unsecured cap is AED 2.5m (§4.2)</pre></div>
   </div></div>
 
-  <div class="row" style="grid-template-columns:44px 560px 1fr; margin-left:0"><div class="n">7</div><div class="node sup"><div class="t">Supervisor · check results</div><div class="d">Both results are typed and <i>ok</i>. t2's answer is "no", so the condition for wave 2 is met.</div></div>
+  <div class="row" style="grid-template-columns:44px 560px 1fr; margin-left:0"><div class="n">7</div><div class="node sup"><div class="t">Orchestrator · check results</div><div class="d">Both results are typed and <i>ok</i>. t2's answer is "no", so the condition for wave 2 is met.</div></div>
   <pre>t1 <span class="ok">ok</span> · t2 <span class="ok">ok</span> → <span class="k">t2 = "no"</span> → <span class="w">run wave 2</span>   <span class="c">tokens left: 6.8k · time left: 4.1 s</span></pre></div>
 
   <div class="wave" style="margin-left:0"><div class="wh">8 · WAVE 2 · RUNS BECAUSE t2 = "NO" · t2'S ANSWER PASSED IN</div>
@@ -116,5 +116,5 @@ committee (§4.5); acceptable: mortgage, cash margin, receivables (§4.6)."</pre
   <div><b>Observability</b>p95 per stage, tokens, cost per request, trace</div>
   <div><b>Audit + evaluation</b>every tool call logged; 5% chance of RAGAS scoring</div>
 </div>
-<div class="foot">Router = understands the text (model). Supervisor = applies the rules (code). Agents = reason and call tools. Model gateway picks the model per step; tool gateway checks RM ∩ agent ∩ workload identity on every call.</div>
+<div class="foot">Intent classifier = understands the text (model). Orchestrator = applies the rules (code). Agents = reason and call tools. Model gateway picks the model per step; tool gateway checks RM ∩ agent ∩ workload identity on every call.</div>
 </div></body></html>

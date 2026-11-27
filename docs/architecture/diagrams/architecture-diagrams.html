@@ -132,7 +132,7 @@ build('azure', {
     { cls: 'gw', t: 'App Gateway WAF v2', s: 'internal ingress only', r: [360, 330, 220, 100] },
 
     { cls: 'svc', t: 'web-bff', s: 'SSO, OBO, CSRF, step-up · signs approvals', r: [640, 290, 260, 100] },
-    { cls: 'svc', t: 'orchestrator', s: 'supervisor + 3 agents, budgets, guardrails, checks · holds no key', r: [940, 290, 260, 100] },
+    { cls: 'svc', t: 'orchestrator', s: 'intent classifier + 3 agents, waves, budgets, guardrails, checks · holds no key', r: [940, 290, 260, 100] },
     { cls: 'svc', t: 'audit-writer', s: 'hash chain, seals, crypto-shred', r: [640, 450, 260, 100] },
     { cls: 'svc', t: 'tool-gateway', s: 'entitlements first · verifies approvals · only audit producer', r: [940, 450, 260, 110] },
     { cls: 'svc', t: 'outbox-worker', s: 'read-before-retry CRM writes', r: [640, 610, 260, 100] },
@@ -227,7 +227,7 @@ build('local', {
     { cls: 'pass', t: 'Console', s: 'console.html · sign in as a fictional RM · run UC1, UC2, UC3, approve', r: [60, 235, 220, 170] },
 
     { cls: 'svc', t: 'web-bff :8712', s: 'Entra token, OBO, session, CSRF, step-up, approval signing via Key Vault, CSP', r: [360, 235, 300, 130] },
-    { cls: 'svc', t: 'orchestrator :8713', s: 'supervisor + brief, policy, follow-up agents · budgets, guardrails, checks, checkpoints', r: [690, 235, 290, 130] },
+    { cls: 'svc', t: 'orchestrator :8713', s: 'intent classifier + brief, policy, follow-up agents · budgets, guardrails, checks, checkpoints', r: [690, 235, 290, 130] },
     { cls: 'svc', t: 'outbox-worker :8715', s: 'Cosmos change feed, read-before-retry, kill switch holds writes', r: [360, 420, 300, 140] },
     { cls: 'svc', t: 'tool-gateway :8714', s: 'MCP servers: customer-data, policy-search, crm-drafts, memory · entitlement first · approval verify, saga', r: [690, 420, 290, 140] },
     { cls: 'svc', t: 'audit-writer :8716', s: 'hash chain, per-customer keys, crypto-shred', r: [360, 615, 300, 130] },

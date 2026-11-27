@@ -40,7 +40,7 @@ AZURE = {
         ("rm", 30, 380, 200, 90, "Relationship manager", "CRM sidebar · Teams tab", WHITE),
         ("entra", 30, 170, 200, 80, "Microsoft Entra ID", "sign-in and identity", PURPLE),
         ("agw", 290, 380, 170, 90, "Application Gateway", "WAF, internal only", GREY),
-        ("aks", 500, 360, 300, 130, "Copilot services (AKS)", "supervisor + 3 agents · tool-gateway · workers", GREEN),
+        ("aks", 500, 360, 300, 130, "Copilot services (AKS)", "orchestrator + 3 agents · tool-gateway · workers", GREEN),
         ("apim", 840, 380, 260, 90, "API Management", "AI gateway · MCP gateway · system APIs", GREY),
         ("aoai", 1080, 150, 210, 90, "Azure OpenAI", "in Azure AI Foundry", BLUE),
         ("bank", 1380, 375, 220, 100, "Bank systems", "CRM · core banking · LOS · KYC", ORANGE),
@@ -74,7 +74,7 @@ LOCAL = {
     "boxes": [
         ("browser", 40, 300, 170, 90, "Browser console", "sign in as a test RM", WHITE),
         ("bff", 275, 300, 160, 90, "web-bff", "sign-in, approvals", GREEN),
-        ("orch", 460, 300, 190, 90, "orchestrator", "supervisor + 3 agents", GREEN),
+        ("orch", 460, 300, 190, 90, "orchestrator", "intent classifier + 3 agents", GREEN),
         ("tg", 675, 300, 240, 90, "tool-gateway", "MCP servers · entitlements · writes", GREEN),
         ("workers", 460, 415, 455, 60, "Background workers", "outbox · audit · eval workers", GREEN),
         ("apim", 970, 230, 260, 160, "APIM mock", "AI gateway · MCP gateway · system APIs", GREY),
