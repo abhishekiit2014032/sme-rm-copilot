@@ -7,7 +7,7 @@
 <style>
 @page { size: A4; margin: 18mm 17mm 20mm 17mm; }
 @page cover { margin: 0; }
-@page wide { size: A4 landscape; margin: 12mm 14mm 16mm 14mm; }
+@page wide { size: A4 landscape; margin: 6mm 8mm 11mm 8mm; }
 .wide { page:wide; break-before:page; break-after:page; }
 .wide img { width:100%; max-height:172mm; object-fit:contain; border-radius:5px; display:block; }
 :root { --navy:#1B2140; --ink:#1B2140; --body:#2B3445; --muted:#64708A; --green:#16A34A; --green-soft:#E9F7EF; --line:#DDE2EA; --zebra:#F7F8FA; --callout:#F3F5F8; --amber:#B7791F; --amber-bg:#FBF6EC; --amber-line:#D6A04A; }
@@ -89,6 +89,7 @@ figcaption { font-size:8.8pt; color:var(--muted); margin-top:1.8mm; }
 .steps li { counter-increment:s; position:relative; padding-left:9mm; margin-bottom:2.2mm; break-inside:avoid; }
 .steps li::before { content:counter(s); position:absolute; left:0; top:.2mm; width:6mm; height:6mm; border-radius:50%; background:var(--navy); color:#fff; font-size:8.4pt; font-weight:800; text-align:center; line-height:6mm; }
 .compact h2 { font-size:21pt; margin-bottom:2mm; } .compact .lede { font-size:11pt; margin-bottom:2mm; } .compact h3 { margin:5mm 0 2mm; font-size:13pt; } .compact td { padding:1.8mm 3mm; } .compact th { padding:2.2mm 3mm; } .compact table { margin:1mm 0 2mm; }
+.comp table { font-size:9.2pt; break-inside:auto; } .comp td { padding:1.5mm 3mm; }
 </style></head><body>
 
 <section class="compact">
@@ -122,12 +123,11 @@ figcaption { font-size:8.8pt; color:var(--muted); margin-top:1.8mm; }
 </section>
 
 <section class="wide">
-  <p class="eyebrow">SME RM Copilot · Section 2 · Solution architecture</p>
-  <h2 style="font-size:18pt;margin:1mm 0 3mm">2.1 High-level architecture</h2>
-  <img src="../architecture/diagrams/FINAL-hld.png" alt="SME RM Copilot high-level architecture in four lanes: online request path, controlled execution, state and data freshness, production operations" style="max-height:160mm">
+  <p class="eyebrow" style="margin-bottom:1.5mm">SME RM Copilot · Section 2.1 · High-level architecture</p>
+  <img src="../architecture/diagrams/FINAL-hld.png" alt="SME RM Copilot high-level architecture in four lanes: online request path, controlled execution, state and data freshness, production operations" style="width:100%;height:186mm;max-height:none;object-fit:contain">
 </section>
 
-<section>
+<section class="compact comp">
   <p class="eyebrow">SME RM Copilot · Section 2.1</p>
   <h2>Architecture components</h2>
   <table>
@@ -135,22 +135,22 @@ figcaption { font-size:8.8pt; color:var(--muted); margin-top:1.8mm; }
     <tr><td colspan="2" style="background:#E9F7EF;font-weight:800;color:#0E7A39">A · Online request path</td></tr>
     <tr><td><b>API gateway + identity</b></td><td>Verifies the RM's sign-in and applies rate and token limits</td></tr>
     <tr><td><b>Input guardrails</b></td><td>Blocks prompt injection and masks personal data before any model call</td></tr>
-    <tr><td><b>Semantic cache</b></td><td>Reuses verified answers to public policy questions; off in the pilot</td></tr>
+    <tr><td><b>Semantic cache</b></td><td>Reuses verified answers to public policy questions; invalidated when a policy changes (CDC); off in the pilot</td></tr>
     <tr><td><b>Router + orchestrator</b></td><td>Works out the intent and runs the workflow within step limits and time budgets</td></tr>
     <tr><td><b>Output guardrails</b></td><td>Releases an answer only when it is grounded, cited and correct</td></tr>
     <tr><td colspan="2" style="background:#E9F7EF;font-weight:800;color:#0E7A39">B · Controlled execution</td></tr>
     <tr><td><b>Brief, policy and follow-up agents</b></td><td>One agent per use case, each with only its own tools</td></tr>
     <tr><td><b>Retrieval / RAG</b></td><td>Finds the relevant policy clauses; no answer without strong evidence</td></tr>
-    <tr><td><b>Tool gateway (MCP)</b></td><td>The only path to the Bank's systems, checked against the RM's access</td></tr>
+    <tr><td><b>Tool gateway (MCP)</b></td><td>The only path to the Bank's systems; at runtime every call checks OIDC (the RM's identity) + RBAC (role and customer entitlement) + the agent's identity + the workload identity</td></tr>
     <tr><td><b>Model gateway</b></td><td>Picks the right model for each step, with budgets and fallback</td></tr>
     <tr><td><b>Human in the loop</b></td><td>The RM approves every write; unclear cases go to the credit desk</td></tr>
     <tr><td colspan="2" style="background:#E9F7EF;font-weight:800;color:#0E7A39">C · State + data freshness</td></tr>
-    <tr><td><b>Knowledge ingestion (CDC)</b></td><td>Policy changes refresh the index and clear outdated cached answers</td></tr>
+    <tr><td><b>Knowledge ingestion (CDC)</b></td><td>Change data capture (CDC) events from the policy library re-embed changed clauses, refresh the index and invalidate the cache</td></tr>
     <tr><td><b>Session + memory store</b></td><td>Checkpointer, session, episodic and procedural memory, per RM</td></tr>
     <tr><td><b>Secure storage</b></td><td>Keys and a write-once audit log</td></tr>
     <tr><td colspan="2" style="background:#E9F7EF;font-weight:800;color:#0E7A39">D · Production operations</td></tr>
-    <tr><td><b>Observability</b></td><td>Latency, tokens and cost per request, with alerts</td></tr>
-    <tr><td><b>Evaluation</b></td><td>Checks answer quality at runtime and before every release</td></tr>
+    <tr><td><b>Observability</b></td><td>LLM tracing with Langfuse: per-step latency, tokens and cost per request, prompt versions, alerts</td></tr>
+    <tr><td><b>Evaluation</b></td><td>RAGAS scoring (faithfulness, answer relevancy, context precision) on sampled live answers, runtime gates, golden-set check before every release</td></tr>
     <tr><td><b>Reliability + scale</b></td><td>Autoscaling, queues and circuit breakers</td></tr>
     <tr><td><b>Release + recovery</b></td><td>Canary rollout, kill switches and rollback</td></tr>
   </table>
