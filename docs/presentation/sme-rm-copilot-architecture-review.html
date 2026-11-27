@@ -129,7 +129,7 @@ td b { font-weight:600; color:var(--ink); }
     <li><div class="row"><span class="n">2</span><span class="t">Solution architecture</span><span class="dots"></span><span class="pg">3</span></div>
       <ul><li><div class="row"><span class="n">2.1</span><span class="t">High-level architecture</span><span class="dots"></span><span class="pg">3</span></div></li><li><div class="row"><span class="n"></span><span class="t">Architecture components</span><span class="dots"></span><span class="pg">4</span></div></li>
       <li><div class="row"><span class="n">2.2</span><span class="t">Data sources and integrations</span><span class="dots"></span><span class="pg">5</span></div></li><li><div class="row"><span class="n">2.3</span><span class="t">AI/LLM components</span><span class="dots"></span><span class="pg">6</span></div></li>
-      <li><div class="row"><span class="n">2.4</span><span class="t">RAG, agents and other AI patterns</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li><li><div class="row"><span class="n">2.5</span><span class="t">Security and access control</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li></ul></li>
+      <li><div class="row"><span class="n">2.4</span><span class="t">RAG, agents and other AI patterns</span><span class="dots"></span><span class="pg">7</span></div></li><li><div class="row"><span class="n">2.5</span><span class="t">Security and access control</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li></ul></li>
     <li><div class="row"><span class="n">3</span><span class="t">Delivery approach</span><span class="dots"></span><span class="pg tbd">To be added</span></div>
       <ul><li><div class="row"><span class="n">3.1</span><span class="t">Key risks and mitigation plans</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li><li><div class="row"><span class="n">3.2</span><span class="t">Success metrics</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li></ul></li>
     <li><div class="row"><span class="n">4</span><span class="t">Technical deep dive</span><span class="dots"></span><span class="pg tbd">To be added</span></div>
@@ -262,5 +262,41 @@ td b { font-weight:600; color:var(--ink); }
 <tr><td><b>Fallback LLM</b></td><td>Takes over if the primary fails</td><td><b>Guardrail models</b></td><td>Prompt injection, PII, content safety</td></tr>
   </table>
   <p style="margin:1.5mm 0 0;font-size:9.2pt"><b>Principles:</b> fast path for simple asks, planner within step limits and time budgets · RAG, not fine-tuning; no customer data used for training · pinned versions, all in-region.</p>
+</section>
+
+<section class="compact comp ai section">
+  <p class="eyebrow">SME RM Copilot · Section 2.4</p>
+  <h2>2.4 RAG, agents and other AI patterns</h2>
+  <p style="margin:0 0 2mm">The AI patterns implemented in the copilot. Controls such as guardrails and offline evaluation are covered in security (2.5) and the technical deep dive (4.3).</p>
+  <h3>RAG pattern: hybrid, gated RAG</h3>
+  <div class="flow" style="margin:1mm 0 2mm;font-size:9.6pt;line-height:1.6"><b>Ingest:</b> CDC → parse (tables and numbers intact) → chunk by clause → embed + index with metadata<br><b>Query:</b> metadata filter → BM25 + vector search → rerank → retrieval gate → grounded answer with citations</div>
+  <table>
+    <thead><tr><th style="width:24%">Step</th><th>Design</th></tr></thead>
+    <tr><td><b>Chunking</b></td><td>One chunk per clause; tables, limits and amounts kept whole</td></tr>
+    <tr><td><b>Metadata</b></td><td>Document, clause number, version, effective date, product, segment, clearance</td></tr>
+    <tr><td><b>Hybrid search</b></td><td>BM25 keyword for exact numbers, clause numbers and product codes + vector for meaning, then rerank</td></tr>
+    <tr><td><b>Metadata filter</b></td><td>Only current, effective and cleared clauses</td></tr>
+    <tr><td><b>Retrieval gate</b></td><td>No strong enough clause means a decline, not a guess</td></tr>
+    <tr><td><b>Grounded answer</b></td><td>Every claim cites its clause and passes the faithfulness check</td></tr>
+  </table>
+  <h3>Agent patterns implemented</h3>
+  <table>
+    <thead><tr><th style="width:30%">Pattern</th><th>How we use it</th></tr></thead>
+    <tr><td><b>Routing (fast path)</b></td><td>A specific ask goes straight to one agent</td></tr>
+    <tr><td><b>Plan-and-execute</b></td><td>The LLM plans the steps and calls the agents in order, within step limits and time budgets</td></tr>
+    <tr><td><b>Orchestrator-workers</b></td><td>Hub and spoke; agents never talk to each other</td></tr>
+    <tr><td><b>Tool use (MCP, bounded loop)</b></td><td>Each agent calls typed tools up to a fixed step limit</td></tr>
+    <tr><td><b>Human in the loop</b></td><td>Checkpoint → pause for RM approval → resume</td></tr>
+    <tr><td><b>Stateful memory</b></td><td>Checkpointer, session and episodic memory</td></tr>
+  </table>
+  <h3>Other AI patterns implemented</h3>
+  <table>
+    <thead><tr><th style="width:30%">Pattern</th><th>How we use it</th></tr></thead>
+    <tr><td><b>Model routing (cascade)</b></td><td>Smallest model that can do the step; fallback on failure</td></tr>
+    <tr><td><b>Structured generation (Pydantic)</b></td><td>Structured prompts; plans and extractions validated against schemas</td></tr>
+    <tr><td><b>Evaluator-optimizer</b></td><td>Judge checks faithfulness; one stricter retry, else decline</td></tr>
+    <tr><td><b>Semantic caching</b></td><td>Public policy Q&amp;A only; invalidated by CDC</td></tr>
+  </table>
+  <p style="margin:1.5mm 0 0"><b>Not used:</b> fine-tuning · free agent-to-agent chat · agents that write directly · text-to-SQL in the pilot.</p>
 </section>
 </body></html>
