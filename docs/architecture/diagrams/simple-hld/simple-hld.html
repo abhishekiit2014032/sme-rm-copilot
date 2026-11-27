@@ -2,103 +2,137 @@
 <html lang="en"><head><meta charset="utf-8"><title>Simple HLD</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap">
 <style>
-/* SME RM Copilot, simple four-lane HLD (cloud-agnostic, fictional bank). One node for intent router + orchestrator. */
-:root { --bg:#08111F; --lane:#0E1C31; --laneline:#23426A; --box:#10243C; --boxline:#3A6896; --ink:#EEF3F5; --muted:#A9BACB; --cyan:#22D3EE; --amber:#F5B82E; --violet:#B98DFF; }
+/* SME RM Copilot, simple four-lane HLD (cloud-agnostic, fictional bank). Boxes come from the BOX spec below. */
+:root { --bg:#08111F; --lane:#0E1C31; --laneline:#23426A; --box:#10243C; --boxline:#3A6896; --ink:#EEF3F5; --muted:#A9BACB; --cyan:#22D3EE; --amber:#F5B82E; --violet:#B98DFF; --icon:#7DD3FC; --badge:#2563EB; }
 * { box-sizing:border-box; margin:0; }
 body { background:var(--bg); font-family:Inter, Arial, sans-serif; color:var(--ink); }
 #c { position:relative; width:2000px; height:1500px; background:var(--bg); }
 .lane { position:absolute; left:14px; width:1972px; border:1.5px solid var(--laneline); border-radius:14px; background:var(--lane); }
 .lh { position:absolute; display:flex; align-items:center; gap:12px; font:800 24px/1 Inter; letter-spacing:1.5px; }
-.lh span { width:38px; height:38px; border-radius:50%; background:#2563EB; color:#fff; font:800 20px/38px Inter; text-align:center; }
-.b { position:absolute; background:var(--box); border:1.5px solid var(--boxline); border-radius:12px; padding:14px 18px; }
-.b .t { font:700 23px/1.15 Inter; margin-bottom:6px; }
-.b .d { font:400 17px/1.4 Inter; color:var(--muted); }
+.lh span { width:38px; height:38px; border-radius:50%; background:var(--badge); color:#fff; font:800 20px/38px Inter; text-align:center; }
+.b { position:absolute; background:var(--box); border:1.5px solid var(--boxline); border-radius:12px; padding:12px 16px; }
+.b.row { display:flex; gap:14px; align-items:flex-start; }
+.b svg.ic { width:34px; height:34px; color:var(--icon); flex:none; }
+.b.col svg.ic { display:block; margin-bottom:6px; }
+.b.row svg.ic { margin-top:2px; }
+.b .t { font:700 22px/1.15 Inter; margin-bottom:5px; }
+.b.hb .t { padding-right:44px; } .b.hb2 .t { padding-right:80px; }
+.b .d { font:400 16.5px/1.4 Inter; color:var(--muted); }
+.b .bd { position:absolute; right:10px; top:10px; display:flex; gap:5px; }
+.b .bd span { width:32px; height:32px; border-radius:50%; background:var(--badge); color:#fff; font:800 14px/32px Inter; text-align:center; }
 .b.key { border:2px solid var(--cyan); box-shadow:0 0 0 4px rgba(34,211,238,.12); }
-.b.off { border-style:dashed; opacity:.85; }
-.b.off .t::after { content:"OFF"; margin-left:10px; font:700 13px/1 Inter; padding:3px 6px; border-radius:4px; background:#3A4B5E; color:#CFD8E3; vertical-align:3px; }
+.b.off { border-style:dashed; }
+.b.off .t .off { margin-left:8px; font:700 12px/1 Inter; padding:3px 6px; border-radius:4px; background:#3A4B5E; color:#CFD8E3; vertical-align:3px; }
 .b.hitl { border-color:var(--amber); }
 .lbl { position:absolute; font:700 16px/1.2 Inter; white-space:nowrap; }
 .lbl.c { color:var(--cyan); } .lbl.a { color:var(--amber); } .lbl.v { color:var(--violet); }
 .pill { position:absolute; font:700 15px/1 Inter; color:var(--amber); border:1.5px solid var(--amber); border-radius:6px; padding:6px 10px; background:#1B1A10; white-space:nowrap; }
-svg { position:absolute; left:0; top:0; pointer-events:none; }
-.legend { position:absolute; left:30px; top:1300px; width:1940px; border-top:1.5px solid var(--laneline); padding-top:14px; display:flex; gap:44px; font-size:18px; color:var(--muted); align-items:center; }
+svg.wires { position:absolute; left:0; top:0; pointer-events:none; }
+.legend { position:absolute; left:30px; top:1300px; width:1940px; border-top:1.5px solid var(--laneline); padding-top:14px; display:flex; gap:40px; font-size:18px; color:var(--muted); align-items:center; }
 .legend i { display:inline-block; width:56px; height:0; border-top:3px solid; margin-right:10px; vertical-align:middle; }
+.legend .n { display:inline-block; width:28px; height:28px; border-radius:50%; background:var(--badge); color:#fff; font:800 13px/28px Inter; text-align:center; margin-right:8px; }
 .caps { position:absolute; left:30px; top:1360px; width:1940px; display:grid; grid-template-columns:repeat(4,1fr); gap:28px; }
 .caps div { border-top:3px solid #22A06B; padding-top:10px; font-size:17px; line-height:1.45; color:var(--muted); }
 .caps b { display:block; color:var(--ink); font-size:20px; margin-bottom:4px; }
 </style></head><body><div id="c">
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="i-user" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="8" r="3.6"/><path d="M4.5 20c.8-4 3.8-6.2 7.5-6.2s6.7 2.2 7.5 6.2"/></g></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M12 3l7 3v5.5c0 4.4-3 7.8-7 9.5-4-1.7-7-5.1-7-9.5V6z"/><path d="M8.8 12l2.3 2.3 4.2-4.6"/></g></symbol>
+    <symbol id="i-gauge" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 17a8 8 0 1 1 16 0"/><path d="M12 17l4-5"/><path d="M6.5 12.5l1 .6M12 8.2v1.2M17.5 12.5l-1 .6"/></g></symbol>
+    <symbol id="i-filter" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M4 5h16l-6 7.5V19l-4 1.5v-8z"/></g></symbol>
+    <symbol id="i-guard" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M12 3l7 3v5.5c0 4.4-3 7.8-7 9.5-4-1.7-7-5.1-7-9.5V6z"/><path d="M12 8v5M12 16.2v.1"/></g></symbol>
+    <symbol id="i-cache" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><ellipse cx="11" cy="6" rx="7" ry="2.8"/><path d="M4 6v11c0 1.5 3.1 2.8 7 2.8M18 6v4.5M4 11.5c0 1.5 3.1 2.8 7 2.8"/><path d="M18.5 12.5l-3 4.5h3l-2 4" stroke-linecap="round"/></g></symbol>
+    <symbol id="i-router" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="5" r="2.3"/><circle cx="5" cy="18.5" r="2.3"/><circle cx="19" cy="18.5" r="2.3"/><path d="M12 7.3V12M12 12l-5.6 4.6M12 12l5.6 4.6"/></g></symbol>
+    <symbol id="i-flow" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><rect x="3" y="4" width="6" height="5" rx="1.2"/><rect x="15" y="4" width="6" height="5" rx="1.2"/><rect x="9" y="15" width="6" height="5" rx="1.2"/><path d="M9 6.5h6M18 9v2.5H12V15"/></g></symbol>
+    <symbol id="i-chat" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M4 5h16v11H10l-4.5 3.5V16H4z"/><path d="M8 9.5h8M8 12.5h5"/></g></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M14 3H6.5A1.5 1.5 0 0 0 5 4.5v15A1.5 1.5 0 0 0 6.5 21H11"/><path d="M8 8h6M8 11.5h4"/><circle cx="16" cy="15.5" r="3.2"/><path d="M18.4 17.9L21 20.5"/></g></symbol>
+    <symbol id="i-db" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8"><ellipse cx="12" cy="6" rx="7" ry="2.8"/><path d="M5 6v12c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8V6M5 12c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8"/></g></symbol>
+    <symbol id="i-tool" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M14.5 6.5a4 4 0 0 0 5 5L12 19a2.1 2.1 0 0 1-3-3l7.5-7.5"/><path d="M14.5 6.5l2-2 3 3-2 2"/><path d="M4 4l4 4M3.5 7.5l4-4"/></g></symbol>
+    <symbol id="i-bank" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M3.5 9L12 4l8.5 5z"/><path d="M6 11v6M10 11v6M14 11v6M18 11v6M4 20h16"/></g></symbol>
+    <symbol id="i-chip" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9.5 3v3M14.5 3v3M9.5 18v3M14.5 18v3M3 9.5h3M3 14.5h3M18 9.5h3M18 14.5h3"/><path d="M10 10h4v4h-4z"/></g></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 2.8l2 6.2 6.2 2-6.2 2-2 6.2-2-6.2-6.2-2 6.2-2z"/><path d="M19 3.5v3M17.5 5h3"/></g></symbol>
+    <symbol id="i-human" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="7.5" r="3.3"/><path d="M3.8 19.5c.7-3.4 3.2-5.4 6.2-5.4 1.3 0 2.5.4 3.5 1"/><path d="M15 18l2 2 4-4.5"/></g></symbol>
+    <symbol id="i-doc" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 11h6M9 14h6M9 17h4"/></g></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8.5 10.5V7.8a3.5 3.5 0 0 1 7 0v2.7"/><path d="M12 14.5v2.5"/></g></symbol>
+    <symbol id="i-chart" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 20h16"/><path d="M7 16v-4M11 16V8M15 16v-6M19 16V5"/></g></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2.5"/><path d="M8 12.2l2.8 2.8L16.5 9"/></g></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M5.6 18.4l1.8-1.8M16.6 7.4l1.8-1.8"/></g></symbol>
+    <symbol id="i-agent" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="8" width="14" height="11" rx="3"/><path d="M12 8V5"/><circle cx="12" cy="3.6" r="1.2"/><path d="M9.5 16h5M3 12.5v3M21 12.5v3"/><circle cx="9.5" cy="12.5" r=".6" fill="currentColor"/><circle cx="14.5" cy="12.5" r=".6" fill="currentColor"/></g></symbol>
+    <symbol id="i-plug" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v5M15 3v5"/><path d="M6.5 8h11v3a5.5 5.5 0 0 1-11 0z"/><path d="M12 16.5V21"/></g></symbol>
+    <symbol id="i-cycle" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12a7 7 0 0 1-12.3 4.6M5 12a7 7 0 0 1 12.3-4.6"/><path d="M17.5 3.5v4h-4M6.5 20.5v-4h4"/></g></symbol>
+  </defs>
+</svg>
 
 <div class="lane" style="top:14px;height:356px"></div><div class="lh" style="left:34px;top:30px"><span>A</span>ONLINE REQUEST PATH</div>
 <div class="lane" style="top:384px;height:522px"></div><div class="lh" style="left:34px;top:400px"><span>B</span>CONTROLLED EXECUTION</div>
 <div class="lane" style="top:920px;height:176px"></div><div class="lh" style="left:34px;top:936px"><span>C</span>STATE + DATA FRESHNESS</div>
 <div class="lane" style="top:1110px;height:170px"></div><div class="lh" style="left:34px;top:1126px"><span>D</span>PRODUCTION OPERATIONS</div>
+<div id="boxes"></div>
 
-<!-- lane A -->
-<div class="b" style="left:30px;top:96px;width:160px;height:150px"><div class="t">RM</div><div class="d">CRM sidebar · chat app</div></div>
-<div class="b" style="left:266px;top:96px;width:270px;height:150px"><div class="t">API gateway + identity</div><div class="d">SSO · user token passed on · rate and token limits</div></div>
-<div class="b" style="left:612px;top:96px;width:270px;height:150px"><div class="t">Input guardrails</div><div class="d">injection checks · PII masking · scope check</div></div>
-<div class="b key" style="left:958px;top:96px;width:340px;height:150px"><div class="t">Intent router + orchestrator</div><div class="d">intent → tasks (rules, small model) · waves · step, token and time budgets · approval pause</div></div>
-<div class="b" style="left:1374px;top:96px;width:300px;height:150px"><div class="t">Output guardrails</div><div class="d">grounding · numbers · policy · PII · verify before release</div></div>
-<div class="b" style="left:1750px;top:96px;width:220px;height:150px"><div class="t">Answer to RM</div><div class="d">citations · safe decline</div></div>
-<div class="b off" style="left:612px;top:272px;width:300px;height:82px"><div class="t" style="font-size:20px">Semantic cache</div><div class="d" style="font-size:15.5px">public policy only · Phase 2</div></div>
 <div class="lbl c" style="left:1306px;top:112px">draft<br>answer</div>
-
-<!-- lane B -->
-<div class="b" style="left:300px;top:452px;width:380px;height:110px"><div class="t">Brief agent</div><div class="d">customer brief · customer data tools · large model</div></div>
-<div class="b" style="left:720px;top:452px;width:380px;height:110px"><div class="t">Policy agent</div><div class="d">policy + product Q&amp;A · policy search only · cited answers</div></div>
-<div class="b" style="left:1140px;top:452px;width:360px;height:110px"><div class="t">Follow-up agent</div><div class="d">follow-up actions · drafts only · RM approves</div></div>
-<div class="b" style="left:300px;top:620px;width:380px;height:110px"><div class="t">Retrieval / RAG</div><div class="d">hybrid search → rerank · retrieval gate before generation</div></div>
-<div class="b" style="left:720px;top:620px;width:380px;height:110px"><div class="t">Tool gateway (MCP)</div><div class="d">typed tools · RM ∩ agent ∩ workload identity</div></div>
-<div class="b" style="left:1140px;top:620px;width:360px;height:110px"><div class="t">Model gateway</div><div class="d">model per step · token budgets · retries · fallback</div></div>
-<div class="b hitl" style="left:1560px;top:620px;width:410px;height:110px"><div class="t">Human in the loop</div><div class="d">RM approves every write · weak evidence to credit desk</div></div>
-<div class="b" style="left:300px;top:800px;width:380px;height:84px"><div class="t">Vector + keyword index</div><div class="d">policy and product clauses</div></div>
-<div class="b" style="left:720px;top:800px;width:380px;height:84px"><div class="t">Systems of record</div><div class="d">CRM · core · lending · trade · cases</div></div>
-<div class="b" style="left:1140px;top:800px;width:360px;height:84px"><div class="t">Primary LLM / fallback LLM</div><div class="d">in-region</div></div>
-<div class="pill" style="left:924px;top:752px">Writes need RM approval</div>
-
-<!-- lane C -->
-<div class="b" style="left:300px;top:986px;width:380px;height:94px"><div class="t">Knowledge ingestion</div><div class="d">parse → PII scan → chunk → embed</div></div>
-<div class="b" style="left:720px;top:986px;width:780px;height:94px"><div class="t">Session + memory store</div><div class="d">checkpointer (pause, resume) · session · approved history · versioned prompts</div></div>
-<div class="b" style="left:1560px;top:986px;width:410px;height:94px"><div class="t">Secure storage</div><div class="d">keys · write-once audit log</div></div>
-
-<!-- lane D -->
-<div class="b" style="left:30px;top:1170px;width:462px;height:96px"><div class="t">Observability</div><div class="d">traces · p95 latency · tokens · cost · alerts</div></div>
-<div class="b" style="left:522px;top:1170px;width:462px;height:96px"><div class="t">Reliability + scale</div><div class="d">autoscaling · queues · circuit breakers</div></div>
-<div class="b" style="left:1014px;top:1170px;width:462px;height:96px"><div class="t">Release + recovery</div><div class="d">canary · kill switches · rollback</div></div>
-<div class="b" style="left:1506px;top:1170px;width:464px;height:96px"><div class="t">Evaluation</div><div class="d">runtime gates · RAGAS sampling · golden set</div></div>
-
 <div class="lbl c" style="left:1146px;top:300px">tasks in waves<br>results back</div>
 <div class="lbl c" style="left:1336px;top:582px">via gateways only</div>
 <div class="lbl a" style="left:1580px;top:410px">APPROVE / ESCALATE</div>
 <div class="lbl a" style="left:1780px;top:880px">sign + audit</div>
 <div class="lbl v" style="left:500px;top:928px">publish: re-embed</div>
 <div class="lbl v" style="left:1300px;top:1125px">5% sampled answers</div>
+<div class="pill" style="left:924px;top:752px">Writes need RM approval</div>
+<svg class="wires" width="2000" height="1500" viewBox="0 0 2000 1500" id="w"></svg>
 
-<svg width="2000" height="1500" viewBox="0 0 2000 1500" id="w"></svg>
-
-<div class="legend"><span><i style="border-color:var(--cyan)"></i>Request / response</span><span><i style="border-color:var(--amber)"></i>Human approval</span><span><i style="border-color:var(--violet);border-top-style:dashed"></i>State / ingestion</span><span style="margin-left:auto">Fictional bank · cloud-agnostic view</span></div>
+<div class="legend"><span><i style="border-color:var(--cyan)"></i>Request / response</span><span><i style="border-color:var(--amber)"></i>Human approval</span><span><i style="border-color:var(--violet);border-top-style:dashed"></i>State / ingestion</span><span><b class="n">07</b>building block number</span><span style="margin-left:auto">Fictional bank · cloud-agnostic view</span></div>
 <div class="caps">
-<div><b>A · Online request path</b>Gateway, input guardrails, intent router + orchestrator, output guardrails. Every request flows through it.</div>
+<div><b>A · Online request path</b>Gateway, input guardrails, router + orchestrator, output guardrails. Every request flows through it.</div>
 <div><b>B · Controlled execution</b>One agent per use case. Agents reach data only through the gateways; the RM approves every write.</div>
 <div><b>C · State + data freshness</b>Policy ingestion into the index, session and memory for pause and resume, keys and the audit log.</div>
 <div><b>D · Production operations</b>Observability, reliability and scale, safe release, and evaluation of live answers.</div>
 </div>
 </div>
 <script>
+// [x, y, w, h, layout, icon, badges, title, detail, extra class]
+const BOX = [
+ [30,96,160,150,'col','user',[],'RM','CRM sidebar · chat app'],
+ [266,96,270,150,'col','shield',['01','02'],'API gateway + identity','SSO · rate + token limits'],
+ [612,96,270,150,'col','filter',['03'],'Input guardrails','Injection checks · PII masking · scope check'],
+ [958,96,340,150,'col','router',['07'],'Router + orchestrator','Intent · context · workflow<br>Step limits · time budgets','key'],
+ [1374,96,300,150,'col','guard',['03'],'Output guardrails','Grounding · numbers · policy · PII · validate before release'],
+ [1750,96,220,150,'col','chat',[],'Answer to RM','Citations · safe decline'],
+ [592,264,340,98,'row','cache',['04'],'Semantic cache <span class="off">OFF</span>','Public policy only · Phase 2','off'],
+ [300,452,380,110,'row','agent',[],'Brief agent','Customer brief · customer data tools · large model'],
+ [720,452,380,110,'row','agent',[],'Policy agent','Policy + product Q&amp;A · policy search only · cited'],
+ [1140,452,360,110,'row','agent',[],'Follow-up agent','Follow-up actions · drafts only · RM approves'],
+ [300,620,380,110,'row','search',['05'],'Retrieval / RAG','Hybrid search → rerank · retrieval gate'],
+ [720,620,380,110,'row','plug',['12'],'Tool gateway (MCP)','Typed tools · RM ∩ agent ∩ workload identity'],
+ [1140,620,360,110,'row','chip',['07','08'],'Model gateway','Model per step · token budgets · retries · fallback'],
+ [1560,620,410,110,'row','human',['06'],'Human in the loop','RM approves every write · weak evidence to credit desk','hitl'],
+ [300,800,380,94,'row','db',[],'Vector + keyword index','Policy and product clauses'],
+ [720,800,380,94,'row','bank',[],'Systems of record','CRM · core · lending · trade · cases'],
+ [1140,800,360,94,'row','spark',[],'Primary / fallback LLM','In-region'],
+ [300,986,380,94,'row','doc',['05'],'Knowledge ingestion','Parse → PII scan → chunk → embed'],
+ [720,986,780,94,'row','db',['13'],'Session + memory store','Checkpointer (pause, resume) · session · approved history · versioned prompts'],
+ [1560,986,410,94,'row','lock',[],'Secure storage','Keys · write-once audit log'],
+ [30,1170,462,96,'row','chart',['10'],'Observability','Traces · p95 latency · tokens · cost · alerts'],
+ [522,1170,462,96,'row','gear',['08','09'],'Reliability + scale','Autoscaling · queues · circuit breakers'],
+ [1014,1170,462,96,'row','cycle',[],'Release + recovery','Canary · kill switches · rollback'],
+ [1506,1170,464,96,'row','check',['11'],'Evaluation','Runtime gates · RAGAS sampling · golden set'],
+];
+document.getElementById('boxes').innerHTML = BOX.map(([x,y,w,h,l,ic,bd,t,d,cls]) =>
+  `<div class="b ${l} ${cls||''} ${bd.length>1?'hb2':bd.length?'hb':''}" style="left:${x}px;top:${y}px;width:${w}px;height:${h}px">` +
+  `<svg class="ic"><use href="#i-${ic}"/></svg>` + (bd.length ? `<div class="bd">${bd.map(n=>`<span>${n}</span>`).join('')}</div>` : '') +
+  `<div><div class="t">${t}</div><div class="d">${d}</div></div></div>`).join('');
 const W = [
- // [points, colour, dashed, both-ends]
  [[[190,171],[266,171]],'c'], [[[536,171],[612,171]],'c'], [[[882,171],[958,171]],'c'],
  [[[1298,171],[1374,171]],'c'], [[[1674,171],[1750,171]],'c'],
- [[[1000,246],[1000,313],[912,313]],'c',1,1],                       // router <-> cache
- [[[1130,246],[1130,432]],'c',0,-1], [[[490,432],[1320,432]],'c',0,-1],      // orchestrator -> bus
+ [[[1000,246],[1000,313],[932,313]],'c',1,1],
+ [[[1130,246],[1130,432]],'c',0,-1], [[[490,432],[1320,432]],'c',0,-1],
  [[[490,432],[490,452]],'c'], [[[910,432],[910,452]],'c'], [[[1320,432],[1320,452]],'c'],
- [[[490,591],[1320,591]],'c',0,-1],                                     // agents -> gateways bus
+ [[[490,591],[1320,591]],'c',0,-1],
  [[[490,562],[490,620]],'c',0,1], [[[910,562],[910,620]],'c',0,1], [[[1320,562],[1320,620]],'c',0,1],
  [[[490,730],[490,800]],'c',0,1], [[[910,730],[910,800]],'c',0,1], [[[1320,730],[1320,800]],'c',0,1],
- [[[1280,246],[1280,400],[1765,400],[1765,620]],'a'],               // orchestrator -> human in the loop
- [[[1765,730],[1765,986]],'a'],                                     // sign + audit
- [[[490,986],[490,884]],'v',1],                                     // ingestion -> index
- [[[1530,246],[1530,1170]],'v',1],                                  // output -> evaluation (sampled)
+ [[[1280,246],[1280,400],[1765,400],[1765,620]],'a'],
+ [[[1765,730],[1765,986]],'a'],
+ [[[490,986],[490,894]],'v',1],
+ [[[1530,246],[1530,1170]],'v',1],
 ];
 const col = {c:'#22D3EE', a:'#F5B82E', v:'#B98DFF'};
 let s = '<defs>' + Object.entries(col).map(([k,v]) => `<marker id="m${k}" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" fill="${v}"/></marker>`).join('') + '</defs>';
