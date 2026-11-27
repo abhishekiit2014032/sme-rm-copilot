@@ -135,7 +135,7 @@ td b { font-weight:600; color:var(--ink); }
       <ul><li><div class="row"><span class="n">3.1</span><span class="t">Key risks and mitigation plans</span><span class="dots"></span><span class="pg">9</span></div></li><li><div class="row"><span class="n">3.2</span><span class="t">Success metrics</span><span class="dots"></span><span class="pg">9</span></div></li></ul></li>
     <li><div class="row"><span class="n">4</span><span class="t">Technical deep dive</span><span class="dots"></span><span class="pg">10</span></div>
       <ul><li><div class="row"><span class="n">4.1</span><span class="t">Major design decisions</span><span class="dots"></span><span class="pg">10</span></div></li><li><div class="row"><span class="n">4.2</span><span class="t">Technology choices and trade-offs</span><span class="dots"></span><span class="pg">11</span></div></li>
-      <li><div class="row"><span class="n">4.3</span><span class="t">Hallucination, model evaluation, monitoring and governance</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li></ul></li>
+      <li><div class="row"><span class="n">4.3</span><span class="t">Hallucination, model evaluation, monitoring and governance</span><span class="dots"></span><span class="pg">12</span></div></li></ul></li>
   </ol>
   <p class="note" style="margin-top:6mm">Fictional bank; all figures illustrative. Working draft: sections are added as they are agreed.</p>
 </section>
@@ -415,6 +415,56 @@ td b { font-weight:600; color:var(--ink); }
 <tr><td><b>Tracing</b></td><td>Langfuse + Azure Monitor</td><td>Azure Monitor only</td><td>LLM traces <b>vs</b> one more component</td></tr>
 <tr><td><b>Compute</b></td><td>Private AKS</td><td>Container Apps</td><td>Isolation <b>vs</b> ops effort</td></tr>
 <tr><td><b>Keys</b></td><td>Key Vault Managed HSM</td><td>Standard Key Vault</td><td>Bank-held keys <b>vs</b> cost</td></tr>
+  </table>
+</section>
+
+<section class="compact comp section">
+  <p class="eyebrow">SME RM Copilot · Section 4.3</p>
+  <h2>4.3 Hallucination, model evaluation, monitoring and governance</h2>
+  <h3>Hallucination controls</h3>
+  <table>
+    <thead><tr><th style="width:22%">Stage</th><th>Control</th></tr></thead>
+<tr><td><b>Before generation</b></td><td>Metadata filter (current policies only) · retrieval gate: no strong clause means decline</td></tr>
+<tr><td><b>Prompt design</b></td><td>Structured, versioned prompts · only retrieved clauses in context · explicit instructions to cite and to decline when unsure · few-shot examples</td></tr>
+<tr><td><b>Model parameters</b></td><td>Low temperature (0 to 0.2) · constrained top-p · top-k where the model supports it · max-token limits per step</td></tr>
+<tr><td><b>Output format</b></td><td>Structured output (Pydantic) · numbers filled from source, never generated</td></tr>
+<tr><td><b>Tool boundaries</b></td><td>Typed tools, per-agent allow-lists · agents can only read what their task needs</td></tr>
+<tr><td><b>After generation</b></td><td>Faithfulness and relevancy check · citation validation · number match</td></tr>
+<tr><td><b>Retry and fallback</b></td><td>One stricter retry on a failed check · fallback model on errors · otherwise decline, never guess</td></tr>
+<tr><td><b>Human</b></td><td>RM reviews every answer; approval required for writes</td></tr>
+  </table>
+  <h3>Model evaluation: no evals, no production</h3>
+  <table>
+    <thead><tr><th style="width:13%">Type</th><th style="width:17%">When</th><th style="width:44%">What is checked</th><th>Action</th></tr></thead>
+<tr><td><b>Runtime</b></td><td>Every request</td><td><b>Retrieved chunks:</b> relevance score against the threshold before generation · <b>Answer:</b> faithfulness and relevancy after generation</td><td>Below threshold: decline or retry once</td></tr>
+<tr><td><b>Online</b></td><td>Sample of live traces</td><td>RAGAS scoring of real answers · RM feedback</td><td>Alert on downward trend</td></tr>
+<tr><td><b>Release gate</b></td><td>Every prompt, model or tool change</td><td>Golden dataset (real RM questions with grading criteria) · rubric + LLM-as-judge, spot-checked by humans</td><td>No pass, no deploy</td></tr>
+<tr><td><b>Rollout</b></td><td>After the gate passes</td><td>Canary release; quality and latency watched against thresholds</td><td>One-click rollback</td></tr>
+<tr><td><b>Feedback loop</b></td><td>Continuous</td><td>Bad production traces become new golden-set cases</td><td>Golden set grows with real failures</td></tr>
+  </table>
+</section>
+<section class="compact comp section">
+  <p class="eyebrow">SME RM Copilot · Section 4.3</p>
+  <h3 style="margin-top:0">Monitoring: no trace, no debugging</h3>
+  <table>
+    <thead><tr><th style="width:22%">Group</th><th>Signals</th></tr></thead>
+<tr><td><b>Trace</b></td><td>Every request end to end: prompt version, retrieved chunks, tool calls, tokens, latency, cost, outcome (Langfuse)</td></tr>
+<tr><td><b>Traffic and latency</b></td><td>Requests per second · p50 / p95 per stage against the SLO</td></tr>
+<tr><td><b>Quality</b></td><td>Retrieval no-result rate · decline rate · escalation rate · RM thumbs-down · eval scores</td></tr>
+<tr><td><b>Cost</b></td><td>Tokens and spend per use case, per model, per day</td></tr>
+<tr><td><b>Dependencies</b></td><td>Health of the gateway, retrieval, CRM and core systems, and the model provider</td></tr>
+<tr><td><b>Thresholds</b></td><td>An <b>alert</b> number and a separate <b>rollback</b> number for each key metric</td></tr>
+  </table>
+  <h3>Governance</h3>
+  <table>
+    <thead><tr><th style="width:22%">Control</th><th>How</th></tr></thead>
+<tr><td><b>Targets</b></td><td>Numeric targets for latency, uptime, cost and safety, written down and owned</td></tr>
+<tr><td><b>Never-say list</b></td><td>Topics and promises the copilot must never make, signed off by legal and compliance</td></tr>
+<tr><td><b>Escalation rules</b></td><td>Intents the AI never handles · approval thresholds for actions</td></tr>
+<tr><td><b>Change control</b></td><td>Versioned prompts, models and tools · golden set gates every change · rollback plan</td></tr>
+<tr><td><b>Golden set ownership</b></td><td>A named owner who keeps it current</td></tr>
+<tr><td><b>Model risk</b></td><td>Sign-off before go-live; periodic review</td></tr>
+<tr><td><b>Audit</b></td><td>Write-once trail of requests, tool calls and approvals</td></tr>
   </table>
 </section>
 </body></html>
