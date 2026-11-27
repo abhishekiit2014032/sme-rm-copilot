@@ -1,6 +1,6 @@
 """Diagram box: Tool gateway (MCP) (lane B), the only path to the Bank's systems.
-Every call checks OIDC user identity, RBAC (role + customer entitlement), agent identity and workload identity.
-Mocked: identity provider and entitlement service (mocks/identity); production is an API gateway with MCP policies.
+Every call checks the RM's OIDC token, RBAC (role + customer entitlement, fail closed), agent id and workload id.
+Mocked: IdP, entitlements; agent/workload ids are names set in code (prod: Entra service principals, managed IDs).
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ AGENT_ALLOW_LIST: dict[str, set[str]] = {
     },
     "agent-policy": {"policy-search.search_policy"},
     "agent-followup": {
-        "customer-data.get_customer_profile", "memory.get_session",
+        "customer-data.get_customer_profile",
         "crm-drafts.create_note_draft", "crm-drafts.create_task_drafts", "crm-drafts.create_email_draft",
     },
 }
@@ -33,7 +33,12 @@ ROLE_SERVERS: dict[Role, set[str]] = {
     Role.CREDIT_DESK: {"customer-data", "policy-search"},
 }
 
+# MCP servers whose every tool reads or writes one customer's data: a customer_id is required.
+CUSTOMER_SCOPED_SERVERS = {"customer-data", "crm-drafts", "memory"}
+
 # Workload identities allowed to call the gateway (the orchestrator service that hosts the agents).
+# Mocked: the agent and workload ids are plain names set in code and compared as strings. In production each is an
+# Entra ID service principal or managed identity whose token the API gateway validates before any MCP policy runs.
 TRUSTED_WORKLOADS = {"wl-orchestrator"}
 
 
@@ -83,12 +88,15 @@ class ToolGateway:
             raise ToolDenied("oidc", "token does not match the caller")
 
     def _check_rbac(self, call: ToolCall, ctx: RunContext) -> None:
-        """RBAC: the role must allow the server, and the RM must be entitled to the customer."""
+        """RBAC: the role must allow the server, and the RM must be entitled to the customer. Fails closed: a
+        customer-scoped tool without a customer_id is refused, never run unchecked."""
         allowed_servers = set().union(*(ROLE_SERVERS.get(r, set()) for r in ctx.identity.roles))
         if call.server not in allowed_servers:
             raise ToolDenied("rbac", f"role may not use {call.server}")
         customer_id = call.args.get("customer_id")
-        if customer_id and not self._entitlements.is_entitled(ctx.identity.user_id, customer_id):
+        if call.server in CUSTOMER_SCOPED_SERVERS and not customer_id:
+            raise ToolDenied("customer", f"{call.qualified_name} needs a customer_id")
+        if customer_id is not None and not self._entitlements.is_entitled(ctx.identity.user_id, customer_id):
             raise ToolDenied("entitlement", f"{ctx.identity.user_id} is not entitled to customer {customer_id}")
 
     def _check_agent(self, call: ToolCall) -> None:

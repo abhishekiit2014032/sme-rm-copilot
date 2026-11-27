@@ -15,7 +15,8 @@ def test_two_part_question_is_planned_and_cites_sections_4_2_4_5_and_4_6(copilot
     assert plan.attrs["steps"] == 2 and "(if step 1 = no)" in plan.detail
     assert [(c.clause, c.version) for c in answer.citations] == [("4.2", "2026.2"), ("4.5", "2026.2"),
                                                                   ("4.6", "2026.2")]
-    assert answer.text.startswith("No. AED 3.5m is above the unsecured cap of AED 2.5m")
+    assert answer.text.startswith("No. AED 3.5m is above the limit")
+    assert "must not exceed AED 2.5m (§4.2)" in answer.text
     for expected in ("§4.2", "§4.5", "§4.6", "property mortgage", "cash margin", "assignment of receivables"):
         assert expected in answer.text
     assert "1.5m" not in answer.text            # the superseded cap is never used

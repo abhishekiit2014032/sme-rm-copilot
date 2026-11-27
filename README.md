@@ -75,7 +75,7 @@ sequenceDiagram
 | Human in the loop | `execution/approvals.py` |
 | **C · State + data freshness** | [`src/copilot/state/`](src/copilot/state) |
 | Knowledge ingestion (CDC) | `state/ingestion.py` |
-| Session + memory store | `state/memory/` (checkpointer, session, episodic, procedural) |
+| Session + memory store | `state/memory/` (checkpointer, session, episodic, procedural; the prototype records session turns but does not read them back) |
 | Secure storage (audit) | `state/audit_log.py` |
 | **D · Production operations** | [`src/copilot/operations/`](src/copilot/operations) |
 | Observability | `operations/tracing.py` |
@@ -93,7 +93,7 @@ make setup     # create .venv and install pinned dependencies
 make demo      # run the Gulf Star scenarios in the terminal, with a trace per lane
 make test      # unit, end-to-end and security tests
 make evals     # release gate: RAGAS-style benchmark on the golden set
-make serve     # API + demo UI on http://localhost:8000
+make serve     # API + demo UI on http://localhost:8000 (dev mode: COPILOT_DEV=1 enables /dev/token)
 ```
 
 ## Demo scenarios
@@ -103,7 +103,8 @@ make serve     # API + demo UI on http://localhost:8000
 | 1 | "Prepare brief" for Gulf Star Trading LLC | Fast path, brief agent, figures filled from source systems, product suggestions |
 | 2 | "Can we go to AED 3.5m unsecured? If not, what collateral is acceptable?" | Planner path, two policy steps, hybrid RAG, cited clauses |
 | 3 | "Draft follow-up: owner will send audited financials by 5 Dec" | Drafts, checkpoint, RM approval token, resume, outbox write |
-| 4 | Failure cases | Prompt injection blocked, other RM's customer denied, source down (degraded answer), weak evidence (decline) |
+| 4 | Failure cases | Prompt injection blocked · other RM's customer denied · core banking down (retries, circuit breaker opens, degraded brief) · primary model down (fallback answers) and both models down (safe decline) · weak evidence (decline) |
+| 5 | Policy change (CDC) | Cache miss, cache hit (still validated), CDC re-index invalidates it, fresh answer |
 
 ## Real vs mocked
 
@@ -121,11 +122,11 @@ External systems and models sit behind interfaces in `src/copilot/contracts/port
 
 | Area | In this prototype | In production (per the architecture document) |
 |---|---|---|
-| LLM | Scripted, deterministic responses | Azure OpenAI via the model gateway (adapter stub in `mocks/llm/azure_openai_adapter.py`) |
+| LLM | Scripted, deterministic, rule-based over the retrieved clauses | Azure OpenAI via the model gateway (adapter stub in `mocks/llm/azure_openai_adapter.py`) |
 | Identity | Mock OIDC issuer; agent and workload identities are names set in code | Entra ID tokens, a service principal per agent, managed workload identities |
 | Plan execution | Steps run in sequence | Independent steps can run in parallel (LangGraph) |
 | Stores | In-memory memory, cache, index, audit log and outbox | Cosmos DB, AI Search, Managed Redis, immutable Blob Storage |
-| Outbox | Drained in-process right after approval | Async worker with retries |
+| Outbox | Drained in-process right after approval; a CRM outage returns "pending" and the RM re-approves with the same token | Async worker with retries |
 | Evals | Lexical mock judge; release gate on a 16-case golden set | RAGAS with an LLM judge; 5% online sampling, nightly runs |
 | Network and region | Not modelled | UAE North, private endpoints, no public path |
 
@@ -151,5 +152,5 @@ docs/          architecture document, diagrams, decision records
 src/copilot/   the copilot, one folder per diagram lane
 mocks/         simulated systems of record, LLM, identity, fictional data
 demo/          terminal demo, web UI, static export
-tests/         unit, end-to-end, security, evals
+tests/         unit, end-to-end, security, API (one file per diagram box)
 ```

@@ -31,10 +31,12 @@ def issue(service: ApprovalService) -> str:
     return service.issue("thread-1", ["dr-1", "dr-2"], "rm-1", Trace())
 
 
-def test_token_verifies_once_then_a_replay_is_rejected(copilot):
+def test_token_is_used_up_only_after_the_commit_then_a_replay_is_rejected(copilot):
     service = ApprovalService()
     token = issue(service)
     assert verify(copilot, service, token).draft_ids == ["dr-1", "dr-2"]
+    claims = verify(copilot, service, token)            # still valid: nothing committed yet
+    service.consume(claims, Trace())
     with pytest.raises(ApprovalError, match="replay"):
         verify(copilot, service, token)
 
@@ -73,6 +75,19 @@ def test_outbox_commits_each_draft_once_with_an_idempotency_key():
     outbox.enqueue(drafts(), "thread-1", Trace())
     assert len(outbox.dispatch(Trace()).committed) == 2
     assert set(crm.committed) == {"thread-1:dr-1", "thread-1:dr-2"}
+
+
+def test_outbox_keeps_writes_while_the_crm_is_down_and_never_queues_one_twice():
+    crm = MockCrm(load_json("customers.json"))
+    crm.down = True
+    outbox = CommitOutbox(crm)
+    outbox.enqueue(drafts(), "thread-1", Trace())
+    trace = Trace()
+    assert outbox.dispatch(trace).pending == 2 and trace.spans[0].status == "unavailable"
+    outbox.enqueue(drafts(), "thread-1", Trace())                # the RM approves again
+    crm.down = False
+    report = outbox.dispatch(Trace())
+    assert (len(report.committed), report.pending, len(crm.committed)) == (2, 0, 2)
 
 
 def test_outbox_is_idempotent_when_the_crm_reply_is_lost():

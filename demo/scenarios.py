@@ -88,8 +88,21 @@ def entitlement(c: Copilot) -> list[StepResult]:
 
 def core_down(c: Copilot) -> list[StepResult]:
     c.core_banking.down = True
-    return [ask(c, "Core banking is down; RM-1 clicks Prepare brief", "rm-1",
-                AskRequest(action="prepare_brief", customer_id=GULF_STAR))]
+    click = AskRequest(action="prepare_brief", customer_id=GULF_STAR)
+    return [ask(c, "Core banking is down; RM-1 clicks Prepare brief (retried, then labelled unavailable)", "rm-1",
+                click),
+            ask(c, "RM-1 clicks again: the circuit breaker opens and the next call fails fast", "rm-1", click)]
+
+
+def model_fallback(c: Copilot) -> list[StepResult]:
+    question = AskRequest(text="What is the fee for a letter of credit amendment?")
+    c.llm.down_models.add("primary-llm")
+    fallback = ask(c, "Primary model is down; the model gateway retries, then uses the fallback model", "rm-1",
+                   question)
+    c.llm.down_models.add("fallback-llm")
+    declined = ask(c, "Fallback model is down too; the copilot declines safely instead of guessing", "rm-1",
+                   question)
+    return [fallback, declined]
 
 
 def weak_evidence(c: Copilot) -> list[StepResult]:
@@ -143,9 +156,13 @@ SCENARIOS: list[Scenario] = [
              "Input guardrails stop the request before any model or tool is called.", injection),
     Scenario("entitlement", "4b. Other RM's customer denied",
              "RM-2 is not entitled to Gulf Star; the tool gateway denies the first data call.", entitlement),
-    Scenario("core_down", "4c. Core banking down (degraded brief)",
-             "Retries and a circuit breaker, then a brief labelled 'account data unavailable'.", core_down),
-    Scenario("weak_evidence", "4d. Weak evidence declined",
+    Scenario("core_down", "4c. Core banking down (degraded brief, breaker opens)",
+             "Retries with backoff give a brief labelled 'account data unavailable'; on the second click the "
+             "circuit breaker opens and fails fast.", core_down),
+    Scenario("model_fallback", "4d. Model outage (fallback, then safe decline)",
+             "Primary model down: the model gateway switches to the fallback model. Both down: a safe decline, "
+             "still audited and traced.", model_fallback),
+    Scenario("weak_evidence", "4e. Weak evidence declined",
              "No clause passes the retrieval gate, so the copilot declines instead of guessing.", weak_evidence),
     Scenario("cdc_cache", "5. Policy change (CDC) and semantic cache",
              "Cache switched on for this demo: miss, hit, CDC re-index invalidates it, fresh answer.", cdc_cache,

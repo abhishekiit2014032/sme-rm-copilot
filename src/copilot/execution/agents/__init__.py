@@ -1,6 +1,6 @@
 """Diagram box: Brief, Policy and Follow-up agents (lane B), the shared agent base.
-An agent has its own identity, calls tools only through the tool gateway and models only through the model gateway.
-Agents report only to the orchestrator (hub and spoke); they never call each other.
+Agents reach tools only via the tool gateway, models only via the model gateway, and report only to the orchestrator.
+Mocked: agent and workload identities are names set in code (production: Entra service principals, managed identities).
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from copilot.contracts.tools import ToolCall, ToolResult
 from copilot.execution.model_gateway import ModelGateway
 from copilot.execution.tool_gateway import ToolGateway
 
-WORKLOAD_ID = "wl-orchestrator"   # agents run inside the orchestrator workload
+WORKLOAD_ID = "wl-orchestrator"   # mocked: a name, not a verified managed-identity token
 PLACEHOLDER = re.compile(r"\{\{(\w+)\}\}")
 
 

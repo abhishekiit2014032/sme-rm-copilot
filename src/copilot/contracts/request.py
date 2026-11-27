@@ -41,6 +41,7 @@ class AnswerStatus(str, Enum):
     DENIED = "denied"                  # identity, rate limit or entitlement check failed
     AWAITING_APPROVAL = "awaiting_approval"
     COMMITTED = "committed"
+    PENDING = "pending"                # approved, but the CRM is down: writes wait in the outbox
     REJECTED = "rejected"              # approval token invalid, expired or replayed
 
 

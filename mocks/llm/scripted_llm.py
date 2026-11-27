@@ -17,6 +17,15 @@ from copilot.operations.resilience import TransientError
 MONTHS = {m: i for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
 AMOUNT = re.compile(r"AED\s?(\d+(?:\.\d+)?)\s?m\b", re.IGNORECASE)
+CAP = re.compile(r"(?:must not exceed|not more than|at most|a maximum of)\s+" + AMOUNT.pattern, re.IGNORECASE)
+CLAUSE_MENTION = re.compile(r"\s(?:in|under)\s(§\d+(?:\.\d+)*)")
+# Intent -> cue pattern. More distinct cues in the ask give a more confident classification.
+INTENT_CUES = {
+    "followup": r"draft follow|follow-up|follow up|meeting notes",
+    "brief": r"\bbrief\b|prepare me|meeting prep",
+    "policy": r"policy|unsecured|collateral|fee|limit|eligib|document|cap|letter of credit|\blc\b|deposit|"
+              r"financing|tenor|lending|\?",
+}
 
 
 class LlmUnavailable(TransientError):
@@ -57,7 +66,9 @@ class ScriptedLlm:
         text = v["text"]
         parts = split_question(text)
         multi_step = len(parts) > 1 or bool(re.search(r"\bif not\b", text, re.I))
-        return {"intent": guess_intent(text), "multi_step": multi_step, "confidence": 0.93}
+        intent, cues = _intent_cues(text)
+        confidence = round(1 - 0.5 ** (cues + 1), 2) if cues else 0.5    # 1 cue 0.75, 2 cues 0.88, 3 cues 0.94
+        return {"intent": intent, "multi_step": multi_step, "confidence": confidence}
 
     def _plan(self, v: dict[str, Any]) -> dict[str, Any]:
         steps = []
@@ -78,11 +89,15 @@ class ScriptedLlm:
 
     # ---- policy agent ------------------------------------------------------------------
     def _policy_answer(self, v: dict[str, Any]) -> dict[str, Any]:
+        """Generic rules over the retrieved clauses: an amount checked against a stated maximum, a listed clause,
+        or the top clause's best-matching sentence. Every sentence is quoted or built from clause text."""
         question, clauses = v["question"], v["clauses"]
-        if re.search(r"unsecured", question, re.I) and AMOUNT.search(question):
-            result = _answer_unsecured_cap(question, clauses)
-        elif re.search(r"collateral", question, re.I):
-            result = _answer_collateral(clauses)
+        asked = AMOUNT.search(question)
+        cap_clause = next((c for c in clauses if CAP.search(c["text"])), None)
+        if asked and cap_clause:
+            result = _limit_check(float(asked.group(1)), cap_clause, clauses)
+        elif _list_items(clauses[0]["text"]):
+            result = _list_answer(clauses[0], clauses)
         else:
             top = clauses[0]
             result = {"outcome": "info", "answer": f"{_best_sentence(top['text'], question)} ({top['ref_label']}).",
@@ -149,55 +164,70 @@ def split_question(text: str) -> list[str]:
 
 
 def guess_intent(text: str) -> str:
+    return _intent_cues(text)[0]
+
+
+def _intent_cues(text: str) -> tuple[str, int]:
+    """The first intent whose cues appear in the ask, and how many distinct cues matched."""
     lowered = text.lower()
-    if re.search(r"draft follow|follow-up|follow up|meeting notes", lowered):
-        return "followup"
-    if re.search(r"\bbrief\b|prepare me|meeting prep", lowered):
-        return "brief"
-    if re.search(r"policy|unsecured|collateral|fee|limit|eligib|document|cap|letter of credit|\blc\b|deposit|"
-                 r"financing|tenor|lending|\?", lowered):
-        return "policy"
-    return "unknown"
+    for intent, cues in INTENT_CUES.items():
+        found = set(re.findall(cues, lowered))
+        if found:
+            return intent, len(found)
+    return "unknown", 0
 
 
-def _answer_unsecured_cap(question: str, clauses: list[dict[str, Any]]) -> dict[str, Any]:
-    requested = float(AMOUNT.search(question).group(1))
-    cap_clause = next((c for c in clauses if "unsecured" in c["text"].lower() and AMOUNT.search(c["text"])), None)
-    if cap_clause is None:
-        return {"outcome": "unknown", "answer": "The retrieved clauses do not state an unsecured cap.",
-                "cited_refs": []}
-    cap = float(AMOUNT.search(cap_clause["text"]).group(1))
-    if requested <= cap:
-        return {"outcome": "yes", "cited_refs": [cap_clause["ref"]],
-                "answer": f"Yes. AED {requested:g}m is within the unsecured cap of AED {cap:g}m per SME "
-                          f"borrower ({cap_clause['ref_label']}). {_other_sentences(cap_clause['text'])}".strip()}
-    answer = (f"No. AED {requested:g}m is above the unsecured cap of AED {cap:g}m per SME borrower "
-              f"({cap_clause['ref_label']}).")
-    refs = [cap_clause["ref"]]
-    above_cap = next((c for c in clauses if "above the unsecured cap" in c["text"].lower()), None)
-    if above_cap:
-        answer += (" Above the cap, the excess needs acceptable collateral or a Credit Committee exception "
-                   f"({above_cap['ref_label']}).")
-        refs.append(above_cap["ref"])
-    return {"outcome": "no", "answer": answer, "cited_refs": refs}
+def _limit_check(requested: float, clause: dict[str, Any], clauses: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compare the amount asked for with the maximum the clause states, quoting the rule itself."""
+    rule = next(s for s in _sentences(clause["text"]) if CAP.search(s))
+    cap = float(CAP.search(rule).group(1))
+    within = requested <= cap
+    answer = (f"{'Yes' if within else 'No'}. AED {requested:g}m is {'within' if within else 'above'} the limit: "
+              f"{rule[:1].lower()}{rule[1:].rstrip('.')} ({clause['ref_label']}).")
+    if within:   # the clause's other conditions still apply
+        others = " ".join(s for s in _sentences(clause["text"]) if s != rule)
+        return {"outcome": "yes", "answer": f"{answer} {others}".strip(), "cited_refs": [clause["ref"]]}
+    related = _referring(clause, clauses)    # e.g. what applies above the limit
+    cited = [clause] + related
+    answer = " ".join([answer] + [_quote(c, cited) for c in related])
+    return {"outcome": "no", "answer": answer, "cited_refs": [c["ref"] for c in cited]}
 
 
-def _answer_collateral(clauses: list[dict[str, Any]]) -> dict[str, Any]:
-    clause = next((c for c in clauses if "collateral" in c["heading"].lower()), clauses[0])
-    items = [line[2:].split(" (")[0] for line in clause["text"].splitlines() if line.startswith("- ")]
-    if not items:
-        return {"outcome": "info", "answer": f"{_first_sentence(clause['text'])} ({clause['ref_label']}).",
-                "cited_refs": [clause["ref"]]}
-    answer, refs = "", []
-    above_cap = next((c for c in clauses if "above the unsecured cap" in c["text"].lower()), None)
-    if above_cap:
-        answer = ("Above the unsecured cap, the excess must be covered by acceptable collateral or approved as a "
-                  f"Credit Committee exception ({above_cap['ref_label']}). ")
-        refs.append(above_cap["ref"])
+def _list_answer(clause: dict[str, Any], clauses: list[dict[str, Any]]) -> dict[str, Any]:
+    """A clause that lists options: name them, keep the clause's other sentences, and quote clauses referring to
+    it first (they say when the list applies)."""
+    lines = [line.strip() for line in clause["text"].splitlines() if line.strip()]
+    items = _list_items(clause["text"])
+    intro = next(line for line in lines if not line.startswith("- "))
+    rest = [line for line in lines if not line.startswith("- ") and line != intro]
     listed = ", ".join(items[:-1]) + f" or {items[-1]}" if len(items) > 1 else items[0]
-    answer += (f"Acceptable collateral is {listed} ({clause['ref_label']}). "
-               "Personal guarantees do not count as collateral.")
-    return {"outcome": "info", "answer": answer, "cited_refs": refs + [clause["ref"]]}
+    related = _referring(clause, clauses)
+    cited = related + [clause]
+    answer = " ".join([_quote(c, cited) for c in related]
+                      + [f"{intro.rstrip(':')} {listed} ({clause['ref_label']})."] + rest)
+    return {"outcome": "info", "answer": answer, "cited_refs": [c["ref"] for c in cited]}
+
+
+def _list_items(text: str) -> list[str]:
+    return [line.strip()[2:] for line in text.splitlines() if line.strip().startswith("- ")]
+
+
+def _referring(clause: dict[str, Any], clauses: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Retrieved clauses of the same document that refer to this clause by number."""
+    doc = clause["ref"].split("@")[0]
+    return [c for c in clauses if c is not clause and c["ref"].startswith(doc + "@")
+            and re.search(re.escape(clause["ref_label"]) + r"\b", c["text"])]
+
+
+def _quote(clause: dict[str, Any], cited: list[dict[str, Any]]) -> str:
+    """Quote a clause; a reference to a clause that is not cited is dropped, since it cannot be checked."""
+    labels = {c["ref_label"] for c in cited}
+    text = CLAUSE_MENTION.sub(lambda m: m.group(0) if m.group(1) in labels else "", clause["text"].strip())
+    return f"{text.rstrip('.')} ({clause['ref_label']})."
+
+
+def _sentences(text: str) -> list[str]:
+    return [s.strip() for s in re.split(r"(?<=\.)\s", text.strip()) if s.strip()]
 
 
 def _best_sentence(text: str, question: str) -> str:
@@ -206,16 +236,6 @@ def _best_sentence(text: str, question: str) -> str:
     sentences = re.split(r"(?<=\.)\s", text.strip())
     best = max(sentences, key=lambda s: len(asked & set(re.findall(r"[a-z]{3,}", s.lower()))))
     return best.rstrip(".")
-
-
-def _other_sentences(text: str) -> str:
-    """Conditions that follow the first sentence of a clause, quoted as written."""
-    parts = re.split(r"(?<=\.)\s", text.strip(), maxsplit=1)
-    return parts[1] if len(parts) > 1 else ""
-
-
-def _first_sentence(text: str) -> str:
-    return re.split(r"(?<=\.)\s", text.strip(), maxsplit=1)[0].rstrip(".")
 
 
 def _next_date(day: int, month: int, today: date) -> date:

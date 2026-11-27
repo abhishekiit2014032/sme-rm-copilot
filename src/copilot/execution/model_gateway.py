@@ -41,15 +41,19 @@ TIER_MODELS: dict[ModelTier, tuple[str, str | None]] = {
 DEFAULT_PARAMS: dict[str, Any] = {"temperature": 0.1, "top_p": 0.9, "max_tokens": 800}
 
 
-class ModelUnavailable(Exception):
+class ModelGatewayError(Exception):
+    """Base of every model gateway failure; the pipeline turns any of them into a safe decline."""
+
+
+class ModelUnavailable(ModelGatewayError):
     pass
 
 
-class TokenBudgetExceeded(Exception):
+class TokenBudgetExceeded(ModelGatewayError):
     pass
 
 
-class StructuredOutputError(Exception):
+class StructuredOutputError(ModelGatewayError):
     pass
 
 

@@ -4,9 +4,6 @@ answers cite only retrieved clauses, and the follow-up agent only drafts.
 """
 from __future__ import annotations
 
-import pytest
-from pydantic import ValidationError
-
 from copilot.contracts import Task
 from copilot.execution.agents import fill_placeholders
 from copilot.execution.agents.brief import BriefAgent
@@ -50,12 +47,10 @@ def test_policy_agent_cites_only_retrieved_clauses_and_declines_below_the_gate(c
     assert not [s for s in ctx.trace.spans if "policy.answer" in s.name]     # the model is never asked
 
 
-@pytest.mark.xfail(strict=True, raises=ValidationError,
-                   reason="BUG execution/agents/policy.py PolicyAgent.run: the agent never checks found.ok, so an "
-                          "unavailable policy index raises a pydantic ValidationError instead of a decline")
 def test_policy_agent_declines_when_the_policy_index_is_unavailable(copilot):
     copilot.llm.down_models.add("embedding-model")
-    assert run(copilot, PolicyAgent, "What is the fee for a letter of credit amendment?")[0].status == "declined"
+    result, _ = run(copilot, PolicyAgent, "What is the fee for a letter of credit amendment?")
+    assert (result.status, result.notices) == ("declined", ["Policy index unavailable"])
 
 
 def test_follow_up_agent_only_drafts_with_names_from_crm_and_identity(copilot):

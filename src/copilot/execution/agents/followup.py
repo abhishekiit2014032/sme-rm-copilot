@@ -45,17 +45,17 @@ class FollowUpAgent(Agent):
                 span.status = "declined"
                 return AgentResult(agent=self.name, status="declined",
                                    text="The CRM is unavailable, so the follow-up cannot be drafted yet.")
-            self.call_tool("memory", "get_session", ctx)
             notes = _strip_command(task.instruction)
             extraction = self._models.generate(ModelTier.MINI, "followup.extract",
                                                {"notes": notes, "today": self._today}, FollowUpExtraction, ctx)
             names = {"contact_first_name": profile.data["key_contact"].split()[0], "rm_name": ctx.identity.name}
             drafts = self._create_drafts(customer_id, profile.data["contact_email"], extraction, names, ctx)
             span.detail = f"{len(drafts)} drafts created, waiting for RM approval"
+            text = (f"I drafted a CRM note, {len(extraction.tasks)} tasks and an email for {profile.data['name']}. "
+                    "Nothing is saved to the CRM until you approve.")
             return AgentResult(
-                agent=self.name, status="needs_approval", drafts=drafts, evidence=[notes],
-                text=(f"I drafted a CRM note, {len(extraction.tasks)} tasks and an email for "
-                      f"{profile.data['name']}. Nothing is saved to the CRM until you approve."),
+                agent=self.name, status="needs_approval", drafts=drafts, text=text,
+                evidence=[notes, text],      # the summary line is written by code from the drafts, not by a model
                 sources=[SourceRef(system=profile.source_system, detail="customer profile", as_of=profile.as_of)],
             )
 

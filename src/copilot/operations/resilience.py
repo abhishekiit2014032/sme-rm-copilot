@@ -82,12 +82,18 @@ def call_with_resilience(fn: Callable[[], T], *, breaker: CircuitBreaker, trace:
         try:
             result = fn()
         except TransientError as exc:
+            state_before = breaker.state
             breaker.record_failure()
             last_attempt = attempt == policy.attempts - 1
             trace.event(Component.RELIABILITY, f"{'gave up' if last_attempt else 'retry'}: {breaker.name}",
                         status="error" if last_attempt else "retry",
-                        detail=f"attempt {attempt + 1}/{policy.attempts}: {exc}",
+                        detail=f"attempt {attempt + 1}/{policy.attempts}, breaker {breaker.state} "
+                               f"({breaker.failures}/{breaker.failure_threshold} failures): {exc}",
                         breaker=breaker.state)
+            if breaker.state == "open" and state_before != "open":
+                trace.event(Component.RELIABILITY, f"circuit opened: {breaker.name}", status="open",
+                            detail=f"{breaker.failures} failures in a row; calls fail fast for "
+                                   f"{breaker.reset_after_s:g} s", breaker="open")
             if last_attempt:
                 raise
             sleep(backoff_delay(attempt, policy, rng))

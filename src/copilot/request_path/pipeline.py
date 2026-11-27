@@ -11,7 +11,8 @@ from copilot.contracts.identity import Identity
 from copilot.contracts.request import Answer, AnswerStatus, AskRequest, Request
 from copilot.contracts.results import AgentResult
 from copilot.contracts.trace import Component, Trace
-from copilot.execution.approvals import ApprovalError
+from copilot.execution.approvals import ApprovalError, CommitReport
+from copilot.execution.model_gateway import ModelGatewayError, ModelUnavailable, TokenBudgetExceeded
 from copilot.execution.tool_gateway import ToolDenied
 from copilot.operations.flags import Flags
 from copilot.operations.tracing import Tracer
@@ -28,6 +29,10 @@ STATUS_FOR = {"ok": AnswerStatus.ANSWERED, "degraded": AnswerStatus.DEGRADED,
               "declined": AnswerStatus.DECLINED, "needs_approval": AnswerStatus.AWAITING_APPROVAL}
 SAFE_DECLINE = "I could not verify an answer against the sources, so I will not guess. Please check with the " \
                "credit desk."
+MODEL_DECLINE = "The language model could not answer safely right now, so I will not guess. Please try again in " \
+                "a few minutes."
+DENIED_TEXT = {"entitlement": "You are not entitled to this customer's data, so nothing was retrieved.",
+               "customer": "This needs a customer and none was given, so nothing was retrieved."}
 
 
 class RequestPipeline:
@@ -46,24 +51,41 @@ class RequestPipeline:
         try:
             identity = self.gateway.admit(bearer_token, trace)
             trace.user_id = identity.user_id
-            if not self.flags.check("copilot_enabled", trace):
-                return self._answer(trace, AnswerStatus.DECLINED, "The copilot is switched off right now.")
-            screened = self.input_guardrails.screen(body.text, trace)
-            request = Request(request_id=request_id, user_id=identity.user_id, masked_text=screened.masked_text,
-                              action=body.action, customer_id=body.customer_id)
-            ctx = RunContext(request_id=request_id, identity=identity, trace=trace,
-                             customer_id=body.customer_id, pii_vault=screened.pii_vault)
-            answer = self._answer_request(request, ctx)
+            answer = self._admitted(request_id, identity, body, trace)
         except GatewayDenied as denied:
             answer = self._answer(trace, AnswerStatus.DENIED, denied.reason)
         except InputBlocked as blocked:
             answer = self._answer(trace, AnswerStatus.BLOCKED, str(blocked), notices=[blocked.category])
         except ToolDenied as denied:
             answer = self._answer(trace, AnswerStatus.DENIED,
-                                  "You are not entitled to this customer's data, so nothing was retrieved."
-                                  if denied.check == "entitlement" else f"Access denied ({denied.check}).",
+                                  DENIED_TEXT.get(denied.check, f"Access denied ({denied.check})."),
                                   notices=[f"{denied.check}: {denied.reason}"])
+        except ModelGatewayError as error:
+            answer = self._model_decline(error, trace)
         return self._finish(answer, identity, body, trace)
+
+    def _admitted(self, request_id: str, identity: Identity, body: AskRequest, trace: Trace) -> Answer:
+        if not self.flags.check("copilot_enabled", trace):
+            return self._answer(trace, AnswerStatus.DECLINED, "The copilot is switched off right now.")
+        if body.action and not body.customer_id:
+            trace.event(Component.ROUTER_ORCHESTRATOR, "no customer", status="declined",
+                        detail=f"{body.action} needs a customer_id")
+            return self._answer(trace, AnswerStatus.DECLINED, "Open a customer first: this action works on one "
+                                "customer.", notices=["customer_id missing"])
+        screened = self.input_guardrails.screen(body.text, trace)
+        request = Request(request_id=request_id, user_id=identity.user_id, masked_text=screened.masked_text,
+                          action=body.action, customer_id=body.customer_id)
+        ctx = RunContext(request_id=request_id, identity=identity, trace=trace,
+                         customer_id=body.customer_id, pii_vault=screened.pii_vault)
+        return self._answer_request(request, ctx)
+
+    def _model_decline(self, error: ModelGatewayError, trace: Trace) -> Answer:
+        """No model, no budget or an unusable reply: decline safely; the request is still audited and traced."""
+        reason = ("no model available (primary and fallback failed)" if isinstance(error, ModelUnavailable)
+                  else "request token budget used up" if isinstance(error, TokenBudgetExceeded)
+                  else "model reply did not match the expected format")
+        trace.event(Component.MODEL_GATEWAY, "safe decline", status="declined", detail=reason)
+        return self._answer(trace, AnswerStatus.DECLINED, MODEL_DECLINE, notices=[f"Model gateway: {reason}"])
 
     def _answer_request(self, request: Request, ctx: RunContext) -> Answer:
         cached = self._from_cache(request, ctx)
@@ -83,9 +105,10 @@ class RequestPipeline:
 
     def _release(self, outcome: OrchestratorResult, request: Request, ctx: RunContext,
                  retry: Callable[[], OrchestratorResult] | None = None) -> Answer:
-        """Output guardrails; on failure one stricter retry (temperature 0), then a safe decline."""
+        """Output guardrails; on failure one stricter retry (temperature 0), then a safe decline.
+        A result with drafts is never retried: re-running the follow-up agent would create the drafts twice."""
         verdict = self.output_guardrails.check(outcome.result, request.masked_text, ctx)
-        if not verdict.passed and retry is not None:
+        if not verdict.passed and retry is not None and not outcome.result.drafts:
             ctx.trace.event(Component.OUTPUT_GUARDRAILS, "retry once, stricter", status="retry",
                             detail="; ".join(verdict.failures))
             ctx.strict = True
@@ -98,7 +121,8 @@ class RequestPipeline:
         return Answer(
             request_id=ctx.request_id, status=STATUS_FOR[result.status], path=outcome.path,
             text=unmask_pii(result.text, ctx.pii_vault), citations=result.citations, sources=result.sources,
-            drafts=[d.model_copy(update={"body": unmask_pii(d.body, ctx.pii_vault)}) for d in result.drafts],
+            drafts=[d.model_copy(update={"title": unmask_pii(d.title, ctx.pii_vault),
+                                         "body": unmask_pii(d.body, ctx.pii_vault)}) for d in result.drafts],
             approval_token=outcome.approval_token, notices=result.notices, trace=ctx.trace,
         )
 
@@ -116,12 +140,9 @@ class RequestPipeline:
             else:
                 ctx = RunContext(request_id=request_id, identity=identity, trace=trace)
                 report = self.orchestrator.resume(approval_token, ctx)
-                lines = [f"- {c['kind']}: {c['title']} ({c['crm_id']})" for c in report.committed]
-                text = "Saved to the CRM:\n" + "\n".join(lines)
-                if report.duplicates_ignored:
-                    text += f"\n\nA lost CRM reply was retried; {report.duplicates_ignored} duplicate " \
-                            "write(s) were ignored thanks to the idempotency key."
-                answer = self._answer(trace, AnswerStatus.COMMITTED, text)
+                answer = self._answer(trace, AnswerStatus.PENDING if report.pending else AnswerStatus.COMMITTED,
+                                      _commit_text(report),
+                                      notices=["CRM unavailable: writes kept in the outbox"] if report.pending else [])
         except GatewayDenied as denied:
             answer = self._answer(trace, AnswerStatus.DENIED, denied.reason)
         except (ApprovalError, LookupError) as error:
@@ -146,3 +167,16 @@ class RequestPipeline:
             self.gateway.record_tokens(identity.user_id, int(trace.total("tokens_in") + trace.total("tokens_out")))
         self.tracer.finish(trace)
         return answer
+
+
+def _commit_text(report: CommitReport) -> str:
+    lines = [f"- {c['kind']}: {c['title']} ({c['crm_id']})" for c in report.committed]
+    text = "Saved to the CRM:\n" + "\n".join(lines) if lines else ""
+    if report.duplicates_ignored:
+        text += f"\n\nA lost CRM reply was retried; {report.duplicates_ignored} duplicate write(s) were ignored " \
+                "thanks to the idempotency key."
+    if report.pending:
+        text += f"\n\nThe CRM did not respond, so {report.pending} approved write(s) wait in the outbox; nothing is " \
+                "lost. Approve again once the CRM is back (the same token works until it expires); the " \
+                "idempotency key stops any duplicate."
+    return text.strip()

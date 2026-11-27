@@ -1,5 +1,5 @@
 """Diagram box: Session + memory store (lane C), session memory.
-Keeps each RM's recent turns for 24 hours so follow-up questions in one preparation session have context.
+Keeps each RM's recent masked turns for 24 hours. The prototype only records them; no agent reads them yet.
 Mocked: an in-memory dict with an injectable clock; production uses the document store with a 24 h TTL.
 """
 from __future__ import annotations

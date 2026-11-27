@@ -52,16 +52,17 @@ class BriefAgent(Agent):
                      for key, tool in READS.items()}
             episodes = self.call_tool("memory", "recall_episodes", ctx, customer_id=customer_id)
             data = {key: r.data for key, r in reads.items() if r.ok}
+            recalled = episodes.data if episodes.ok else []
             facts = build_facts(profile.data, data)
             products = self.call_tool("product-rules", "get_product_suggestions", ctx,
-                                      signals=build_signals(data)).data
+                                      signals=build_signals(data)).data or []
             for i, product in enumerate(products[:2], start=1):
                 facts[f"product_{i}"], facts[f"product_{i}_reason"] = product["product"], product["reason"]
             unavailable = [key for key, r in reads.items() if not r.ok]
 
             draft = self._models.generate(ModelTier.PRIMARY, "brief.summarise",
                                           {"fact_keys": sorted(facts), "unavailable": unavailable}, BriefDraft, ctx)
-            text = render_brief(profile.data, data, facts, draft, episodes.data, products, unavailable)
+            text = render_brief(profile.data, data, facts, draft, recalled, products, unavailable)
             span.status = "degraded" if unavailable else "ok"
             span.detail = f"{len(facts)} facts filled from tools" + (
                 f"; unavailable: {', '.join(unavailable)}" if unavailable else "")

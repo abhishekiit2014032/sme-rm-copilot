@@ -70,7 +70,9 @@ class Orchestrator:
                 continue
             ctx.trace.event(Component.ROUTER_ORCHESTRATOR, f"step {step.step_id}: {step.task.agent} agent",
                             detail=step.task.instruction)
-            results[step.step_id] = self._run_agent(step.task, ctx)
+            # The customer comes from the request, never from the planner's output.
+            task = step.task.model_copy(update={"customer_id": ctx.customer_id})
+            results[step.step_id] = self._run_agent(task, ctx)
         return _compose(list(results.values()), notices)
 
     def _run_agent(self, task: Task, ctx: RunContext) -> AgentResult:
@@ -85,7 +87,8 @@ class Orchestrator:
                                      ctx.trace)
 
     def resume(self, approval_token: str, ctx: RunContext) -> CommitReport:
-        """Verify the token, load the checkpoint, commit through the outbox, remember the approved note."""
+        """Verify the token, load the checkpoint, commit through the outbox, then use the token up and remember the
+        approved note. If the CRM is down the writes stay in the outbox and the token stays valid for a retry."""
         claims = self._approvals.verify(approval_token, ctx.identity, ctx.trace)
         checkpoint = self._checkpointer.load(claims.thread_id, ctx.identity.user_id, ctx.trace)
         if checkpoint is None:
@@ -93,6 +96,9 @@ class Orchestrator:
         drafts = _approved_drafts(checkpoint, claims.draft_ids)
         self._outbox.enqueue(drafts, claims.thread_id, ctx.trace)
         report = self._outbox.dispatch(ctx.trace)
+        if report.pending:
+            return report
+        self._approvals.consume(claims, ctx.trace)
         self._remember(checkpoint, drafts, ctx)
         self._checkpointer.complete(claims.thread_id)
         return report
@@ -113,11 +119,13 @@ def _condition_met(step: PlanStep, results: dict[int, AgentResult]) -> bool:
 
 
 def _compose(results: list[AgentResult], notices: list[str]) -> AgentResult:
-    """Merge step results in order. The answer is declined only if every step declined."""
+    """Merge step results in order. Drafts carry through, so a plan with a follow-up step still pauses for
+    approval. The answer is declined only if every step declined."""
     if not results:
         return AgentResult(agent="orchestrator", status="declined", text="No step could be run.", notices=notices)
     statuses = {r.status for r in results}
-    status = "declined" if statuses == {"declined"} else "degraded" if "degraded" in statuses else "ok"
+    status = ("needs_approval" if "needs_approval" in statuses else "declined" if statuses == {"declined"}
+              else "degraded" if "degraded" in statuses else "ok")
     citations = {c.label: c for r in results for c in r.citations}
     return AgentResult(
         agent=results[0].agent if len({r.agent for r in results}) == 1 else "orchestrator",
@@ -127,6 +135,7 @@ def _compose(results: list[AgentResult], notices: list[str]) -> AgentResult:
         citations=list(citations.values()),
         sources=list({(s.system, s.detail): s for r in results for s in r.sources}.values()),
         evidence=[e for r in results for e in r.evidence],
+        drafts=[d for r in results for d in r.drafts],
         notices=notices + [n for r in results for n in r.notices],
     )
 

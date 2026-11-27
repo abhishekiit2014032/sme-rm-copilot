@@ -106,7 +106,7 @@ def build_copilot(flags: Flags | None = None, llm: LlmClient | None = None) -> C
         CustomerDataServer(crm, core_banking, lending, trade, cases),
         PolicySearchServer(retriever),
         crm_drafts,
-        MemoryServer(episodic, session),
+        MemoryServer(episodic),
         ProductRulesServer(load_json("product_rules.json")["rules"]),
     ]
     tools = ToolGateway(servers, idp, entitlements, audit)

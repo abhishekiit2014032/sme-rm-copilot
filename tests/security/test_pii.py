@@ -4,8 +4,6 @@ log or traces, and is restored only for the RM and for the approved CRM write.
 """
 from __future__ import annotations
 
-import pytest
-
 from helpers import ask, draft_follow_up
 
 EMAIL = "cfo.private@gulfstar.example"
@@ -33,9 +31,7 @@ def test_follow_up_pii_is_masked_for_the_model_and_restored_for_the_rm_and_the_c
     assert "<EMAIL_1>" not in str(written)
 
 
-@pytest.mark.xfail(strict=True, reason="BUG request_path/pipeline.py RequestPipeline._release unmasks draft "
-                                       "bodies but not draft titles, so the RM sees placeholders such as "
-                                       "<EMAIL_1> in task titles")
 def test_draft_titles_shown_to_the_rm_have_pii_restored(copilot):
     answer = draft_follow_up(copilot, notes=NOTES)
     assert not [d.title for d in answer.drafts if "<EMAIL_" in d.title]
+    assert [d.title for d in answer.drafts if EMAIL in d.title]

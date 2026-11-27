@@ -1,6 +1,7 @@
 """Diagram box: Tool gateway (MCP) (lane B).
-Proves every tool call is checked for OIDC user identity, RBAC (role + customer entitlement), agent allow-list
-and workload identity, that each denial is audited, and that a failing source becomes "unavailable".
+Proves every tool call is checked for OIDC user identity, RBAC (role + customer entitlement, failing closed without
+a customer), agent allow-list and workload identity, that each denial is audited, and that a failing source becomes
+"unavailable".
 """
 from __future__ import annotations
 
@@ -34,6 +35,15 @@ def test_rm2_is_denied_rm1_customer_and_the_denial_is_audited(copilot):
     assert denied_check(copilot, call(), ctx) == "entitlement"
     assert (copilot.audit.records[-1].target, copilot.audit.records[-1].outcome) == (GULF_STAR, "denied (entitlement)")
     assert ctx.trace.spans[0].status == "denied"
+
+
+def test_entitlement_fails_closed_when_a_customer_scoped_tool_has_no_customer(copilot):
+    ctx = run_context(copilot, "rm-1")
+    for missing in ("", None):
+        assert denied_check(copilot, call(customer_id=missing), ctx) == "customer"
+    no_arg = ToolCall(server="memory", tool="recall_episodes", args={}, agent_id="agent-brief",
+                      workload_id="wl-orchestrator")
+    assert denied_check(copilot, no_arg, ctx) == "customer"
 
 
 def test_agent_cannot_call_another_agents_tool(copilot):

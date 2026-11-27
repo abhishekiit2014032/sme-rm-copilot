@@ -60,9 +60,6 @@ def test_tokens_spent_by_the_pipeline_count_toward_the_daily_limit(copilot):
     assert (second.status, second.text) == (AnswerStatus.DENIED, "Daily usage limit reached.")
 
 
-@pytest.mark.xfail(strict=True, reason="BUG request_path/gateway.py ApiGateway._tokens_today: the daily token "
-                                       "counter is never reset, so an RM who hits the limit stays locked out on "
-                                       "later days")
 def test_daily_token_limit_resets_the_next_day(idp):
     clock = Clock()
     gateway = ApiGateway(idp, daily_token_limit=1_000, clock=clock)

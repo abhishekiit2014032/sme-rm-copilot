@@ -30,6 +30,12 @@ class PolicyAgent(Agent):
     def run(self, task: Task, ctx: RunContext) -> AgentResult:
         with ctx.trace.span(Component.POLICY_AGENT, task.instruction) as span:
             found = self.call_tool("policy-search", "search_policy", ctx, query=task.instruction)
+            if not found.ok:
+                span.status, span.detail = "declined", found.error or "policy search unavailable"
+                return AgentResult(agent=self.name, status="declined", outcome="unknown",
+                                   notices=["Policy index unavailable"],
+                                   text="The policy index is unavailable right now, so I cannot answer from policy. "
+                                        "Please try again shortly or check with the credit desk.")
             retrieval = RetrievalResult.model_validate(found.data)
             if not retrieval.passed_gate:
                 span.status, span.detail = "declined", "retrieval gate: no clause strong enough"

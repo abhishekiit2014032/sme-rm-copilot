@@ -7,7 +7,7 @@ from __future__ import annotations
 import pytest
 
 from copilot.contracts import AnswerStatus
-from copilot.execution.model_gateway import ModelUnavailable
+from copilot.execution.model_gateway import StructuredOutputError, TokenBudgetExceeded
 from copilot.operations.flags import Flags
 from copilot.wiring import build_copilot
 from helpers import FEE_QUESTION, GULF_STAR, POLICY_QUESTION, ask
@@ -46,19 +46,24 @@ def test_kill_switches_turn_features_off_without_a_deploy():
     assert no_planner.status in (AnswerStatus.ANSWERED, AnswerStatus.DECLINED)
 
 
-@pytest.mark.xfail(strict=True, raises=ModelUnavailable,
-                   reason="BUG request_path/pipeline.py RequestPipeline.ask: ModelUnavailable (and "
-                          "TokenBudgetExceeded, StructuredOutputError) are not caught, so a full model outage is an "
-                          "HTTP 500, not a safe decline")
-def test_all_models_down_gives_a_safe_decline(copilot):
+def test_all_models_down_gives_a_safe_decline_that_is_audited_and_traced(copilot):
     copilot.llm.down_models |= {"primary-llm", "fallback-llm", "mini-llm"}
+    answer = ask(copilot, "rm-1", FEE_QUESTION)
+    assert answer.status == AnswerStatus.DECLINED and "will not guess" in answer.text
+    assert answer.notices == ["Model gateway: no model available (primary and fallback failed)"]
+    assert ("Model gateway", "safe decline", "declined") in [(s.component.value, s.name, s.status)
+                                                             for s in answer.trace.spans]
+    assert copilot.audit.records[-1].outcome == "declined" and copilot.tracer.get(answer.trace.trace_id)
+
+
+@pytest.mark.parametrize("error", [TokenBudgetExceeded("used up"), StructuredOutputError("bad JSON")])
+def test_any_model_gateway_error_is_a_safe_decline(copilot, monkeypatch, error):
+    def fail(*args, **kwargs):
+        raise error
+    monkeypatch.setattr(copilot.models, "generate", fail)
     assert ask(copilot, "rm-1", FEE_QUESTION).status == AnswerStatus.DECLINED
 
 
-@pytest.mark.xfail(strict=True, raises=KeyError,
-                   reason="BUG execution/tool_gateway.py ToolGateway._check_rbac skips the entitlement check "
-                          "when customer_id is empty, and nothing validates it, so Prepare brief without a "
-                          "customer crashes")
 def test_prepare_brief_without_a_customer_is_refused_not_crashed(copilot):
     answer = ask(copilot, "rm-1", action="prepare_brief")
-    assert answer.status in (AnswerStatus.DENIED, AnswerStatus.DECLINED)
+    assert answer.status == AnswerStatus.DECLINED and answer.notices == ["customer_id missing"]

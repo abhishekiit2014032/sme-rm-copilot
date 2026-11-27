@@ -14,9 +14,10 @@ from pydantic import BaseModel, Field
 
 from copilot.contracts.trace import Component, Trace
 
-STOPWORDS = set("""a an and are as at be by can could do does for from has have how i if in is it its me my
+# Common English function words only (no domain words): "go" is a light verb here, as in "can we go to AED 3.5m".
+STOPWORDS = set("""a an and are as at be by can could do does for from go has have how i if in is it its me my
 need needs not of on or our per should so than that the their them then there this to up us we what when
-which who will with would you your about any all also into one only out over under policy bank go yes no""".split())
+which who will with would you your about any all also into one only out over under""".split())
 
 GATE_THRESHOLD = 0.45   # best reranked clause must reach this score, or the agent declines
 TOP_K = 3

@@ -1,15 +1,15 @@
 """Use case: Follow-up actions with human in the loop, end to end.
 Proves the copilot drafts and pauses at a checkpoint, the RM approves with a signed single-use token,
 code (not an agent) commits through the idempotent outbox, and a replayed or foreign token is rejected.
+A CRM outage keeps the writes in the outbox for a later approval; a planner ask with a follow-up step also pauses.
 """
 from __future__ import annotations
 
-import pytest
-
 from copilot.contracts import AnswerStatus
 from copilot.operations.flags import Flags
-from copilot.operations.resilience import TransientError
-from helpers import draft_follow_up
+from helpers import FOLLOW_UP_NOTES, GULF_STAR, ask, draft_follow_up
+
+PLANNER_ASK = f"What collateral is acceptable? {FOLLOW_UP_NOTES}"
 
 
 def approve(copilot, token: str, user: str = "rm-1"):
@@ -56,26 +56,33 @@ def test_crm_write_kill_switch_keeps_drafts_and_token_for_later(copilot):
     assert approve(copilot, token).status == AnswerStatus.COMMITTED
 
 
-@pytest.mark.xfail(strict=True, raises=TransientError,
-                   reason="BUG request_path/pipeline.py RequestPipeline.approve and execution/approvals.py "
-                          "CommitOutbox.dispatch: a CRM outage during approve escapes as an unhandled exception "
-                          "(HTTP 500) instead of an Answer")
-def test_crm_outage_during_approval_returns_an_answer(copilot):
+def test_crm_outage_during_approval_keeps_the_writes_in_the_outbox(copilot):
     token = draft_follow_up(copilot).approval_token
     copilot.crm.down = True
-    assert approve(copilot, token).status != AnswerStatus.COMMITTED
+    answer = approve(copilot, token)
+    assert answer.status == AnswerStatus.PENDING and "4 approved write(s) wait in the outbox" in answer.text
+    assert answer.notices == ["CRM unavailable: writes kept in the outbox"] and copilot.crm.committed == {}
+    assert copilot.audit.records[-1].outcome == "pending"
 
 
-@pytest.mark.xfail(strict=True,
-                   reason="BUG execution/approvals.py ApprovalService.verify burns the nonce before the outbox "
-                          "commits; after a CRM outage the RM's approval is rejected as a replay and the drafts "
-                          "can never be saved")
-def test_rm_can_approve_again_after_a_crm_outage(copilot):
+def test_rm_can_approve_again_after_a_crm_outage_and_only_then_is_the_token_used_up(copilot):
     token = draft_follow_up(copilot).approval_token
     copilot.crm.down = True
-    try:
-        approve(copilot, token)
-    except TransientError:
-        pass                                   # the outage itself is the bug above
+    assert approve(copilot, token).status == AnswerStatus.PENDING
     copilot.crm.down = False
-    assert approve(copilot, token).status == AnswerStatus.COMMITTED
+    assert approve(copilot, token).status == AnswerStatus.COMMITTED and len(copilot.crm.committed) == 4
+    assert approve(copilot, token).status == AnswerStatus.REJECTED
+
+
+def test_a_planner_ask_with_a_follow_up_step_still_pauses_for_approval(copilot):
+    answer = ask(copilot, "rm-1", PLANNER_ASK, customer_id=GULF_STAR)
+    assert (answer.path, answer.status) == ("planner", AnswerStatus.AWAITING_APPROVAL)
+    assert answer.citations and len(answer.drafts) == 4 and answer.approval_token
+    assert approve(copilot, answer.approval_token).status == AnswerStatus.COMMITTED
+
+
+def test_the_stricter_retry_never_reruns_an_agent_that_created_drafts(copilot):
+    copilot.llm.unsupported_number_once = True     # the policy step invents a figure, so output guardrails fail
+    answer = ask(copilot, "rm-1", PLANNER_ASK, customer_id=GULF_STAR)
+    assert answer.status == AnswerStatus.DECLINED and not answer.drafts
+    assert [c for c in copilot.llm.calls if c.endswith("followup.extract")] == ["mini-llm:followup.extract"]

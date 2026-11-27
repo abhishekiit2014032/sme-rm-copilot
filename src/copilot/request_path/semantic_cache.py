@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from copilot.contracts.results import AgentResult
 from copilot.contracts.trace import Component, Trace
 from copilot.execution.retrieval import cosine
+from copilot.operations.resilience import CircuitOpen, TransientError
 
 
 class CacheEntry(BaseModel):
@@ -29,7 +30,9 @@ class SemanticCache:
         self._entries: list[CacheEntry] = []
 
     def lookup(self, question: str, trace: Trace) -> AgentResult | None:
-        vector = self._embed(question, trace)
+        vector = self._vector(question, trace)
+        if vector is None:
+            return None
         now = self._clock()
         self._entries = [e for e in self._entries if now - e.stored_at < self._ttl_s]
         best = max(self._entries, key=lambda e: cosine(vector, e.embedding), default=None)
@@ -48,10 +51,21 @@ class SemanticCache:
         if any(c.clearance != "public" for c in result.citations):
             trace.event(Component.SEMANTIC_CACHE, "not stored", detail="cites non-public clauses")
             return False
-        self._entries.append(CacheEntry(question=question, embedding=self._embed(question, trace), result=result,
+        vector = self._vector(question, trace)
+        if vector is None:
+            return False
+        self._entries.append(CacheEntry(question=question, embedding=vector, result=result,
                                         doc_ids={c.doc_id for c in result.citations}, stored_at=self._clock()))
         trace.event(Component.SEMANTIC_CACHE, "stored", detail=f"{len(self._entries)} entries")
         return True
+
+    def _vector(self, question: str, trace: Trace) -> list[float] | None:
+        """The cache is optional: if the embedding model is down, skip it rather than fail the request."""
+        try:
+            return self._embed(question, trace)
+        except (TransientError, CircuitOpen):
+            trace.event(Component.SEMANTIC_CACHE, "skipped", status="unavailable", detail="embedding model down")
+            return None
 
     def invalidate_doc(self, doc_id: str) -> int:
         before = len(self._entries)
