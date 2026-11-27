@@ -16,7 +16,8 @@ body { background:var(--bg); font-family:Inter, Arial, sans-serif; color:var(--i
 .b.col svg.ic { display:block; margin-bottom:6px; }
 .b.row svg.ic { margin-top:2px; }
 .b .t { font:700 22px/1.15 Inter; margin-bottom:5px; }
-.b.hb .t { padding-right:44px; } .b.hb2 .t { padding-right:80px; }
+.b.row.hb .t { padding-right:44px; } .b.row.hb2 .t { padding-right:80px; }
+.b.col .t { font-size:21px; }
 .b .d { font:400 16.5px/1.4 Inter; color:var(--muted); }
 .b .bd { position:absolute; right:10px; top:10px; display:flex; gap:5px; }
 .b .bd span { width:32px; height:32px; border-radius:50%; background:var(--badge); color:#fff; font:800 14px/32px Inter; text-align:center; }
@@ -70,34 +71,37 @@ svg.wires { position:absolute; left:0; top:0; pointer-events:none; }
 <div class="lane" style="top:1110px;height:170px"></div><div class="lh" style="left:34px;top:1126px"><span>D</span>PRODUCTION OPERATIONS</div>
 <div id="boxes"></div>
 
-<div class="lbl c" style="left:1306px;top:112px">draft<br>answer</div>
-<div class="lbl c" style="left:1146px;top:300px">tasks in waves<br>results back</div>
+<div class="lbl c" style="left:1402px;top:126px">draft<br>answer</div>
+<div class="lbl c" style="left:1036px;top:156px">MISS</div>
+<div class="lbl c" style="left:1140px;top:50px">HIT · still validate</div>
+<div class="lbl v" style="left:712px;top:304px">invalidate cache</div>
+<div class="lbl c" style="left:1112px;top:310px;text-align:right">tasks in waves<br>results back</div>
 <div class="lbl c" style="left:1336px;top:582px">via gateways only</div>
 <div class="lbl a" style="left:1580px;top:410px">APPROVE / ESCALATE</div>
 <div class="lbl a" style="left:1780px;top:880px">sign + audit</div>
-<div class="lbl v" style="left:500px;top:928px">publish: re-embed</div>
+<div class="lbl v" style="left:500px;top:928px">CDC: refresh index</div>
 <div class="lbl v" style="left:1300px;top:1125px">5% sampled answers</div>
 <div class="pill" style="left:924px;top:752px">Writes need RM approval</div>
 <svg class="wires" width="2000" height="1500" viewBox="0 0 2000 1500" id="w"></svg>
 
 <div class="legend"><span><i style="border-color:var(--cyan)"></i>Request / response</span><span><i style="border-color:var(--amber)"></i>Human approval</span><span><i style="border-color:var(--violet);border-top-style:dashed"></i>State / ingestion</span><span><b class="n">07</b>building block number</span><span style="margin-left:auto">Fictional bank · cloud-agnostic view</span></div>
 <div class="caps">
-<div><b>A · Online request path</b>Gateway, input guardrails, router + orchestrator, output guardrails. Every request flows through it.</div>
+<div><b>A · Online request path</b>Gateway, guardrails, semantic cache and router + orchestrator: every request flows through it.</div>
 <div><b>B · Controlled execution</b>One agent per use case. Agents reach data only through the gateways; the RM approves every write.</div>
-<div><b>C · State + data freshness</b>Policy ingestion into the index, session and memory for pause and resume, keys and the audit log.</div>
+<div><b>C · State + data freshness</b>Change events (CDC) refresh the index and invalidate the cache; memory; keys and audit.</div>
 <div><b>D · Production operations</b>Observability, reliability and scale, safe release, and evaluation of live answers.</div>
 </div>
 </div>
 <script>
 // [x, y, w, h, layout, icon, badges, title, detail, extra class]
 const BOX = [
- [30,96,160,150,'col','user',[],'RM','CRM sidebar · chat app'],
- [266,96,270,150,'col','shield',['01','02'],'API gateway + identity','SSO · rate + token limits'],
- [612,96,270,150,'col','filter',['03'],'Input guardrails','Injection checks · PII masking · scope check'],
- [958,96,340,150,'col','router',['07'],'Router + orchestrator','Intent · context · workflow<br>Step limits · time budgets','key'],
- [1374,96,300,150,'col','guard',['03'],'Output guardrails','Grounding · numbers · policy · PII · validate before release'],
- [1750,96,220,150,'col','chat',[],'Answer to RM','Citations · safe decline'],
- [592,264,340,98,'row','cache',['04'],'Semantic cache <span class="off">OFF</span>','Public policy only · Phase 2','off'],
+ [30,96,140,172,'col','user',[],'RM','CRM sidebar · chat app'],
+ [212,96,240,172,'col','shield',['01','02'],'API gateway + identity','SSO · rate + token limits'],
+ [494,96,240,172,'col','filter',['03'],'Input guardrails','Injection checks · PII masking · scope'],
+ [776,96,250,172,'col','cache',['04'],'Semantic cache','Public policy Q&amp;A only · TTL · version · off in pilot','off'],
+ [1096,96,300,172,'col','router',['07'],'Router + orchestrator','Intent · context · workflow<br>Step limits · time budgets','key'],
+ [1466,96,270,172,'col','guard',['03'],'Output guardrails','Grounding · numbers · policy · validate before release'],
+ [1778,96,192,172,'col','chat',[],'Answer to RM','Citations · safe decline'],
  [300,452,380,110,'row','agent',[],'Brief agent','Customer brief · customer data tools · large model'],
  [720,452,380,110,'row','agent',[],'Policy agent','Policy + product Q&amp;A · policy search only · cited'],
  [1140,452,360,110,'row','agent',[],'Follow-up agent','Follow-up actions · drafts only · RM approves'],
@@ -108,7 +112,7 @@ const BOX = [
  [300,800,380,94,'row','db',[],'Vector + keyword index','Policy and product clauses'],
  [720,800,380,94,'row','bank',[],'Systems of record','CRM · core · lending · trade · cases'],
  [1140,800,360,94,'row','spark',[],'Primary / fallback LLM','In-region'],
- [300,986,380,94,'row','doc',['05'],'Knowledge ingestion','Parse → PII scan → chunk → embed'],
+ [300,986,380,100,'row','doc',['05'],'Knowledge ingestion','Policy library events → parse → PII scan → chunk → embed'],
  [720,986,780,94,'row','db',['13'],'Session + memory store','Checkpointer (pause, resume) · session · approved history · versioned prompts'],
  [1560,986,410,94,'row','lock',[],'Secure storage','Keys · write-once audit log'],
  [30,1170,462,96,'row','chart',['10'],'Observability','Traces · p95 latency · tokens · cost · alerts'],
@@ -121,18 +125,19 @@ document.getElementById('boxes').innerHTML = BOX.map(([x,y,w,h,l,ic,bd,t,d,cls])
   `<svg class="ic"><use href="#i-${ic}"/></svg>` + (bd.length ? `<div class="bd">${bd.map(n=>`<span>${n}</span>`).join('')}</div>` : '') +
   `<div><div class="t">${t}</div><div class="d">${d}</div></div></div>`).join('');
 const W = [
- [[[190,171],[266,171]],'c'], [[[536,171],[612,171]],'c'], [[[882,171],[958,171]],'c'],
- [[[1298,171],[1374,171]],'c'], [[[1674,171],[1750,171]],'c'],
- [[[1000,246],[1000,313],[932,313]],'c',1,1],
- [[[1130,246],[1130,432]],'c',0,-1], [[[490,432],[1320,432]],'c',0,-1],
+ [[[170,182],[212,182]],'c'], [[[452,182],[494,182]],'c'], [[[734,182],[776,182]],'c'], [[[1026,182],[1096,182]],'c'],
+ [[[1396,182],[1466,182]],'c'], [[[1736,182],[1778,182]],'c'],
+ [[[901,96],[901,74],[1600,74],[1600,96]],'c'],
+ [[[1246,268],[1246,432]],'c',0,-1], [[[490,432],[1320,432]],'c',0,-1],
  [[[490,432],[490,452]],'c'], [[[910,432],[910,452]],'c'], [[[1320,432],[1320,452]],'c'],
  [[[490,591],[1320,591]],'c',0,-1],
  [[[490,562],[490,620]],'c',0,1], [[[910,562],[910,620]],'c',0,1], [[[1320,562],[1320,620]],'c',0,1],
  [[[490,730],[490,800]],'c',0,1], [[[910,730],[910,800]],'c',0,1], [[[1320,730],[1320,800]],'c',0,1],
- [[[1280,246],[1280,400],[1765,400],[1765,620]],'a'],
+ [[[1380,268],[1380,400],[1765,400],[1765,620]],'a'],
  [[[1765,730],[1765,986]],'a'],
  [[[490,986],[490,894]],'v',1],
- [[[1530,246],[1530,1170]],'v',1],
+ [[[680,1036],[700,1036],[700,296],[901,296],[901,268]],'v',1],
+ [[[1530,268],[1530,1170]],'v',1],
 ];
 const col = {c:'#22D3EE', a:'#F5B82E', v:'#B98DFF'};
 let s = '<defs>' + Object.entries(col).map(([k,v]) => `<marker id="m${k}" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" fill="${v}"/></marker>`).join('') + '</defs>';
