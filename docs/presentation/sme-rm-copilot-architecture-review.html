@@ -127,7 +127,7 @@ td b { font-weight:600; color:var(--ink); }
       <ul><li><div class="row"><span class="n"></span><span class="t">Business problems</span><span class="dots"></span><span class="pg">2</span></div></li><li><div class="row"><span class="n"></span><span class="t">AI use cases</span><span class="dots"></span><span class="pg">2</span></div></li><li><div class="row"><span class="n"></span><span class="t">Expected business benefits</span><span class="dots"></span><span class="pg">2</span></div></li></ul></li>
     <li><div class="row"><span class="n">2</span><span class="t">Solution architecture</span><span class="dots"></span><span class="pg">3</span></div>
       <ul><li><div class="row"><span class="n">2.1</span><span class="t">High-level architecture</span><span class="dots"></span><span class="pg">3</span></div></li><li><div class="row"><span class="n"></span><span class="t">Architecture components</span><span class="dots"></span><span class="pg">4</span></div></li>
-      <li><div class="row"><span class="n">2.2</span><span class="t">Data sources and integrations</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li><li><div class="row"><span class="n">2.3</span><span class="t">AI/LLM components</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li>
+      <li><div class="row"><span class="n">2.2</span><span class="t">Data sources and integrations</span><span class="dots"></span><span class="pg">5</span></div></li><li><div class="row"><span class="n">2.3</span><span class="t">AI/LLM components</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li>
       <li><div class="row"><span class="n">2.4</span><span class="t">RAG, agents and other AI patterns</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li><li><div class="row"><span class="n">2.5</span><span class="t">Security and access control</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li></ul></li>
     <li><div class="row"><span class="n">3</span><span class="t">Delivery approach</span><span class="dots"></span><span class="pg tbd">To be added</span></div>
       <ul><li><div class="row"><span class="n">3.1</span><span class="t">Key risks and mitigation plans</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li><li><div class="row"><span class="n">3.2</span><span class="t">Success metrics</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li></ul></li>
@@ -198,5 +198,32 @@ td b { font-weight:600; color:var(--ink); }
     <tr><td><b>Reliability + scale</b></td><td>Autoscaling, queues and circuit breakers</td></tr>
     <tr><td><b>Release + recovery</b></td><td>Canary rollout, kill switches and rollback</td></tr>
   </table>
+</section>
+
+<section class="compact comp section">
+  <p class="eyebrow">SME RM Copilot · Section 2.2</p>
+  <h2>2.2 Data sources and integrations</h2>
+  <p style="margin:0 0 3mm">Every source sits behind an MCP server. Every call passes the MCP tool gateway: OIDC + RBAC + agent identity + workload identity.</p>
+  <table>
+    <thead><tr><th style="width:22%">Source</th><th style="width:36%">Data</th><th>Integration</th></tr></thead>
+    <tr><td><b>CRM</b></td><td>Profile, conversations, open requests, tasks</td><td>MCP → REST API (read) / outbox (write after approval)</td></tr>
+    <tr><td><b>Core banking</b></td><td>Accounts, balances, turnover</td><td>MCP → REST API / ODS view (SQL) / text-to-SQL (later, governed)</td></tr>
+    <tr><td><b>Lending</b></td><td>Loans, limits, repayments, applications</td><td>MCP → REST API / ODS view (SQL)</td></tr>
+    <tr><td><b>Trade finance</b></td><td>LCs, guarantees, amendments</td><td>MCP → REST / SOAP facade / events</td></tr>
+    <tr><td><b>Case management</b></td><td>Complaints, service requests, status</td><td>MCP → REST API / webhook</td></tr>
+    <tr><td><b>Policy knowledge store</b></td><td>Credit policy, product terms, fees, checklists, approvals, KYC/AML</td><td>MCP → hybrid index (vector / keyword) ← CDC events</td></tr>
+    <tr><td><b>Product rules</b></td><td>Signal-to-product rules</td><td>MCP → REST API / config store</td></tr>
+    <tr><td><b>Memory store</b></td><td>Checkpoints, session, meeting summaries, prompts</td><td>MCP → memory store (per RM, encrypted)</td></tr>
+    <tr><td><b>Calendar</b> <span class="note">(Phase 2)</span></td><td>Upcoming meetings, draft invites</td><td>MCP → REST API / webhook</td></tr>
+  </table>
+  <p style="margin:3mm 0 0"><b>MCP servers:</b> customer-data (brief, follow-up) · policy-search (policy) · crm-drafts (follow-up) · memory and product-rules (brief)</p>
+  <h3>Principles</h3>
+  <ul style="margin:0">
+    <li>Customer data is read live, never copied; only policy is indexed.</li>
+    <li>Fixed queries first; text-to-SQL comes later and only on a governed, read-only layer.</li>
+    <li>Reads come from replicas, with quotas, timeouts and circuit breakers.</li>
+    <li>A missing source shows as "unavailable"; only the CRM profile is critical.</li>
+    <li>Every call is audited, with no payload content.</li>
+  </ul>
 </section>
 </body></html>
