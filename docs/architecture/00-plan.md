@@ -406,3 +406,4 @@ fixes. 4. Verification: tests, evals, stack smoke and load run, slide layout, pr
   (the orchestrator keeps no Cosmos or key access); agents hold read-only memory roles and only an approval-verified
   commit creates an episode; episodes are approved call reports only.
 - v2.7b (26 Nov): prototype finding. Context relevance no longer declines on its own (one strong clause with weak neighbours is a valid answer and was wrongly declined in 22 of 120 test questions); the hard decline is the best passage below threshold; weak passages are dropped before generation; context relevance is a monitored, alerted metric.
+- v2.8 (27 Nov): review feedback. The router and orchestrator (supervisor) follows input guardrails directly; the semantic cache moves beside it, consulted only after intent classification and only for public policy intents (Phase 2), never for customer data. Presentation documents carry no external source references.

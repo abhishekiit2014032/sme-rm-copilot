@@ -48,9 +48,9 @@ Each frame shows the architecture after one step; the part added in that step is
 
 ![Step 04 · Semantic cache (off by design)](diagrams/system-design/step-04.png)
 
-**Added:** The cache is drawn but switched off for customer data; Phase 2 may cache public policy answers only, keyed on clearance and index version.
+**Added:** A semantic cache beside the router, not on the main path: once the router knows the intent, it may consult the cache for public policy questions only (Phase 2). Customer data is never cached, and the cache is off in the pilot.
 
-**Why:** A cached answer reaching the wrong RM would be a leak; at 300 RMs the saving is small.
+**Why:** Only the router knows whether a request is a public policy question or about a customer, so the cache decision belongs after it. A cached answer reaching the wrong RM would be a leak, and at 300 RMs the saving is small.
 
 ### Step 05 · Knowledge freshness
 
@@ -128,13 +128,12 @@ Each frame shows the architecture after one step; the part added in that step is
 
 ## About this document
 
-This document walks the SME RM Copilot through the method of the Codebasics *AI System Design* guide and video:
-**Step 1** requirements and estimation, **Step 2** thirteen building blocks: the guide's eleven plus two we add for
-plan v2.6, agent identity with the MCP gateway, and memory management (each one a real situation, the component
-that solves it and the questions to answer before building it), **Step 3** the complete architecture in four lanes,
-then one request end to end, a pre-launch checklist and the scenario questions. For every block it records what
-we decided on Azure, the trade-off, and where we deliberately differ from the guide's e-commerce example, because a
-bank is not a shop. Everything is fictional ("the Bank"); figures are illustrative.
+This document presents the system design of the SME RM Copilot in three steps: **Step 1** requirements and
+estimation, **Step 2** thirteen building blocks (each one a real situation in the Bank, the component that solves it
+and the questions to answer before building it), **Step 3** the complete architecture in four lanes, then one
+request end to end, a pre-launch checklist and scenario questions. For every block it records what we decided on
+Azure, the trade-off, and where a bank needs a different choice from common chatbot practice. Everything is
+fictional ("the Bank"); figures are illustrative.
 
 ## Contents
 0. [The complete architecture](#the-complete-architecture) and [built step by step](#built-step-by-step)
@@ -144,7 +143,7 @@ bank is not a shop. Everything is fictional ("the Bank"); figures are illustrati
 4. [One request, end to end](#one-request-end-to-end)
 5. [Pre-launch checklist](#pre-launch-checklist)
 6. [Scenario questions, answered for this system](#scenario-questions-answered-for-this-system)
-7. [Where we differ from the guide, and why](#where-we-differ-from-the-guide-and-why)
+7. [Banking-specific design choices](#banking-specific-design-choices)
 
 ---
 
@@ -152,7 +151,7 @@ bank is not a shop. Everything is fictional ("the Bank"); figures are illustrati
 
 ### The starting point (v1)
 The prototype works on one laptop: RM → copilot backend → { policy RAG, bank APIs, one LLM } → answer
-(`code/demo.py`, then `code/stack.py`). It is missing everything production needs: who is asking, limits, guardrails,
+It is missing everything production needs: who is asking, limits, guardrails,
 routing, fallbacks, monitoring and evals. Step 2 adds them one at a time.
 
 ### Functional requirements (what it must do)
@@ -182,7 +181,7 @@ routing, fallbacks, monitoring and evals. Step 2 adds them one at a time.
 | Cost, everything on a small model | 741M × ~$1 per 1M | ≈ $0.7k/month |
 | Cost, our routed mix | ≈ 2/3 of tokens on `gen-large`, 1/3 on `gen-small`, rules where possible | ≈ $5k/month |
 
-Prices are the guide's illustrative round numbers, not Azure quotes; confirm in the Azure pricing calculator for the
+Prices are illustrative round numbers, not Azure quotes; confirm in the Azure pricing calculator for the
 chosen models in UAE North (plan §10). Derivations: `05-nfr-scenarios-and-dr.md` §2.
 
 **300 RMs is not 300 concurrent requests.** It is half a request per second at peak. The platform is sized for
@@ -194,9 +193,8 @@ peak row is what drives quota: request at least 2× peak tokens-per-minute per d
 
 ## Step 2: the thirteen building blocks
 
-Each block: the situation in the Bank, the component, what we decided, the trade-off, and the guide's key
-questions answered. ADR and code references show where it is decided and tested. Blocks 01 to 11 follow the guide;
-blocks 12 and 13 are ours, added when the plan moved to supervisor-led agents (plan v2.6 §3.7, §3.8).
+Each block: the situation in the Bank, the component, what we decided, the trade-off, and the key questions
+answered. ADR references show where each decision is recorded.
 
 ### 01 · Authentication and authorization (API gateway + identity)
 **Situation.** Layla and Omar both type "Prep me for Harbourline Logistics". Layla covers Harbourline; Omar does not.
@@ -213,8 +211,7 @@ once by CRM portfolio events). A shared service identity would be simpler but wo
 the logs.
 
 **Key questions.** *Who gets access to what?* RMs: their portfolio plus time-boxed delegations; team leads read-only.
-*Is identity enforced at the tool layer?* Yes, from the token, never from text the model produced (ADR-008;
-tests `test_entitlement_enforced_in_tool_layer`, red-team identity tests).
+*Is identity enforced at the tool layer?* Yes, from the token, never from text the model produced (ADR-008).
 
 ### 02 · Rate limiting (API gateway)
 **Situation.** A script loops "brief me on …" across 200 customers at 07:00, or someone uses the copilot to draft a
@@ -242,7 +239,7 @@ drops any line with an invented number (digits or number words, English and Arab
 approval, pricing or limits; claim-by-claim groundedness with citations for policy answers; plain-text rendering
 under a strict CSP.
 
-**Decision and trade-off.** The guide says "validate before streaming"; we go further and **never stream unverified
+**Decision and trade-off.** Common practice is to validate before streaming; we go further and **never stream unverified
 text** (ADR-022): the RM waits about 3 s longer for the first words, so the brief releases its facts-only sections
 first. Guardrails also block some legitimate banking language; the false-positive rate (≤ 2%) is a release gate.
 
@@ -254,8 +251,10 @@ mock (ADR-011, ADR-012).
 ### 04 · Semantic caching (cache layer)
 **Situation.** Hundreds of RMs ask "What documents do I need to open an SME account?" in slightly different words.
 
-**Decision.** **No caching of anything customer-specific, ever** (a cached brief served to the wrong RM is an
-entitlement leak, the guide's Q7 and Q12). In the pilot the semantic cache is **off** entirely. A Phase 2 option for
+**Decision.** The cache sits **beside the router, not in front of it**: only after the router has classified the intent
+can it know whether a request is a public policy question (possibly cacheable) or about a customer (never). **No
+caching of anything customer-specific, ever**: a cached brief served to the wrong RM is an entitlement leak, and
+loose thresholds return answers to questions nobody asked. In the pilot the semantic cache is **off** entirely. A Phase 2 option for
 UC2 only: cache public policy answers keyed on the RM's clearance, language and index version, write only after the
 output guardrails pass, invalidate on every policy publish. **Prompt caching** (provider-side reuse of the long,
 unchanging system prompt) is used where the chosen Azure OpenAI model supports it, since it holds no answers
@@ -283,8 +282,7 @@ same event invalidates entries built from the changed document.
 publish, effective on the date the policy says (new target, added to plan §5 in v2.5).
 
 **Key questions.** *Which data must always be fresh?* Everything about a customer: live calls only. *How fast must the
-copilot know about a policy change?* Within an hour of publish, and never before its effective date (tests
-`test_superseded_and_restricted_passages_are_not_retrievable`).
+copilot know about a policy change?* Within an hour of publish, and never before its effective date.
 
 ### 06 · Human in the loop (escalation path)
 **Situation.** The RM's notes say "I'll get your limit raised to AED 6.5m". The customer is impatient; the model could
@@ -353,7 +351,7 @@ UAE North** (separate quota) → **degraded mode**: a data-only brief (facts, no
 without a generated answer, a manual call report. Tool failures degrade per source: only the CRM profile is critical
 for a brief; LOS, ODS, KYC or news failures give a flagged partial brief.
 
-**Where we differ.** The guide falls back to a second *provider*. We do not fail over across borders or vendors:
+**Where a bank differs.** A common design falls back to a second *provider*. We do not fail over across borders or vendors:
 residency rules keep inference in the UAE (ADR-001, ADR-015). Graceful degradation does the rest.
 
 **Key questions.** *Uptime target and what users see?* 99.0% pilot; a degraded answer is clearly flagged and counts as
@@ -368,7 +366,7 @@ throttle.
 overload core banking (reads go to the ODS replica); a **Cosmos DB outbox as the queue** for CRM writes so a slow CRM
 never blocks the RM; TPM quota booked at 2× peak; load test at 1.5 req/s (3× peak) and a soak test before each phase.
 
-**Where we differ.** The guide streams tokens to hide latency. We buffer and verify (block 03), so we cut perceived
+**Where a bank differs.** Many assistants stream tokens to hide latency. We buffer and verify (block 03), so we cut perceived
 latency instead with facts-first release, parallel tool calls, and short outputs (≈ 200 tokens per brief). Pre-built
 morning briefs are a Phase 2 option, subject to risk sign-off (plan C9).
 
@@ -395,7 +393,7 @@ Alerts on SLO burn rate; p95 above budget for 15 min (end to end and per stage);
 faithfulness gate failures above 5% for 1 h. Sentinel watches the audit stream for misuse. An ops summary API returns
 the same figures for a window (`02-lld.md` §11.8).
 
-**Where we differ.** The guide logs the final prompt and retrieved chunks in the trace. Prompts here contain customer
+**Where a bank differs.** Many designs log the final prompt and retrieved chunks in the trace. Prompts here contain customer
 data, so **telemetry is metadata only**; full content goes to the encrypted audit content store (1 year, per-customer
 keys, PIM-gated access) for debugging and replay (ADR-013, ADR-014; test: no customer data in spans, logs or metrics).
 
@@ -435,8 +433,8 @@ rate (plan §3.9, ADR-027, `02-lld.md` §17).
    faithfulness and citation accuracy ≥ 0.95, context recall ≥ 0.90, context precision, answer relevancy and answer
    correctness ≥ 0.85, correct declines ≥ 0.90 (95% lower bounds, so 293 of 300 for 0.95), zero leaks, zero injections,
    zero numeric mismatches, and the replayed p95 latency and tokens per request stay inside plan §5. Then canary, a
-   per-use-case kill switch and one-click rollback. The prototype shows the gate: `python3 -m evals.run_evals` passes,
-   and `--careless` (a hallucinating model) fails it (ADR-018).
+   per-use-case kill switch and one-click rollback. In the reference implementation the gate passes, and
+   fails as intended when a hallucinating model is substituted (ADR-018).
 
 **Decision and trade-off.** **No judge on the hot path**: an inline judge would add 1.5 to 3 s at p95 (UC2 would miss
 its 7 s target) and about 70% more tokens. The runtime checks are cheaper and weaker, so a few unfaithful answers are
@@ -446,7 +444,7 @@ versioned procedural memory and it is calibrated against SME labels every quarte
 definitions**; the RAGAS library runs only offline, and only if the Bank approves it, otherwise our own implementation.
 Foundry evaluators and continuous evaluation are used where they run in-region against our judge **[confirm]**.
 
-**Where we differ.** The guide judges with an LLM and spot-checks with humans. We add a deterministic gate *before*
+**Where a bank differs.** A common approach judges with an LLM and spot-checks with humans. We add a deterministic gate *before*
 the model (a weak retrieval never reaches it) and keep the judge off the request path, sampling instead.
 
 **Key questions.** *What is in the golden set and who updates it?* Real, anonymised RM questions, at least 100 of them
@@ -481,8 +479,7 @@ on preview features.
 **Key questions.** *Which identity does a tool call run as?* All three: the RM's for data access, the agent's for the
 tool, the workload's for where it runs. *Can a manipulated agent do more than the RM?* No, and not more than its own
 tools either. *What can the supervisor touch?* No data tools at all. *Can a tool description be changed to steer the
-model?* A changed definition no longer matches its pinned hash and is refused (C25; test
-`test_changed_tool_description_rejected`). *Who reviews agent privileges?* The Bank identity team, quarterly, against
+model?* A changed definition no longer matches its pinned hash and is refused (C25). *Who reviews agent privileges?* The Bank identity team, quarterly, against
 the agent manifests; a token with extra roles is rejected at the gateway (C24).
 
 ### 13 · Memory management (checkpointer, session, episodic, procedural)
@@ -509,8 +506,7 @@ are encrypted, short-lived and crypto-shredded on erasure (C29). If the checkpoi
 an approval commits as a cold resume from the saved draft.
 
 **Key questions.** *What does the copilot remember, and for how long?* The table in `01-hld.md` §5.1. *Can memory leak
-across RMs or customers?* No: partitioned by RM, single-partition queries, entitlement re-checked at recall (C27;
-test `test_cross_rm_recall_returns_nothing`). *Can memory be poisoned?* Only approved or RM-authored text is written,
+across RMs or customers?* No: partitioned by RM, single-partition queries, entitlement re-checked at recall (C27). *Can memory be poisoned?* Only approved or RM-authored text is written,
 quarantine runs before every write and again at recall (C26). *Who can change how the agents work?* Engineers, through
 the eval gate; never the model at runtime.
 
@@ -522,7 +518,7 @@ the eval gate; never the model at runtime.
 
 | Lane | What it holds |
 |---|---|
-| A · Online request path | What every request flows through: identity (01), limits (02), input guardrails (03), the semantic cache decision (04, off for customer data), the supervisor and one specialist agent (07), output guardrails (03), answer |
+| A · Online request path | What every request flows through: identity (01), limits (02), input guardrails (03), the supervisor as router and orchestrator (07) with the semantic cache beside it (04, consulted only for public policy intents, off for customer data), output guardrails (03), answer |
 | B · Controlled execution | Retrieval over the policy index (05), bank tools as MCP servers behind the MCP gateway with three identities per call (12), entitlement checks and RM-approved writes, the model gateway with fallback (07, 08), human in the loop (06) |
 | C · State and data freshness | Knowledge ingestion with versioned, effective-dated chunks (05), memory: checkpoints, session, episodic, profile and procedural pins (13), approval state in Cosmos DB, secure storage (Key Vault, immutable audit) |
 | D · Production operations | Observability (10), evaluation (11), reliability and scale (08, 09), release and recovery |
@@ -538,10 +534,11 @@ Built one block at a time: `diagrams/system-design/step-00.png` (v1) to `step-13
 1. **API gateway + identity:** App Gateway and `web-bff` confirm Layla is signed in, exchange her token for a
    tool-gateway token, and set an 8 s deadline. APIM checks her token budget.
 2. **Input guardrails:** the request text is checked for injection and masked for PII.
-3. **Semantic cache:** a customer brief is never cacheable, so the request moves on.
-4. **Supervisor:** opened from a CRM record, so no model call is needed to classify it: the supervisor sets the step,
-   time, token and hop budgets and hands off once to `brief-agent`; the graph checkpoints its state after every
-   node.
+3. **Supervisor (router + orchestrator):** opened from a CRM record, so no model call is needed to classify it as a
+   customer brief. A customer brief is never cacheable, so the supervisor does not consult the semantic cache. It
+   sets the step, time, token and hop budgets and hands off once to `brief-agent`; the graph checkpoints its state
+   after every node.
+4. **Specialist agent:** `brief-agent` plans the fixed brief workflow within its budget.
 5. **Bank tools through the MCP gateway:** `brief-agent` calls `customer-data` and `memory` through APIM with three
    tokens (Layla's, the agent's, the pod's). The gateway checks the agent may use these tools; the tool-gateway checks
    Harbourline is in Layla's portfolio first, then reads CRM, core banking ODS, LOS, KYC and news in parallel,
@@ -564,10 +561,10 @@ call report becomes an episode for next time → the email opens in Outlook for 
 
 ## Pre-launch checklist
 
-Status: **Designed** = in this design pack; **Prototyped** = working and tested in `code/`; **Gate** = must be met
+Status: **Designed** = in this design pack; **Prototyped** = working and tested in the reference implementation; **Gate** = must be met
 before the pilot or go-live (owner in `07-review-log.md`).
 
-| Item (from the guide) | Status | Where |
+| Item | Status | Where |
 |---|---|---|
 | Requirements with numeric targets for latency, uptime, cost and safety | Designed | Plan §5, this doc Step 1 |
 | Back-of-envelope estimate for peak traffic, tokens and monthly spend | Designed | Step 1, `05` §2 |
@@ -652,9 +649,9 @@ citations and access filtering; fine-tuning cannot cite or forget a superseded c
 
 ---
 
-## Where we differ from the guide, and why
+## Banking-specific design choices
 
-| Topic | The guide (e-commerce support bot) | This design (bank RM copilot) | Why |
+| Topic | Common practice (consumer chatbot) | This design (bank RM copilot) | Why |
 |---|---|---|---|
 | Semantic cache | Cache safe public answers | Off in the pilot; public policy answers only, Phase 2 | A cross-RM leak is a regulatory incident; savings at our volume are small |
 | Streaming | Validate, then stream | Never stream unverified text; facts first | A wrong figure on screen is already a harm in a credit conversation |
