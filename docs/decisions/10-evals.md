@@ -24,7 +24,8 @@ No evals, no production. Every prompt, model or tool change can shift quality si
 ## Where in code
 - `src/copilot/operations/evals/`
 - `src/copilot/request_path/output_guardrails.py`, `src/copilot/execution/retrieval.py` (runtime gates)
-- `src/copilot/operations/tracing.py` (sampling)
+- `src/copilot/operations/tracing.py` (traces scored by the runtime evals)
+- Prototype scope: the judge is a lexical mock; 5% online sampling and nightly runs are production jobs
 
 ## Azure implementation
 RAGAS with Azure AI Foundry evaluation, Langfuse and Azure Monitor for traces and alerts, gate in the release pipeline.

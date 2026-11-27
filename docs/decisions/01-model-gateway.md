@@ -24,7 +24,8 @@ Steps differ in difficulty: intent, extraction and summaries need a small model;
 
 ## Where in code
 - `src/copilot/execution/model_gateway.py`
-- `src/copilot/operations/resilience.py` (retries, circuit breaker), `src/copilot/operations/flags.py` (model pins, kill switch)
+- `src/copilot/operations/resilience.py` (retries, circuit breaker), `src/copilot/operations/flags.py` (kill switches)
+- Prototype scope: models are named per tier in the gateway; version pinning is deployment configuration
 
 ## Azure implementation
 Azure API Management as AI gateway (token limits, load balancing, backend failover) over regional Azure OpenAI deployments in UAE North.

@@ -23,8 +23,7 @@ The Bank's customer data, prompts, model calls and logs must stay in-country. Gl
 - Global endpoints: more capacity and newer models, but processing location not guaranteed.
 
 ## Where in code
-- `src/copilot/execution/model_gateway.py` (regional deployments only)
-- `src/copilot/operations/flags.py` (deployment pins)
+- Not modelled in the prototype: region, private networking and version pins are infrastructure configuration (architecture review, section 2.5)
 
 ## Azure implementation
 UAE North: regional Azure OpenAI, Private Endpoints, Azure Firewall, Key Vault Managed HSM; regional model availability and abuse monitoring to confirm with Microsoft.

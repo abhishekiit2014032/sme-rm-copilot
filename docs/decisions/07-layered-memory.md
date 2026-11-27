@@ -7,7 +7,7 @@ Follow-up actions pause for approval and resume; RMs ask follow-up questions dur
 
 ## Decision
 - Checkpointer: state after every step, so a flow can pause for RM approval and resume.
-- Session: recent turns and a rolling summary, 24 hours.
+- Session: recent turns, 24 hours (production adds a rolling summary).
 - Episodic: RM-approved meeting summaries per customer, 90 days.
 - Procedural: versioned prompts, tool schemas and the intent table, pinned and released through the gate.
 - All memory is per RM, encrypted, never shared across RMs. Semantic memory is the policy index (see 03); RM profile memory is out of scope for now.

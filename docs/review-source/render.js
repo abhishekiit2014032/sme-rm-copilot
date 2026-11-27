@@ -15,6 +15,6 @@ const MAIN = 'sme-rm-copilot-architecture-review.html';
   await p.pdf({ path: output, preferCSSPageSize: true, printBackground: true,
     displayHeaderFooter: true, headerTemplate: '<span></span>',
     footerTemplate: `<div style="width:100%;padding:0 17mm;font:8pt Inter,Arial,sans-serif;color:#7A8499;display:flex;justify-content:space-between">
-      <span>SME RM Copilot · Architecture review · working draft</span><span class="pageNumber"></span></div>` });
+      <span>SME RM Copilot · Architecture review · November 2026</span><span class="pageNumber"></span></div>` });
   await b.close(); console.log('pdf written: ' + output);
 })();

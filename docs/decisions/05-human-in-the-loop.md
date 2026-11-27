@@ -10,7 +10,7 @@ Some actions change records or commit the Bank: CRM writes, credit and pricing p
 - The RM approves with a signed, single-use approval token that expires in 5 minutes.
 - A write is never an agent action: after approval, code verifies the token and commits through a retry-safe outbox with an idempotency key.
 - The checkpointer saves state, the flow pauses for approval and resumes from the same point.
-- Weak evidence on a policy question escalates to the credit desk; every approval is written to the audit log.
+- Weak evidence on a policy question returns a decline that points the RM to the credit desk; every approval is written to the audit log.
 
 ## Trade-offs
 | Gain | Cost | How we contain the cost |
@@ -25,6 +25,7 @@ Some actions change records or commit the Bank: CRM writes, credit and pricing p
 ## Where in code
 - `src/copilot/execution/approvals.py` (token issue and verify, outbox)
 - `src/copilot/state/memory/` (checkpointer), `src/copilot/state/audit_log.py`
+- Prototype scope: the outbox is drained in-process right after approval; production drains it with an async worker
 
 ## Azure implementation
 Key Vault Managed HSM signs approval tokens; Cosmos DB holds the outbox; immutable Blob Storage (WORM) holds the audit trail.

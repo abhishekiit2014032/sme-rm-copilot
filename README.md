@@ -58,7 +58,8 @@ sequenceDiagram
 
 | Diagram box | Code |
 |---|---|
-| **A · Online request path** | [`src/copilot/request_path/`](src/copilot/request_path) |
+| **A · Online request path** | [`src/copilot/request_path/`](src/copilot/request_path) (wired in order in `pipeline.py`) |
+| RM and Answer to RM | `src/copilot/app.py` (API) and [`demo/ui/`](demo/ui) |
 | API gateway + identity | `request_path/gateway.py` |
 | Input guardrails | `request_path/input_guardrails.py` |
 | Semantic cache | `request_path/semantic_cache.py` |
@@ -68,7 +69,9 @@ sequenceDiagram
 | Brief, policy and follow-up agents | `execution/agents/` |
 | Tool gateway (MCP) + MCP servers | `execution/tool_gateway.py`, `execution/mcp_servers/` |
 | Model gateway | `execution/model_gateway.py` |
-| Retrieval (hybrid RAG) | `execution/retrieval.py` |
+| Retrieval (hybrid RAG) + vector and keyword index | `execution/retrieval.py` |
+| Primary / fallback LLM | [`mocks/llm/`](mocks/llm) (scripted, deterministic) |
+| Systems of record | [`mocks/systems/`](mocks/systems) (CRM, core banking, lending, trade finance, cases) |
 | Human in the loop | `execution/approvals.py` |
 | **C · State + data freshness** | [`src/copilot/state/`](src/copilot/state) |
 | Knowledge ingestion (CDC) | `state/ingestion.py` |
@@ -112,7 +115,19 @@ make serve     # API + demo UI on http://localhost:8000
 | Memory, checkpoint and resume, approval tokens, outbox | Cosmos DB, Key Vault |
 | Retries, circuit breakers, tracing, evals | CRM, core banking, lending, trade finance, case management |
 
-Each external dependency sits behind an interface (ports and adapters). Moving to Azure means adding an adapter, not changing the design.
+External systems and models sit behind interfaces in `src/copilot/contracts/ports.py` (ports and adapters). Moving to Azure means adding adapters, not changing the design.
+
+## Prototype simplifications
+
+| Area | In this prototype | In production (per the architecture document) |
+|---|---|---|
+| LLM | Scripted, deterministic responses | Azure OpenAI via the model gateway (adapter stub in `mocks/llm/azure_openai_adapter.py`) |
+| Identity | Mock OIDC issuer; agent and workload identities are names set in code | Entra ID tokens, a service principal per agent, managed workload identities |
+| Plan execution | Steps run in sequence | Independent steps can run in parallel (LangGraph) |
+| Stores | In-memory memory, cache, index, audit log and outbox | Cosmos DB, AI Search, Managed Redis, immutable Blob Storage |
+| Outbox | Drained in-process right after approval | Async worker with retries |
+| Evals | Lexical mock judge; release gate on a 16-case golden set | RAGAS with an LLM judge; 5% online sampling, nightly runs |
+| Network and region | Not modelled | UAE North, private endpoints, no public path |
 
 ## Key design decisions
 

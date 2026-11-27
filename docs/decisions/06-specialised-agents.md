@@ -11,7 +11,7 @@ Three use cases need different data, tools and models: customer brief, policy an
 - Policy agent: policy search only.
 - Follow-up agent: customer data (read), CRM drafts (create drafts only, no commit tool).
 - Hub and spoke: agents talk only through the orchestrator, never to each other; each has its own identity and tool allow-list.
-- Each agent calls typed tools in a bounded loop up to a fixed step limit.
+- Each agent runs a fixed sequence of typed tool calls within the orchestrator's step limit (production: a bounded tool loop per agent).
 
 ## Trade-offs
 | Gain | Cost | How we contain the cost |
