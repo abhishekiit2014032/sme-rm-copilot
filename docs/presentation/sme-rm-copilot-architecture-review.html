@@ -131,8 +131,8 @@ td b { font-weight:600; color:var(--ink); }
       <ul><li><div class="row"><span class="n">2.1</span><span class="t">High-level architecture</span><span class="dots"></span><span class="pg">3</span></div></li><li><div class="row"><span class="n"></span><span class="t">Architecture components</span><span class="dots"></span><span class="pg">4</span></div></li>
       <li><div class="row"><span class="n">2.2</span><span class="t">Data sources and integrations</span><span class="dots"></span><span class="pg">5</span></div></li><li><div class="row"><span class="n">2.3</span><span class="t">AI/LLM components</span><span class="dots"></span><span class="pg">6</span></div></li>
       <li><div class="row"><span class="n">2.4</span><span class="t">RAG, agents and other AI patterns</span><span class="dots"></span><span class="pg">7</span></div></li><li><div class="row"><span class="n">2.5</span><span class="t">Security and access control</span><span class="dots"></span><span class="pg">8</span></div></li></ul></li>
-    <li><div class="row"><span class="n">3</span><span class="t">Delivery approach</span><span class="dots"></span><span class="pg tbd">To be added</span></div>
-      <ul><li><div class="row"><span class="n">3.1</span><span class="t">Key risks and mitigation plans</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li><li><div class="row"><span class="n">3.2</span><span class="t">Success metrics</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li></ul></li>
+    <li><div class="row"><span class="n">3</span><span class="t">Delivery approach</span><span class="dots"></span><span class="pg">9</span></div>
+      <ul><li><div class="row"><span class="n">3.1</span><span class="t">Key risks and mitigation plans</span><span class="dots"></span><span class="pg">9</span></div></li><li><div class="row"><span class="n">3.2</span><span class="t">Success metrics</span><span class="dots"></span><span class="pg">9</span></div></li></ul></li>
     <li><div class="row"><span class="n">4</span><span class="t">Technical deep dive</span><span class="dots"></span><span class="pg tbd">To be added</span></div>
       <ul><li><div class="row"><span class="n">4.1</span><span class="t">Major design decisions</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li><li><div class="row"><span class="n">4.2</span><span class="t">Technology choices and trade-offs</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li>
       <li><div class="row"><span class="n">4.3</span><span class="t">Hallucination, model evaluation, monitoring and governance</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li></ul></li>
@@ -334,5 +334,30 @@ td b { font-weight:600; color:var(--ink); }
   </table>
   <p style="margin:2.5mm 0 0;font-size:9.4pt"><b>Audit and monitoring:</b> immutable Blob Storage (WORM) with hash-chained records · Microsoft Sentinel (SIEM) · Defender for Cloud, including AI threat protection · Microsoft Purview (classification and lineage).</p>
   <p class="note" style="margin:1mm 0 0">To confirm with Microsoft: modified abuse monitoring approval and regional model availability in UAE North.</p>
+</section>
+
+<section class="compact comp section">
+  <p class="eyebrow">SME RM Copilot · Section 3</p>
+  <h2>3. Delivery approach</h2>
+  <h3>3.1 Key risks and mitigation plans</h3>
+  <table>
+    <thead><tr><th style="width:30%">Risk</th><th>Mitigation</th></tr></thead>
+<tr><td><b>Ungrounded output</b><br><span class="note">hallucinated figures or policy</span></td><td>Gated RAG, citation enforcement, values bound deterministically from the systems of record, HITL review</td></tr>
+<tr><td><b>Downstream dependency failure</b></td><td>Retry with exponential backoff and jitter, idempotency keys, timeouts, circuit breakers and bulkheads across all integrations and the normalisation layer, graceful degradation</td></tr>
+<tr><td><b>Data consistency drift</b><br><span class="note">AI view vs system of record</span></td><td>System of record as the single source of truth, read-through access (no copies), provenance and as-of timestamp on every figure, numeric reconciliation in output validation</td></tr>
+<tr><td><b>Autonomy on high-impact actions</b></td><td>HITL approval gates (signed, single-use tokens) on writes, credit, pricing and escalations</td></tr>
+<tr><td><b>Entitlement bypass</b><br><span class="note">cross-customer exposure</span></td><td>Zero-trust access: OIDC on-behalf-of + RBAC entitlement at the tool gateway, PII redaction, private endpoints</td></tr>
+<tr><td><b>Source data quality</b></td><td>Validation at the anti-corruption layer, completeness flags, remediation by data owners at source</td></tr>
+<tr><td><b>Legacy integration coupling</b></td><td>Anti-corruption layer and facades, contract tests, service virtualisation (mocks) until the systems are ready</td></tr>
+  </table>
+  <h3>3.2 Success metrics</h3>
+  <table>
+    <thead><tr><th style="width:22%">Area</th><th style="width:48%">Metric</th><th>Target</th></tr></thead>
+<tr><td><b>RM efficiency</b></td><td>Meeting prep and follow-up cycle time</td><td>Reduction vs baseline</td></tr>
+<tr><td><b>Adoption</b></td><td>Weekly active users (pilot RMs)</td><td>≥ 70%</td></tr>
+<tr><td><b>Groundedness</b></td><td>RAGAS faithfulness · numeric fidelity</td><td>≥ 0.90 · 100%</td></tr>
+<tr><td><b>Latency SLO</b></td><td>p95 end-to-end response</td><td>≤ 8 s</td></tr>
+<tr><td><b>Security</b></td><td>Entitlement violations · unapproved writes</td><td>Zero</td></tr>
+  </table>
 </section>
 </body></html>
