@@ -1,4 +1,4 @@
-// Renders complete-architecture.html to complete-architecture.png (2400x1794 at 2x) and the build-up frames
+// Renders complete-architecture.html to complete-architecture.png (2400x1866 at 2x) and the build-up frames
 // step-00.png (v1 prototype) ... step-13.png (one per building block, at 1.5x; 12 = agent identity + MCP gateway,
 // 13 = memory, plan v2.6). Runs the page's layout check (box overlap, wires through boxes, labels on wires, text
 // overflow, fonts < 15 px, titles < 22 px, group framing, caption bar) for every frame and exits with code 1 if
@@ -8,7 +8,7 @@ const { chromium } = require('playwright');
 
 const html = 'file://' + path.join(__dirname, 'complete-architecture.html');
 const out = f => path.join(__dirname, f);
-const W = 2400, H = 1794, LAST = 13;
+const W = 2400, H = 1866, LAST = 13;
 
 async function shoot(browser, step, file, scale) {
   const page = await browser.newPage({ viewport: { width: W, height: H }, deviceScaleFactor: scale });
