@@ -90,12 +90,56 @@ figcaption { font-size:8.8pt; color:var(--muted); margin-top:1.8mm; }
 .steps li::before { content:counter(s); position:absolute; left:0; top:.2mm; width:6mm; height:6mm; border-radius:50%; background:var(--navy); color:#fff; font-size:8.4pt; font-weight:800; text-align:center; line-height:6mm; }
 .compact h2 { font-size:21pt; margin-bottom:2mm; } .compact .lede { font-size:11pt; margin-bottom:2mm; } .compact h3 { margin:5mm 0 2mm; font-size:13pt; } .compact td { padding:1.8mm 3mm; } .compact th { padding:2.2mm 3mm; } .compact table { margin:1mm 0 2mm; }
 .comp table { font-size:9.2pt; break-inside:auto; } .comp td { padding:1.5mm 3mm; }
+
+/* short document: quieter headings, stronger content */
+.eyebrow { font-size:7.6pt; letter-spacing:1.6pt; color:#5B8F6F; }
+h2, .compact h2 { font-size:15pt; font-weight:700; letter-spacing:0; margin:1mm 0 3mm; padding-bottom:2mm; border-bottom:1px solid var(--line); }
+h3, .compact h3 { font-size:10.5pt; font-weight:700; color:#3B4560; margin:5mm 0 1.8mm; letter-spacing:0; }
+.compact .lede { font-size:10.8pt; color:var(--body); margin:0 0 2mm; }
+table, .compact table { font-size:10.4pt; line-height:1.45; margin:0 0 2mm; table-layout:fixed; }
+th, .compact th { background:#EEF1F6; color:#4A5570; font-size:8.4pt; font-weight:700; letter-spacing:.6pt; text-transform:uppercase; padding:2mm 3mm; border-bottom:1.5px solid var(--navy); }
+td, .compact td { padding:2.2mm 3mm; color:#1F2937; vertical-align:top; }
+tr:nth-child(even) td { background:none; }
+td b { font-weight:600; color:var(--ink); }
+.comp table { font-size:9.9pt; } .comp td { padding:1.35mm 3mm; } .comp td.grp { padding-top:2.4mm !important; }
+.comp td.grp { background:none !important; color:#5B8F6F; font-size:8pt; font-weight:700; letter-spacing:1.2pt; text-transform:uppercase; padding:3.2mm 3mm 1mm; border-bottom:1px solid var(--line); }
+.note { font-size:9.2pt; color:var(--muted); }
+/* index page */
+.toc2 { list-style:none; padding:0; margin:3mm 0 0; font-size:11pt; }
+.toc2 > li { margin:0 0 3.2mm; }
+.toc2 .row { display:flex; align-items:baseline; gap:2mm; }
+.toc2 .row .n { width:9mm; font-weight:700; color:var(--ink); }
+.toc2 .row .t { font-weight:600; color:var(--ink); }
+.toc2 .row .dots { flex:1; border-bottom:1px dotted #B8C0CF; transform:translateY(-1mm); }
+.toc2 .row .pg { width:10mm; text-align:right; color:var(--ink); font-weight:600; }
+.toc2 .row .pg.tbd { color:#9AA3B5; font-weight:400; font-size:9.5pt; width:22mm; }
+.toc2 ul { list-style:none; padding:0 0 0 9mm; margin:1.5mm 0 0; }
+.toc2 ul li { margin:0 0 1.4mm; }
+.toc2 ul .row .t { font-weight:400; color:var(--body); }
 </style></head><body>
 
-<section class="compact">
+<section>
+  <p class="eyebrow">SME RM Copilot · Architecture review</p>
+  <h2>Contents</h2>
+  <p class="lede" style="font-size:10.8pt;margin-bottom:5mm">Objective: help RMs improve productivity, engage customers better, and spend less time on information retrieval, customer preparation and follow-up actions.</p>
+  <ol class="toc2">
+    <li><div class="row"><span class="n">1</span><span class="t">Business problem and use cases</span><span class="dots"></span><span class="pg">2</span></div>
+      <ul><li><div class="row"><span class="n"></span><span class="t">Business problems</span><span class="dots"></span><span class="pg">2</span></div></li><li><div class="row"><span class="n"></span><span class="t">AI use cases</span><span class="dots"></span><span class="pg">2</span></div></li><li><div class="row"><span class="n"></span><span class="t">Expected business benefits</span><span class="dots"></span><span class="pg">2</span></div></li></ul></li>
+    <li><div class="row"><span class="n">2</span><span class="t">Solution architecture</span><span class="dots"></span><span class="pg">3</span></div>
+      <ul><li><div class="row"><span class="n">2.1</span><span class="t">High-level architecture</span><span class="dots"></span><span class="pg">3</span></div></li><li><div class="row"><span class="n"></span><span class="t">Architecture components</span><span class="dots"></span><span class="pg">4</span></div></li>
+      <li><div class="row"><span class="n">2.2</span><span class="t">Data sources and integrations</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li><li><div class="row"><span class="n">2.3</span><span class="t">AI/LLM components</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li>
+      <li><div class="row"><span class="n">2.4</span><span class="t">RAG, agents and other AI patterns</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li><li><div class="row"><span class="n">2.5</span><span class="t">Security and access control</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li></ul></li>
+    <li><div class="row"><span class="n">3</span><span class="t">Delivery approach</span><span class="dots"></span><span class="pg tbd">To be added</span></div>
+      <ul><li><div class="row"><span class="n">3.1</span><span class="t">Key risks and mitigation plans</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li><li><div class="row"><span class="n">3.2</span><span class="t">Success metrics</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li></ul></li>
+    <li><div class="row"><span class="n">4</span><span class="t">Technical deep dive</span><span class="dots"></span><span class="pg tbd">To be added</span></div>
+      <ul><li><div class="row"><span class="n">4.1</span><span class="t">Major design decisions</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li><li><div class="row"><span class="n">4.2</span><span class="t">Technology choices and trade-offs</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li>
+      <li><div class="row"><span class="n">4.3</span><span class="t">Hallucination, model evaluation, monitoring and governance</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li></ul></li>
+  </ol>
+  <p class="note" style="margin-top:6mm">Fictional bank; all figures illustrative. Working draft: sections are added as they are agreed.</p>
+</section>
+<section class="compact section">
   <p class="eyebrow">SME RM Copilot · Section 1</p>
-  <h2>Business problem and use cases</h2>
-  <p class="lede">Objective: help RMs improve productivity, engage customers better, and spend less time on information retrieval, customer preparation and follow-up actions.</p>
+  <h2>1. Business problem and use cases</h2>
   <h3>Business problems</h3>
   <table>
     <thead><tr><th style="width:56%">Problem</th><th>Impact</th></tr></thead>
@@ -129,26 +173,26 @@ figcaption { font-size:8.8pt; color:var(--muted); margin-top:1.8mm; }
 
 <section class="compact comp">
   <p class="eyebrow">SME RM Copilot · Section 2.1</p>
-  <h2>Architecture components</h2>
+  <h2>2.1 Architecture components</h2>
   <table>
     <thead><tr><th style="width:30%">Component</th><th>One line</th></tr></thead>
-    <tr><td colspan="2" style="background:#E9F7EF;font-weight:800;color:#0E7A39">A · Online request path</td></tr>
+    <tr><td colspan="2" class="grp">A · Online request path</td></tr>
     <tr><td><b>API gateway + identity</b></td><td>Verifies the RM's sign-in and applies rate and token limits</td></tr>
     <tr><td><b>Input guardrails</b></td><td>Blocks prompt injection and masks personal data before any model call</td></tr>
     <tr><td><b>Semantic cache</b></td><td>Reuses verified answers to public policy questions; invalidated when a policy changes (CDC); off in the pilot</td></tr>
     <tr><td><b>Router + orchestrator</b></td><td>Works out the intent and runs the workflow within step limits and time budgets</td></tr>
     <tr><td><b>Output guardrails</b></td><td>Releases an answer only when it is grounded, cited and correct</td></tr>
-    <tr><td colspan="2" style="background:#E9F7EF;font-weight:800;color:#0E7A39">B · Controlled execution</td></tr>
+    <tr><td colspan="2" class="grp">B · Controlled execution</td></tr>
     <tr><td><b>Brief, policy and follow-up agents</b></td><td>One agent per use case, each with only its own tools</td></tr>
     <tr><td><b>Retrieval / RAG</b></td><td>Finds the relevant policy clauses; no answer without strong evidence</td></tr>
     <tr><td><b>Tool gateway (MCP)</b></td><td>The only path to the Bank's systems; at runtime every call checks OIDC (the RM's identity) + RBAC (role and customer entitlement) + the agent's identity + the workload identity</td></tr>
     <tr><td><b>Model gateway</b></td><td>Picks the right model for each step, with budgets and fallback</td></tr>
     <tr><td><b>Human in the loop</b></td><td>The RM approves every write; unclear cases go to the credit desk</td></tr>
-    <tr><td colspan="2" style="background:#E9F7EF;font-weight:800;color:#0E7A39">C · State + data freshness</td></tr>
+    <tr><td colspan="2" class="grp">C · State + data freshness</td></tr>
     <tr><td><b>Knowledge ingestion (CDC)</b></td><td>Change data capture (CDC) events from the policy library re-embed changed clauses, refresh the index and invalidate the cache</td></tr>
     <tr><td><b>Session + memory store</b></td><td>Checkpointer, session, episodic and procedural memory, per RM</td></tr>
     <tr><td><b>Secure storage</b></td><td>Keys and a write-once audit log</td></tr>
-    <tr><td colspan="2" style="background:#E9F7EF;font-weight:800;color:#0E7A39">D · Production operations</td></tr>
+    <tr><td colspan="2" class="grp">D · Production operations</td></tr>
     <tr><td><b>Observability</b></td><td>LLM tracing with Langfuse: per-step latency, tokens and cost per request, prompt versions, alerts</td></tr>
     <tr><td><b>Evaluation</b></td><td>RAGAS scoring (faithfulness, answer relevancy, context precision) on sampled live answers, runtime gates, golden-set check before every release</td></tr>
     <tr><td><b>Reliability + scale</b></td><td>Autoscaling, queues and circuit breakers</td></tr>
