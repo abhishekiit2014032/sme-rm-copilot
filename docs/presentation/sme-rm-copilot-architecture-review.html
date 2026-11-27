@@ -361,24 +361,22 @@ td b { font-weight:600; color:var(--ink); }
   </table>
 </section>
 
-<section class="compact comp ai section">
+<section class="compact comp section">
   <p class="eyebrow">SME RM Copilot · Section 4</p>
   <h2>4. Technical deep dive</h2>
   <h3>4.1 Major design decisions</h3>
   <table>
-    <thead><tr><th style="width:4%">#</th><th style="width:34%">Decision</th><th style="width:34%">Why</th><th>Alternative not chosen</th></tr></thead>
-<tr><td>1</td><td><b>Gateway-first architecture:</b> every request passes the gateway, guardrails and router</td><td>One control point for identity, limits and safety</td><td>Agents called directly from the UI</td></tr>
-<tr><td>2</td><td><b>Router with fast path + LLM plan-and-execute</b></td><td>Simple asks stay fast and cheap; multi-step asks get planned</td><td>One fixed workflow for everything · free-form agent swarm</td></tr>
-<tr><td>3</td><td><b>One specialist agent per use case, hub and spoke</b></td><td>Least privilege, testable per use case, no compounding errors</td><td>One large general agent · agents talking to each other</td></tr>
-<tr><td>4</td><td><b>MCP tool gateway as the only path to systems</b></td><td>Zero-trust: OIDC + RBAC + agent + workload identity on every call</td><td>Agents calling APIs directly · text-to-SQL</td></tr>
-<tr><td>5</td><td><b>Read customer data live; index only policy</b></td><td>One source of truth, no customer data copies to secure or reconcile</td><td>Customer data lake or vector store</td></tr>
-<tr><td>6</td><td><b>Hybrid, gated RAG</b> (BM25 + vector, clause chunks, retrieval gate)</td><td>Exact numbers and clause citations; declines when evidence is weak</td><td>Fine-tuning · vector-only search</td></tr>
-<tr><td>7</td><td><b>Numbers bound from source, verified before release</b></td><td>Figures can never be invented; nothing unverified reaches the RM</td><td>Free model output · streaming unverified answers</td></tr>
-<tr><td>8</td><td><b>Human in the loop on every critical path; agents have no write tools</b></td><td>Writes, credit and pricing stay with people</td><td>Autonomous CRM updates</td></tr>
-<tr><td>9</td><td><b>Model gateway with tiered routing and fallback</b></td><td>Right model per step, cost control, resilience</td><td>One large model for every call</td></tr>
-<tr><td>10</td><td><b>Layered memory per RM</b> (checkpointer, session, episodic, procedural)</td><td>Pause and resume for approvals, continuity, consistent behaviour</td><td>Stateless chat · shared memory</td></tr>
-<tr><td>11</td><td><b>Evaluation built in</b> (runtime gates, RAGAS sampling, release gate)</td><td>Quality is measured on every request and before every change</td><td>Manual testing only</td></tr>
-<tr><td>12</td><td><b>Azure-native, regional deployment</b></td><td>Data residency, private networking, managed AI services</td><td>Multi-cloud · global model endpoints</td></tr>
+    <thead><tr><th style="width:5%">#</th><th style="width:24%">Decision</th><th style="width:47%">Why</th><th>Not chosen</th></tr></thead>
+<tr><td>1</td><td><b>Model gateway</b></td><td>Model-agnostic, with routing and fallback</td><td>Single model</td></tr>
+<tr><td>2</td><td><b>MCP / tool gateway</b></td><td>Granular access control: OIDC + RBAC per call</td><td>Direct API calls</td></tr>
+<tr><td>3</td><td><b>Hybrid RAG</b></td><td>Sparse (BM25) + dense search with metadata filters</td><td>Vector-only</td></tr>
+<tr><td>4</td><td><b>Groundedness</b></td><td>Citations for every policy answer</td><td>Free output</td></tr>
+<tr><td>5</td><td><b>Human in the loop</b></td><td>Approval on critical paths: writes, credit, pricing</td><td>Autonomous actions</td></tr>
+<tr><td>6</td><td><b>Specialised agents</b></td><td>Clear tool and responsibility boundaries</td><td>One general agent</td></tr>
+<tr><td>7</td><td><b>Layered memory</b></td><td>Checkpointer, session, episodic, procedural</td><td>Stateless</td></tr>
+<tr><td>8</td><td><b>Plan-and-execute</b></td><td>Agentic loop for multi-step asks</td><td>Fixed workflow</td></tr>
+<tr><td>9</td><td><b>Regional deployment</b></td><td>Data residency</td><td>Global endpoints</td></tr>
+<tr><td>10</td><td><b>Evals</b></td><td><b>Runtime:</b> scores the retrieved data and answer quality at generation · <b>Release:</b> quality gate on RAGAS benchmark runs</td><td>Manual testing</td></tr>
   </table>
 </section>
 </body></html>
