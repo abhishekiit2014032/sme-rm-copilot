@@ -134,7 +134,7 @@ td b { font-weight:600; color:var(--ink); }
     <li><div class="row"><span class="n">3</span><span class="t">Delivery approach</span><span class="dots"></span><span class="pg">9</span></div>
       <ul><li><div class="row"><span class="n">3.1</span><span class="t">Key risks and mitigation plans</span><span class="dots"></span><span class="pg">9</span></div></li><li><div class="row"><span class="n">3.2</span><span class="t">Success metrics</span><span class="dots"></span><span class="pg">9</span></div></li></ul></li>
     <li><div class="row"><span class="n">4</span><span class="t">Technical deep dive</span><span class="dots"></span><span class="pg">10</span></div>
-      <ul><li><div class="row"><span class="n">4.1</span><span class="t">Major design decisions</span><span class="dots"></span><span class="pg">10</span></div></li><li><div class="row"><span class="n">4.2</span><span class="t">Technology choices and trade-offs</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li>
+      <ul><li><div class="row"><span class="n">4.1</span><span class="t">Major design decisions</span><span class="dots"></span><span class="pg">10</span></div></li><li><div class="row"><span class="n">4.2</span><span class="t">Technology choices and trade-offs</span><span class="dots"></span><span class="pg">11</span></div></li>
       <li><div class="row"><span class="n">4.3</span><span class="t">Hallucination, model evaluation, monitoring and governance</span><span class="dots"></span><span class="pg tbd">To be added</span></div></li></ul></li>
   </ol>
   <p class="note" style="margin-top:6mm">Fictional bank; all figures illustrative. Working draft: sections are added as they are agreed.</p>
@@ -377,6 +377,44 @@ td b { font-weight:600; color:var(--ink); }
 <tr><td>8</td><td><b>Plan-and-execute</b></td><td>Agentic loop for multi-step asks</td><td>Fixed workflow</td></tr>
 <tr><td>9</td><td><b>Regional deployment</b></td><td>Data residency</td><td>Global endpoints</td></tr>
 <tr><td>10</td><td><b>Evals</b></td><td><b>Runtime:</b> scores the retrieved data and answer quality at generation · <b>Release:</b> quality gate on RAGAS benchmark runs</td><td>Manual testing</td></tr>
+  </table>
+</section>
+
+<section class="compact comp ai sec section">
+  <p class="eyebrow">SME RM Copilot · Section 4.2</p>
+  <h2>4.2 Technology choices and trade-offs</h2>
+  <h3>Guiding trade-off: autonomy vs reliability vs efficiency (pick two)</h3>
+  <table>
+    <thead><tr><th style="width:16%">Axis</th><th style="width:42%">Meaning</th><th>Our position</th></tr></thead>
+<tr><td><b>Reliability</b></td><td>Correct, grounded, consistent with the systems of record</td><td><b>Chosen:</b> financial data leaves no room for error</td></tr>
+<tr><td><b>Efficiency</b></td><td>Latency and cost per request</td><td><b>Chosen:</b> within budgets, never at the cost of reliability</td></tr>
+<tr><td><b>Autonomy</b></td><td>The system acts on its own, without people</td><td><b>Limited on purpose:</b> the copilot assists; people decide and approve</td></tr>
+  </table>
+  <h3>Architecture trade-offs</h3>
+  <table>
+    <thead><tr><th style="width:4%">#</th><th style="width:30%">Choice</th><th style="width:25%">Gain</th><th style="width:24%">Cost we accept</th><th>Favours</th></tr></thead>
+<tr><td>1</td><td><b>Buffer and verify answers (no streaming)</b></td><td>Nothing unverified reaches the RM</td><td>Higher perceived latency</td><td>Reliability</td></tr>
+<tr><td>2</td><td><b>Read live from systems of record</b></td><td>Same numbers as the core systems</td><td>Depends on source uptime</td><td>Reliability</td></tr>
+<tr><td>3</td><td><b>Async writes via outbox</b></td><td>No lost or duplicate CRM writes</td><td>Eventual consistency</td><td>Reliability</td></tr>
+<tr><td>4</td><td><b>Retries, timeouts, circuit breakers</b></td><td>Survives slow or failing systems</td><td>Added latency on failure</td><td>Reliability</td></tr>
+<tr><td>5</td><td><b>Bounded agent loops</b></td><td>Predictable cost and behaviour</td><td>Some complex asks cut short</td><td>Reliability + efficiency</td></tr>
+<tr><td>6</td><td><b>Rate limits and token budgets</b></td><td>Cost control, fair use</td><td>Occasional throttling</td><td>Efficiency</td></tr>
+<tr><td>7</td><td><b>Public-only semantic cache</b></td><td>Lower cost on repeat questions</td><td>Fewer cache hits</td><td>Efficiency</td></tr>
+<tr><td>8</td><td><b>Managed cloud services</b></td><td>Faster delivery, compliance</td><td>Vendor lock-in, contained by the gateways</td><td>Efficiency</td></tr>
+  </table>
+  <h3>Tools and trade-offs</h3>
+  <table>
+    <thead><tr><th style="width:18%">Area</th><th style="width:27%">Tool</th><th style="width:22%">Alternative</th><th>Trade-off</th></tr></thead>
+<tr><td><b>LLMs</b></td><td>Azure OpenAI (regional)</td><td>Self-hosted open source</td><td>Quality, data terms <b>vs</b> quota, lock-in</td></tr>
+<tr><td><b>Model + MCP gateway</b></td><td>Azure API Management</td><td>LiteLLM · custom</td><td>Managed policies <b>vs</b> feature lag</td></tr>
+<tr><td><b>Hybrid search</b></td><td>Azure AI Search</td><td>Elasticsearch · pgvector</td><td>BM25 + vector built in <b>vs</b> cost</td></tr>
+<tr><td><b>Agent framework</b></td><td>LangGraph</td><td>AI Foundry Agent Service</td><td>Loop control <b>vs</b> more code</td></tr>
+<tr><td><b>Memory store</b></td><td>Cosmos DB</td><td>PostgreSQL</td><td>Partitions, TTL <b>vs</b> cost tuning</td></tr>
+<tr><td><b>Guardrails</b></td><td>AI Content Safety + AI Language PII</td><td>NeMo Guardrails · Presidio</td><td>Managed <b>vs</b> less customisation</td></tr>
+<tr><td><b>Evals</b></td><td>RAGAS + AI Foundry evaluation</td><td>DeepEval</td><td>Standard metrics <b>vs</b> judge cost</td></tr>
+<tr><td><b>Tracing</b></td><td>Langfuse + Azure Monitor</td><td>Azure Monitor only</td><td>LLM traces <b>vs</b> one more component</td></tr>
+<tr><td><b>Compute</b></td><td>Private AKS</td><td>Container Apps</td><td>Isolation <b>vs</b> ops effort</td></tr>
+<tr><td><b>Keys</b></td><td>Key Vault Managed HSM</td><td>Standard Key Vault</td><td>Bank-held keys <b>vs</b> cost</td></tr>
   </table>
 </section>
 </body></html>
