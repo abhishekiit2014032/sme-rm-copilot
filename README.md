@@ -1,27 +1,140 @@
-# SME RM Copilot: assignment submission
+# SME RM Copilot
 
-An AI assistant for SME relationship managers, built around three use cases: a **pre-meeting brief**, a **policy and product copilot**, and a **post-meeting follow-up agent**.
+An AI assistant for SME relationship managers (RMs) at a commercial bank: it prepares customer briefs, answers policy and product questions with citations, and drafts follow-ups that the RM approves.
 
-| Deliverable | Where |
+> Prototype for an architecture review. The bank, customers, figures and policies are fictional. Every external system and model is mocked behind an interface, so the whole system runs locally with one command.
+
+| | |
 |---|---|
-| Presentation (29 slides, with speaker notes) | https://claude.ai/artifact/SQ99QXKTFqqkcG8qZvvGB1 (source in `deck/project/`). Export to PowerPoint or PDF from the deck's Share menu. |
-| Clickable prototype | https://claude.ai/artifact/QMmwAsgAQZnoUtVf2iTkWA (source: `prototype/rm-copilot.html`, which also opens offline in any browser). The "How it works" tab shows the Azure architecture and lights up what the last request touched |
-| Azure architecture pack | `docs/architecture/`: plan and baseline (`00-plan.md`), HLD (`01`), LLD (`02`), 22 ADRs with trade-offs (`adr/`), interfaces and SLAs (`04`), NFRs, failure modes, DR and model risk (`05`), deployment and operations (`06`), ARB review log and verdict (`07`), step-by-step AI system design walkthrough with trade-offs (`08`); one-page diagrams in `diagrams/` (Azure target architecture, current application) |
-| **Final HLD (agreed baseline)** | `docs/architecture/diagrams/simple-hld/simple-hld.png`: the four-lane, cloud-agnostic high-level architecture agreed on 27 Nov 2026. New slides and documents follow this diagram; source `simple-hld.html`, rebuilt with `node render.js` |
-| Working prototype on mock Azure | `code/`. See `code/README.md`. Python standard library only. `python3 stack.py` starts 7 services over HTTP against mock Azure APIs (Entra ID, APIM, Azure OpenAI, Content Safety, AI Language, AI Search, Key Vault, App Configuration, Cosmos DB, Event Hubs) with a console; `python3 -m unittest`, `python3 -m evals.run_evals`, `python3 loadtest.py`, `python3 demo.py` |
+| **Architecture document** | [docs/architecture-review.pdf](docs/architecture-review.pdf) (business problem, solution architecture, delivery approach, technical deep dive) |
+| **Architecture diagram** | [docs/diagrams/hld.png](docs/diagrams/hld.png) |
+| **Live demo** | [claude.ai/artifact/QMmwAsgAQZnoUtVf2iTkWA](https://claude.ai/artifact/QMmwAsgAQZnoUtVf2iTkWA) (recorded scenarios with traces; no install) |
+| **Run it yourself** | `make setup && make demo` |
 
-## How the deck maps to the brief
+## Architecture
 
-1. **Business problem and use cases**: slides 3 to 8
-2. **Solution architecture** (layers, read and write data flows, component map, Azure deployment and network, data, AI components, RAG, agents, security): slides 9 to 18
-3. **Delivery approach** (roadmap, risks, success metrics): slides 19 to 21
-4. **Technical deep dive** (decisions, technology trade-offs on Azure, interface agreements and SLOs, hallucination, evaluation, governance): slides 22 to 27
-5. **Demo and next steps**: slides 28 and 29
+![SME RM Copilot high-level architecture](docs/diagrams/hld.png)
 
-## Assumptions to confirm or replace before presenting
+Four lanes. Every request flows through lane A; lane B does the controlled work; lane C keeps state and knowledge fresh; lane D keeps the system observable and safe to change.
 
-- The bank is not named. Placeholders `[Presenter name]` and `[Client / Bank name]` are on the cover.
-- Currency is AED and Arabic support is assumed (a UAE-style context). Change these if the bank is elsewhere.
-- All figures marked as a target or illustrative (time split, 4+ hours saved, ~5 FTE, KPI targets) are hypotheses to baseline in discovery, not measured results.
-- All customers, RMs and policy clauses in the deck, prototype and code are fictional.
-- Microsoft Azure (UAE North) is the committed platform and the Azure services named in the deck are the design baseline (`docs/architecture/00-plan.md`). Exact model versions, regional availability and quotas are still to be confirmed with Microsoft.
+## Use cases
+
+| Use case | What it does |
+|---|---|
+| **Customer brief** | Meeting purpose, open requests, products and facilities, complaints, pending items from both sides, suggested products, talking points |
+| **Policy and product Q&A** | Eligibility, document and policy answers with cited clauses; declines when unsure |
+| **Follow-up actions** | Turns the RM's notes into a CRM note, tasks and an email draft; the RM approves before anything is saved |
+
+## How a request flows
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor RM
+    participant GW as API gateway + identity
+    participant IG as Input guardrails
+    participant RO as Router + orchestrator
+    participant AG as Specialist agent
+    participant TG as MCP tool gateway
+    participant MG as Model gateway
+    participant OG as Output guardrails
+    RM->>GW: ask (OIDC token)
+    GW->>IG: identity, rate and token limits checked
+    IG->>RO: injection checked, PII masked
+    RO->>RO: fast path (one agent) or plan (multi-step)
+    loop each planned step (step limit, time budget)
+        RO->>AG: task
+        AG->>TG: tool call (OIDC + RBAC + agent + workload identity)
+        TG-->>AG: data from systems of record
+        AG->>MG: model call (tier: mini, primary, fallback)
+        MG-->>AG: structured output
+        AG-->>RO: typed result
+    end
+    RO->>OG: draft answer
+    OG-->>RM: grounded, cited answer (or a safe decline)
+```
+
+## Diagram to code
+
+| Diagram box | Code |
+|---|---|
+| **A · Online request path** | [`src/copilot/request_path/`](src/copilot/request_path) |
+| API gateway + identity | `request_path/gateway.py` |
+| Input guardrails | `request_path/input_guardrails.py` |
+| Semantic cache | `request_path/semantic_cache.py` |
+| Router + orchestrator | `request_path/router.py`, `request_path/orchestrator.py` |
+| Output guardrails | `request_path/output_guardrails.py` |
+| **B · Controlled execution** | [`src/copilot/execution/`](src/copilot/execution) |
+| Brief, policy and follow-up agents | `execution/agents/` |
+| Tool gateway (MCP) + MCP servers | `execution/tool_gateway.py`, `execution/mcp_servers/` |
+| Model gateway | `execution/model_gateway.py` |
+| Retrieval (hybrid RAG) | `execution/retrieval.py` |
+| Human in the loop | `execution/approvals.py` |
+| **C · State + data freshness** | [`src/copilot/state/`](src/copilot/state) |
+| Knowledge ingestion (CDC) | `state/ingestion.py` |
+| Session + memory store | `state/memory/` (checkpointer, session, episodic, procedural) |
+| Secure storage (audit) | `state/audit_log.py` |
+| **D · Production operations** | [`src/copilot/operations/`](src/copilot/operations) |
+| Observability | `operations/tracing.py` |
+| Evaluation | `operations/evals/` (runtime checks, release gate, golden set) |
+| Reliability + scale | `operations/resilience.py` |
+| Release + recovery | `operations/flags.py` |
+| Shared contracts | `src/copilot/contracts/` (Pydantic models at every boundary) |
+
+## Quick start
+
+Requires Python 3.11+.
+
+```bash
+make setup     # create .venv and install pinned dependencies
+make demo      # run the Gulf Star scenarios in the terminal, with a trace per lane
+make test      # unit, end-to-end and security tests
+make evals     # release gate: RAGAS-style benchmark on the golden set
+make serve     # API + demo UI on http://localhost:8000
+```
+
+## Demo scenarios
+
+| # | Scenario | What it shows |
+|---|---|---|
+| 1 | "Prepare brief" for Gulf Star Trading LLC | Fast path, brief agent, figures filled from source systems, product suggestions |
+| 2 | "Can we go to AED 3.5m unsecured? If not, what collateral is acceptable?" | Planner path, two policy steps, hybrid RAG, cited clauses |
+| 3 | "Draft follow-up: owner will send audited financials by 5 Dec" | Drafts, checkpoint, RM approval token, resume, outbox write |
+| 4 | Failure cases | Prompt injection blocked, other RM's customer denied, source down (degraded answer), weak evidence (decline) |
+
+## Real vs mocked
+
+| Implemented in this repo | Mocked |
+|---|---|
+| Router, planner loop, orchestrator, agents | LLM responses (deterministic, scripted) |
+| Guardrails, hybrid retrieval (BM25 + vector + filter + rerank + gate) | Azure OpenAI, AI Search, Content Safety |
+| Tool gateway access checks (OIDC + RBAC + agent + workload identity) | Entra ID tokens |
+| Memory, checkpoint and resume, approval tokens, outbox | Cosmos DB, Key Vault |
+| Retries, circuit breakers, tracing, evals | CRM, core banking, lending, trade finance, case management |
+
+Each external dependency sits behind an interface (ports and adapters). Moving to Azure means adding an adapter, not changing the design.
+
+## Key design decisions
+
+1. **Model gateway:** model-agnostic, with routing and fallback
+2. **MCP / tool gateway:** granular access control, OIDC + RBAC per call
+3. **Hybrid RAG:** sparse (BM25) + dense search with metadata filters
+4. **Groundedness:** citations for every policy answer
+5. **Human in the loop:** approval on critical paths
+6. **Specialised agents:** clear tool and responsibility boundaries
+7. **Layered memory:** checkpointer, session, episodic, procedural
+8. **Plan-and-execute:** agentic loop for multi-step asks
+9. **Regional deployment:** data residency
+10. **Evals:** runtime scoring and a release quality gate
+
+One page per decision in [`docs/decisions/`](docs/decisions).
+
+## Repository layout
+
+```
+docs/          architecture document, diagrams, decision records
+src/copilot/   the copilot, one folder per diagram lane
+mocks/         simulated systems of record, LLM, identity, fictional data
+demo/          terminal demo, web UI, static export
+tests/         unit, end-to-end, security, evals
+```
