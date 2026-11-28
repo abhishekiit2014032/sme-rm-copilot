@@ -249,6 +249,60 @@ svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor;
 @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 .cont { display: flex; align-items: center; gap: 10px 12px; flex-wrap: wrap; margin-left: 42px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--card-2); }
 .cont .nx { font-size: 12.5px; color: var(--muted); flex: 1 1 200px; min-width: 0; }
+.me.fade { animation: slidein .3s ease-out both; }
+@keyframes slidein { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: none; } }
+
+/* pipeline playback: stages derived from the trace run first, the answer is released only after the verify step */
+.run { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.ticks { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; border: 0; background: transparent; padding: 0; text-align: left; color: var(--faint); border-radius: 8px; }
+.tk { display: inline-flex; align-items: center; gap: 3px; font-size: 11.5px; line-height: 1.5; padding: 0 8px 0 5px; border-radius: 99px; border: 1px solid var(--line);
+  background: var(--card-2); color: var(--muted); white-space: nowrap; animation: pop .26s ease-out both; }
+.tk svg.i { width: 11px; height: 11px; stroke-width: 2.8; color: var(--green); }
+.tk.warn svg.i, .tk.hitl svg.i { color: var(--amber); }
+.tk.bad { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, transparent); background: color-mix(in srgb, var(--red) 8%, transparent); }
+.tk.bad svg.i { color: var(--red); }
+.car::after { content: "\25B8"; font-size: 11px; color: var(--faint); padding-left: 2px; }
+[aria-expanded="true"] > .car::after { content: "\25BE"; }
+.now { display: flex; align-items: center; gap: 9px; min-height: 26px; font-size: 14px; }
+.now .ni { width: 16px; height: 16px; display: grid; place-items: center; flex: none; }
+.now .ni svg.i { width: 16px; height: 16px; stroke-width: 2.6; }
+.now .nl { min-width: 0; font-weight: 550; flex: 0 1 auto; }
+.now .nl.swap { animation: swap .16s ease-out both; }
+.now .nc { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--faint); white-space: nowrap; flex: none; }
+.now .nc i { width: 7px; height: 7px; border-radius: 50%; background: var(--lane); flex: none; }
+.now.warn .nl, .now.hitl .nl, .now.warn .ni, .now.hitl .ni { color: var(--amber); }
+.now.bad .nl, .now.bad .ni { color: var(--red); }
+.now .skip { margin-left: auto; flex: none; font-size: 12px; color: var(--muted); background: transparent; border: 1px solid var(--line); border-radius: 99px; padding: 1px 10px; }
+.now .skip:hover { color: var(--ink); border-color: var(--faint); }
+.spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid color-mix(in srgb, var(--cyan) 22%, transparent); border-top-color: var(--cyan); animation: spin .7s linear infinite; }
+.now.warn .spin { border-color: color-mix(in srgb, var(--amber) 22%, transparent); border-top-color: var(--amber); }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes swap { from { opacity: .15; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+@keyframes pop { 0% { opacity: 0; transform: scale(.7); } 70% { transform: scale(1.06); } 100% { opacity: 1; transform: none; } }
+.vchip { --c: var(--green); display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 650; padding: 0 9px 0 7px; line-height: 1.6; border-radius: 99px;
+  border: 1px solid color-mix(in srgb, var(--c) 45%, transparent); color: var(--c); background: color-mix(in srgb, var(--c) 10%, transparent); white-space: nowrap; }
+.vchip.warn { --c: var(--amber); } .vchip.bad { --c: var(--red); }
+.vchip svg.i { width: 12px; height: 12px; stroke-width: 2.8; }
+.vchip .vn { font-weight: 500; color: var(--muted); padding-left: 3px; }
+.vchip:hover { border-color: var(--c); }
+.vchip.pop { animation: vpop .55s ease-out both; }
+@keyframes vpop { 0% { opacity: .35; transform: scale(.75); } 40% { opacity: 1; transform: scale(1.12); box-shadow: 0 0 0 8px color-mix(in srgb, var(--c) 24%, transparent); }
+  100% { transform: none; box-shadow: 0 0 0 0 transparent; } }
+.vnote { margin-left: 4px; font-size: 12px; color: var(--muted); animation: vnote 2.6s ease-out both; white-space: nowrap; }
+@keyframes vnote { 0% { opacity: 0; transform: translateX(-6px); } 12%, 75% { opacity: 1; transform: none; } 100% { opacity: 0; } }
+.run-list { list-style: none; margin: 0; padding: 7px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--card-2); font-size: 12.5px; display: flex; flex-direction: column; gap: 3px; }
+.run-list li { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; gap: 8px; align-items: baseline; }
+.run-list .ri svg.i { width: 12px; height: 12px; stroke-width: 2.8; color: var(--green); transform: translateY(1px); }
+.run-list li.warn .ri svg.i, .run-list li.hitl .ri svg.i { color: var(--amber); }
+.run-list li.bad .ri svg.i, .run-list li.bad .rl { color: var(--red); }
+.run-list .rl { overflow-wrap: anywhere; }
+.run-list .rcmp { color: var(--faint); font-size: 11.5px; white-space: nowrap; }
+.w { opacity: 0; transition: opacity .2s ease-out; }
+.w.on { opacity: 1; }
+.pre { opacity: 0; transform: scale(.8); }
+.pre.on { opacity: 1; transform: none; transition: opacity .2s ease-out, transform .28s cubic-bezier(.3, 1.5, .6, 1); }
+.popin { animation: pop .3s ease-out both; }
+.fadein { animation: fade .35s ease-out both; }
 
 /* composer */
 .composer { flex: none; padding: 10px 20px 16px; }
@@ -282,10 +336,18 @@ svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor;
 .p.hitl { --lane: var(--amber); font-weight: 600; }
 .p.warn { border-style: dashed; }
 .arrow { color: var(--faint); font-size: 12px; }
+.p { transition: color .3s, background-color .3s, border-color .3s; }
+.p.pend { color: var(--faint); border-color: var(--line); background: transparent; }
+.p.act { animation: pulse 1s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { box-shadow: 0 0 0 0 transparent; } 50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--lane) 30%, transparent); } }
 .facts-grid { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 7px 10px; font-size: 13px; margin: 0; }
 .facts-grid dt { color: var(--muted); }
 .facts-grid dd { margin: 0; font-weight: 650; overflow-wrap: anywhere; }
 .facts-grid dd.ok { color: var(--green); } .facts-grid dd.bad { color: var(--red); } .facts-grid dd.warn, .facts-grid dd.hitl { color: var(--amber); }
+.facts-grid dd.pend { color: transparent !important; border-radius: 5px; user-select: none;
+  background: linear-gradient(90deg, var(--card) 20%, var(--hover) 50%, var(--card) 80%) 0 0 / 200% 100%; animation: shimmer 1.3s linear infinite; }
+.facts-grid dd.fill { animation: fade .35s ease-out both; }
+@keyframes shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
 .lanes { display: flex; flex-direction: column; gap: 8px; }
 .lane { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
 .lane > summary { list-style: none; display: flex; align-items: center; gap: 8px; padding: 8px 12px; font-size: 13px; background: var(--card-2); cursor: pointer; }
@@ -305,6 +367,9 @@ svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor;
 .row .rd { display: none; padding: 6px 0 2px; color: var(--muted); font-size: 12px; }
 .row[aria-expanded="true"] { background: var(--hover); }
 .row[aria-expanded="true"] .rd { display: block; }
+.row { transition: opacity .3s; }
+.row.pend { opacity: .32; }
+.row.act { background: color-mix(in srgb, var(--blue) 9%, transparent); }
 .attrs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
 .attr { font-size: 11px; padding: 1px 7px; border-radius: 6px; background: var(--card); border: 1px solid var(--line); color: var(--ink); overflow-wrap: anywhere; max-width: 100%; }
 .attr span { color: var(--muted); }
@@ -351,6 +416,13 @@ svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor;
   .composer { padding: 8px 12px 10px; }
   .panel { width: 100%; }
   .strip { font-size: 11.5px; }
+  .run { position: relative; padding-left: 30px; }
+  .run::before { content: "AI"; position: absolute; left: 0; top: 2px; width: 22px; height: 22px; border-radius: 50%; background: linear-gradient(135deg, var(--cyan), var(--blue));
+    color: #0b0d10; font-size: 9.5px; font-weight: 800; display: grid; place-items: center; }
+  .now { font-size: 13.5px; align-items: flex-start; }
+  .now .ni { margin-top: 2px; }
+  .now .nc, .vnote { display: none; }
+  #skip-btn { padding: 7px 9px; }
 }
 @media (min-width: 601px) { .top .title { display: contents; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
@@ -377,6 +449,7 @@ svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor;
     <symbol id="i-block" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></symbol>
     <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 00-14.9-3M4 13a8 8 0 0014.9 3"/><path d="M4 4v4h4M20 20v-4h-4"/></symbol>
     <symbol id="i-next" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
+    <symbol id="i-skip" viewBox="0 0 24 24"><path d="M5 6l7 6-7 6zM13 6l6 6-6 6M20 5v14"/></symbol>
   </defs>
 </svg>
 
@@ -415,6 +488,7 @@ svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor;
       <button type="button" class="icon-btn menu-btn" id="menu-btn" aria-label="Open conversations" aria-controls="side" aria-expanded="false"><svg class="i"><use href="#i-menu"/></svg></button>
       <div class="title"><h1 id="conv-title">New chat</h1><span class="chip" id="cust" hidden></span></div>
       <div class="top-r">
+        <button type="button" class="tbtn" id="skip-btn" aria-label="Skip animation" title="Skip animation" hidden><svg class="i"><use href="#i-skip"/></svg><span class="lbl">Skip</span></button>
         <button type="button" class="tbtn" id="replay-btn" aria-label="Replay conversation" hidden><svg class="i"><use href="#i-replay"/></svg><span class="lbl">Replay</span></button>
         <button type="button" class="tbtn" id="live-run-btn" aria-label="Run this scenario live on the server" hidden><svg class="i"><use href="#i-refresh"/></svg><span class="lbl">Run live</span></button>
         <button type="button" class="tbtn" id="theme-btn" aria-label="Switch to light theme"><svg class="i"><use href="#i-moon"/></svg><span class="lbl">Theme</span></button>
@@ -490,7 +564,7 @@ svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor;
   var RUNS = Array.isArray(payload) ? payload : (payload && payload.runs) || [];
 
   var $ = function (id) { return document.getElementById(id); };
-  var S = { convs: [], cur: "new", rm: "rm-1", live: false, tokens: {}, busy: false, sel: null, panelOpen: true, sheetReturn: null, liveCustomer: "C-1001" };
+  var S = { convs: [], cur: "new", rm: "rm-1", live: false, tokens: {}, busy: false, net: false, chain: null, sel: null, panelOpen: true, sheetReturn: null, liveCustomer: "C-1001" };
 
   /* ---------- helpers ---------- */
   function esc(s) {
@@ -547,7 +621,6 @@ svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor;
   function stPill(status) { var st = STATUS[status] || [statusClass(status), String(status).replace(/_/g, " ")]; return '<span class="st ' + st[0] + '">' + esc(st[1]) + "</span>"; }
   function humanize(s) { s = String(s || "").replace(/_/g, " "); return s.charAt(0).toUpperCase() + s.slice(1); }
   function norm(s) { return String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim(); }
-  function delay(ms) { return new Promise(function (r) { setTimeout(r, REDUCED ? 0 : ms); }); }
   function uniq(a) { return a.filter(function (v, i) { return v != null && a.indexOf(v) === i; }); }
   function parseInput(step) {
     var raw = String(step.input || ""), m = /\b(rm-\d+)\b/.exec(String(step.actor || "")), rm = m ? m[1] : null;
@@ -589,8 +662,9 @@ svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor;
     var status = answer && answer.status, path = answer && answer.path;
     var R = { spans: spans, wall: wall, strip: [], facts: [], pills: [] };
     function seg(html, cls) { R.strip.push({ html: html, cls: cls || "" }); }
-    function fact(k, v, cls) { R.facts.push({ k: k, v: v, cls: cls || "" }); }
-    function pillAdd(lane, t, cls) { R.pills.push({ lane: lane, t: t, cls: cls || "" }); }
+    // key: which pipeline stage fills the fact or lights the pill during playback (see buildStages)
+    function fact(k, v, cls, key) { R.facts.push({ k: k, v: v, cls: cls || "", key: key || "end" }); }
+    function pillAdd(lane, t, cls, key) { R.pills.push({ lane: lane, t: t, cls: cls || "", key: key || "end" }); }
 
     /* strip: one or two lines, the facts an architect scans for */
     if (ing.length) seg("<b>CDC</b> re-index");
@@ -620,68 +694,274 @@ svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor;
     if (inval) seg("cache invalidated");
 
     /* key facts */
-    if (ing.length) fact("Trigger", "Policy library change event (CDC)");
-    else if (path === "planner") fact("Route", "Planner: " + ((plan && plan.detail) || "multi-step plan").replace(/\(if step (\d+) = (\w+)\)/, "if step $1 says $2"));
-    else if (path === "fast") fact("Route", "Fast path" + (route && route.detail ? ": " + route.detail.replace(/ -> /g, " → ") : ""));
-    else if (path === "cache") fact("Route", "Semantic cache hit, still validated");
-    else if (hitl.length) fact("Route", "Resume paused follow-up checkpoint", "hitl");
-    else if (inG && statusClass(inG.status) === "bad") fact("Route", "Stopped at input guardrails, no model or tool called", "bad");
-    else if (denied.length) fact("Route", "Stopped at tool gateway on first data call", "bad");
+    if (ing.length) fact("Trigger", "Policy library change event (CDC)", "", "ingest");
+    else if (path === "planner") fact("Route", "Planner: " + ((plan && plan.detail) || "multi-step plan").replace(/\(if step (\d+) = (\w+)\)/, "if step $1 says $2"), "", "route");
+    else if (path === "fast") fact("Route", "Fast path" + (route && route.detail ? ": " + route.detail.replace(/ -> /g, " → ") : ""), "", "route");
+    else if (path === "cache") fact("Route", "Semantic cache hit, still validated", "", "cache");
+    else if (hitl.length) fact("Route", "Resume paused follow-up checkpoint", "hitl", "hitl");
+    else if (inG && statusClass(inG.status) === "bad") fact("Route", "Stopped at input guardrails, no model or tool called", "bad", "in");
+    else if (denied.length) fact("Route", "Stopped at tool gateway on first data call", "bad", "tools");
     else if (status === "declined") fact("Route", "Safe decline, nothing guessed", "warn");
-    if (tools.length) fact("Identity", denied.length ? "Denied: " + (denied[0].detail || "entitlement") : "OIDC + RBAC + agent + workload ✓", denied.length ? "bad" : "ok");
-    else if (gw) fact("Identity", gw.detail || "verified", statusClass(gw.status) === "ok" ? "" : "bad");
-    if (tools.length) fact("Tool calls", tools.length + " via MCP gateway" + (downNames.length ? "; " + downNames.join(", ") + " unavailable" : ""), downNames.length ? "warn" : "");
+    if (tools.length) fact("Identity", denied.length ? "Denied: " + (denied[0].detail || "entitlement") : "OIDC + RBAC + agent + workload ✓", denied.length ? "bad" : "ok", "tools");
+    else if (gw) fact("Identity", gw.detail || "verified", statusClass(gw.status) === "ok" ? "" : "bad", "id");
+    if (tools.length) fact("Tool calls", tools.length + " via MCP gateway" + (downNames.length ? "; " + downNames.join(", ") + " unavailable" : ""), downNames.length ? "warn" : "", "tools");
     if (retr.length) {
       var parts = retr.map(function (s) { var cl = /;\s*(§[\d.]+)/.exec(s.detail || ""); return (cl ? cl[1] + " " : "") + Number(s.attrs.best_score).toFixed(2); });
-      fact("Retrieval", parts.join(" · ") + " (gate " + thr.toFixed(2) + ")" + (best < thr ? ", below gate" : ""), best < thr ? "bad" : "");
+      fact("Retrieval", parts.join(" · ") + " (gate " + thr.toFixed(2) + ")" + (best < thr ? ", below gate" : ""), best < thr ? "bad" : "", "retr");
     }
-    if (hit || miss || inval) fact("Cache", hit ? "HIT, similarity " + ((/similarity ([\d.]+)/.exec(hit.detail) || [])[1] || "1.00") : inval ? inval.detail : "MISS, answer stored after checks");
-    if (models.length) fact("Models", models.map(function (m) { return m + (mok[m] ? "" : " (down)"); }).join(", "), models.some(function (m) { return !mok[m]; }) ? "warn" : "");
-    else if (ing.length) fact("Models", mg.length + " embedding calls");
-    if (obs) fact("Cost", tokens.toLocaleString("en-US") + " tokens · " + fmtCost(cost));
-    if (inG) fact("Guardrails", "in: " + (inG.detail || inG.status) + (outG ? "; out: " + (outG.detail || outG.status) : ""), statusClass(inG.status) === "bad" ? "bad" : "");
-    if (ev && ev.attrs) fact("Evals", "faithfulness " + Number(ev.attrs.faithfulness).toFixed(2) + " · relevancy " + Number(ev.attrs.answer_relevancy).toFixed(2));
-    if (retries.length || breaker) fact("Reliability", retries.length + " retries with backoff" + (breaker ? "; circuit breaker open, fails fast 30 s" : ""), "warn");
+    if (hit || miss || inval) fact("Cache", hit ? "HIT, similarity " + ((/similarity ([\d.]+)/.exec(hit.detail) || [])[1] || "1.00") : inval ? inval.detail : "MISS, answer stored after checks", "", hit || miss ? "cache" : "cache-inv");
+    if (models.length) fact("Models", models.map(function (m) { return m + (mok[m] ? "" : " (down)"); }).join(", "), models.some(function (m) { return !mok[m]; }) ? "warn" : "", "model");
+    else if (ing.length) fact("Models", mg.length + " embedding calls", "", "emb");
+    if (obs) fact("Cost", tokens.toLocaleString("en-US") + " tokens · " + fmtCost(cost), "", "obs");
+    if (inG) fact("Guardrails", "in: " + (inG.detail || inG.status) + (outG ? "; out: " + (outG.detail || outG.status) : ""), statusClass(inG.status) === "bad" ? "bad" : "", outG ? "verify" : "in");
+    if (ev && ev.attrs) fact("Evals", "faithfulness " + Number(ev.attrs.faithfulness).toFixed(2) + " · relevancy " + Number(ev.attrs.answer_relevancy).toFixed(2), "", "eval");
+    if (retries.length || breaker) fact("Reliability", retries.length + " retries with backoff" + (breaker ? "; circuit breaker open, fails fast 30 s" : ""), "warn", "rel");
     if (answer) {
-      if (paused) fact("Approval", "awaiting RM: " + paused.detail, "hitl");
-      else if (rej) fact("Approval", "rejected: " + rej.detail, "bad");
-      else if (verified) fact("Approval", verified.detail + (outbox ? "; outbox, idempotency keys" : ""), "ok");
+      if (paused) fact("Approval", "awaiting RM: " + paused.detail, "hitl", "hitl");
+      else if (rej) fact("Approval", "rejected: " + rej.detail, "bad", "hitl");
+      else if (verified) fact("Approval", verified.detail + (outbox ? "; outbox, idempotency keys" : ""), "ok", "hitl");
       else fact("Approval", "not needed");
     }
     fact("Latency", fmtMs(wall) + " in-process (local mocks)");
 
     /* path pills, coloured by lane */
     if (ing.length) {
-      pillAdd("C", "Knowledge ingestion");
-      if (mg.length) pillAdd("B", "Model gateway: " + mg.length + " embeddings");
-      if (by("Vector + keyword index").length) pillAdd("B", "Index refreshed");
-      if (inval) pillAdd("A", "Semantic cache invalidated");
-      if (obs) pillAdd("D", "Trace");
+      pillAdd("C", "Knowledge ingestion", "", "ingest");
+      if (mg.length) pillAdd("B", "Model gateway: " + mg.length + " embeddings", "", "emb");
+      if (by("Vector + keyword index").length) pillAdd("B", "Index refreshed", "", "retr");
+      if (inval) pillAdd("A", "Semantic cache invalidated", "", "cache-inv");
+      if (obs) pillAdd("D", "Trace", "", "obs");
       return R;
     }
-    if (gw) pillAdd("A", "API gateway", statusClass(gw.status) === "bad" ? "bad" : "");
-    if (inG) pillAdd("A", "Input guardrails" + (statusClass(inG.status) === "bad" ? " ✗" : ""), statusClass(inG.status) === "bad" ? "bad" : "");
-    if (hit || miss) pillAdd("A", "Semantic cache: " + (hit ? "HIT" : "MISS"));
-    if (route || plan) pillAdd("A", "Router: " + (plan ? "planner, " + plan.attrs.steps + " steps" : /fast/.test(route.name) ? "fast path" : route.name.replace(/^route:\s*/, "")));
+    if (gw) pillAdd("A", "API gateway", statusClass(gw.status) === "bad" ? "bad" : "", "id");
+    if (inG) pillAdd("A", "Input guardrails" + (statusClass(inG.status) === "bad" ? " ✗" : ""), statusClass(inG.status) === "bad" ? "bad" : "", "in");
+    if (hit || miss) pillAdd("A", "Semantic cache: " + (hit ? "HIT" : "MISS"), "", "cache");
+    if (route || plan) pillAdd("A", "Router: " + (plan ? "planner, " + plan.attrs.steps + " steps" : /fast/.test(route.name) ? "fast path" : route.name.replace(/^route:\s*/, "")), "", "route");
     uniq(agents.map(function (s) { return s.component; })).forEach(function (c) {
       var ss = agents.filter(function (s) { return s.component === c; }), w = worst(ss);
-      pillAdd("B", c + (ss.length > 1 ? " ×" + ss.length : "") + (w === "bad" ? " ✗" : ""), w === "bad" ? "bad" : w === "warn" ? "warn" : "");
+      pillAdd("B", c + (ss.length > 1 ? " ×" + ss.length : "") + (w === "bad" ? " ✗" : ""), w === "bad" ? "bad" : w === "warn" ? "warn" : "", "agent:" + c);
     });
-    if (tools.length) pillAdd("B", "Tool gateway" + (tools.length > 1 ? " ×" + tools.length : "") + (denied.length ? " ✗" : ""), denied.length ? "bad" : "");
-    if (downNames.length) pillAdd("B", downNames.join(", ") + " down", "warn");
-    if (retr.length) pillAdd("B", "Retrieval" + (best < thr ? " below gate" : ""), best < thr ? "bad" : "");
+    if (tools.length) pillAdd("B", "Tool gateway" + (tools.length > 1 ? " ×" + tools.length : "") + (denied.length ? " ✗" : ""), denied.length ? "bad" : "", "tools");
+    if (downNames.length) pillAdd("B", downNames.join(", ") + " down", "warn", "tools");
+    if (retr.length) pillAdd("B", "Retrieval" + (best < thr ? " below gate" : ""), best < thr ? "bad" : "", "retr");
     if (models.length) {
       var fb = models.some(function (m) { return !mok[m]; });
       pillAdd("B", "Model gateway" + (fb ? (models.some(function (m) { return /fallback/.test(m) && mok[m]; }) ? ": fallback" : ": no model") : ""),
-        fb ? (models.some(function (m) { return mok[m] && /primary|fallback/.test(m); }) ? "warn" : "bad") : "");
+        fb ? (models.some(function (m) { return mok[m] && /primary|fallback/.test(m); }) ? "warn" : "bad") : "", "model");
     }
-    if (hitl.length) pillAdd("B", "Human in the loop" + (paused ? ": paused" : rej ? ": replay blocked" : ": verified"), rej ? "bad" : "hitl");
-    if (one("Systems of record", /commit/)) pillAdd("B", "CRM commit");
-    if (outG) pillAdd("A", "Output guardrails", statusClass(outG.status) === "bad" ? "bad" : "");
-    if (state.length) pillAdd("C", "Audit + memory");
-    if (retries.length || breaker || outbox) pillAdd("D", outbox ? "Outbox" + (retries.length ? " + retry" : "") : "Retries" + (breaker ? " + breaker" : ""), outbox ? "" : "warn");
-    if (obs) pillAdd("D", ev ? "Evals + trace" : "Trace");
+    if (hitl.length) pillAdd("B", "Human in the loop" + (paused ? ": paused" : rej ? ": replay blocked" : ": verified"), rej ? "bad" : "hitl", "hitl");
+    if (one("Systems of record", /commit/)) pillAdd("B", "CRM commit", "", "crm");
+    if (outG) pillAdd("A", "Output guardrails", statusClass(outG.status) === "bad" ? "bad" : "", "verify");
+    if (state.length) pillAdd("C", "Audit + memory", "", "state");
+    if (retries.length || breaker || outbox) pillAdd("D", outbox ? "Outbox" + (retries.length ? " + retry" : "") : "Retries" + (breaker ? " + breaker" : ""), outbox ? "" : "warn", "rel");
+    if (obs) pillAdd("D", ev ? "Evals + trace" : "Trace", "", "obs");
     return R;
+  }
+
+  /* ---------- pipeline stages for playback ----------
+     Derived from the reply's own trace: spans in start_ms order are grouped into 3 to 8 stages
+     (identity, input screen, cache, routing, agent work, model, approval, verify, audit). The answer is
+     never streamed before the verify stage: playback shows the stages, then the verified answer. */
+  function spanKey(s) {
+    var c = s.component, n = String(s.name || "");
+    if (c === "API gateway + identity") return "id";
+    if (c === "Input guardrails") return "in";
+    if (c === "Semantic cache") return /^(HIT|MISS)/.test(n) ? "cache" : /^invalidate/.test(n) ? "cache-inv" : "cache-store";
+    if (c === "Router + orchestrator") return "route";
+    if (/ agent$/.test(c)) return "agent:" + c;
+    if (c === "Tool gateway (MCP)") return "tools";
+    if (c === "Systems of record") return /commit/.test(n) ? "crm" : "tools";
+    if (c === "Retrieval / RAG" || c === "Vector + keyword index") return "retr";
+    if (c === "Model gateway") return /^embedding/.test(n) ? "emb" : "model";
+    if (c === "Primary / fallback LLM") return "model";
+    if (c === "Human in the loop") return "hitl";
+    if (c === "Output guardrails") return "verify";
+    if (c === "Evaluation") return "eval";
+    if (c === "Observability") return "obs";
+    if (c === "Reliability + scale") return "rel";
+    if (c === "Release + recovery") return "flag";
+    if (c === "Knowledge ingestion") return "ingest";
+    if (String(s.lane).toUpperCase() === "C") return "state";
+    return "other";
+  }
+  function buildStages(trace) {
+    var spans = ((trace && trace.spans) || []).slice().sort(function (x, y) { return (Number(x.start_ms) - Number(y.start_ms)) || (x.span_id - y.span_id); });
+    var agents = spans.filter(function (s) { return / agent$/.test(s.component); }), multi = agents.length > 1;
+    var hasCache = spans.some(function (s) { return spanKey(s) === "cache"; });
+    var G = [], by = {}, last = null;
+    G.stageOf = new Map();
+    function get(key, kind) { if (!by[key]) { by[key] = { key: key, kind: kind, spans: [], keys: {}, phases: [] }; G.push(by[key]); } return by[key]; }
+    spans.forEach(function (s) {
+      var c = s.component, n = String(s.name || ""), k = spanKey(s), st = null;
+      if (c === "Answer to RM") return;
+      // only an agent's own work (tool calls, retrieval, model calls, retries) is folded into its stage
+      var work = /^(tools|retr|emb|model|rel|other)$/.test(k) && !(k === "model" && /router|planner/.test(n));
+      var ag = work && agents.filter(function (a) { var t = Number(s.start_ms), a0 = Number(a.start_ms); return a !== s && t >= a0 && t <= a0 + Number(a.latency_ms); })[0];
+      if (/ agent$/.test(c)) st = get("agent" + agents.indexOf(s), "agent");
+      else if (ag) {
+        // with one agent its answer-model call is its own stage; mini-model helpers stay inside the agent
+        var big = !multi && ((k === "model" && !/^mini/.test(n) && n !== "mini-llm") || (k === "rel" && /llm/.test(n)));
+        st = big ? get("model", "model") : get("agent" + agents.indexOf(ag), "agent");
+      }
+      else if (k === "id") st = get("id", "id");
+      else if (k === "in") st = get("in", "in");
+      else if (k === "cache") st = get("cache", "cache");
+      else if (k === "cache-store") st = get("audit", "audit");
+      else if (k === "route" || (k === "model" && /router|planner/.test(n))) st = get("route", "route");
+      else if (k === "model" && c === "Model gateway") st = get("model", "model");
+      else if (k === "emb") st = hasCache && !by.cache ? get("cache", "cache") : last;
+      else if (k === "hitl") st = /verify/.test(n) ? get("token", "token") : /request/.test(n) ? get("approval", "approval") : by.crm || last;
+      else if (c === "Session + memory store" && /^checkpoint saved/.test(n)) st = get("approval", "approval");
+      else if (c === "Session + memory store" && /^checkpoint loaded/.test(n)) st = get("token", "token");
+      else if (k === "crm" || (k === "rel" && /outbox|CRM/.test(n))) st = get("crm", "crm");
+      else if (k === "verify" || k === "eval") st = get("verify", "verify");
+      else if (k === "state" || k === "obs") st = get("audit", "audit");
+      else if (k === "ingest") st = get("ingest", "ingest");
+      else if (k === "flag") st = last || get("id", "id");
+      else st = last;
+      st = st || get("misc", "misc");
+      st.spans.push(s); st.keys[k] = true; last = st;
+    });
+    G.forEach(function (st, i) { st.spans.forEach(function (s) { G.stageOf.set(s, i); }); describeStage(st, agents); });
+    return G;
+  }
+  function describeStage(st, agents) {
+    var sp = st.spans, multi = agents.length > 1;
+    var f = function (comp, re) { return sp.filter(function (s) { return s.component === comp && (!re || re.test(s.name)); }); };
+    var ph = function (t, comp, lane, cls) { if (!st.phases.some(function (p) { return p.t === t; })) st.phases.push({ t: t, comp: comp, lane: lane || "B", cls: cls || "" }); };
+    var bad = function (s) { return s && statusClass(s.status) === "bad"; };
+    var done = function (t, cls, comp, lane) { st.done = { t: t, cls: cls || "ok", comp: comp || st.comp, lane: lane || st.lane }; };
+    var k = st.kind;
+    if (k === "id") {
+      var gw = f("API gateway + identity")[0] || {}, rm = (/\((rm-\d+)\)/.exec(gw.detail || "") || [])[1];
+      st.short = "Identity"; st.comp = "API gateway"; st.lane = "A";
+      ph("Verifying identity", "API gateway", "A");
+      if (bad(gw)) done("Denied: " + (gw.detail || "identity check failed"), "bad"); else done("Identity verified (OIDC" + (rm ? ", " + rm : "") + ")");
+    } else if (k === "in") {
+      var g = f("Input guardrails")[0] || {}, pii = g.attrs && g.attrs.pii_masked != null ? g.attrs.pii_masked : null;
+      st.short = "Input"; st.comp = "Input guardrails"; st.lane = "A";
+      ph("Screening input (PII masked)", "Input guardrails", "A");
+      if (bad(g)) done(/injection/i.test(g.detail || "") ? "Blocked: prompt injection" : "Blocked: " + (g.detail || "input guardrails"), "bad");
+      else done("Input screened: no injection" + (pii != null ? ", " + pii + " PII masked" : ""));
+    } else if (k === "cache") {
+      var hit = f("Semantic cache", /^HIT/)[0];
+      st.short = "Cache"; st.comp = "Semantic cache"; st.lane = "A";
+      ph("Checking semantic cache", "Semantic cache", "A");
+      done(hit ? "Cache hit, similarity " + ((/similarity ([\d.]+)/.exec(hit.detail || "") || [])[1] || "1.00") + ", still validated" : "Cache miss, answering fresh");
+    } else if (k === "route") {
+      var mini = f("Model gateway", /router/)[0], planG = f("Model gateway", /planner/)[0], plan = f("Router + orchestrator", /^plan$/)[0], route = f("Router + orchestrator", /^route/)[0];
+      st.short = "Routing"; st.comp = "Router"; st.lane = "A";
+      ph(mini ? "Routing: classifying intent (mini model)" : "Routing the request", mini ? "Model gateway" : "Router", mini ? "B" : "A");
+      if (planG) ph("Routing: planning steps (primary model)", "Model gateway", "B");
+      var m1 = route && /\((\w+), ([\d.]+)\)/.exec(route.detail || ""), m2 = route && /->\s*(.+)$/.exec(route.detail || "");
+      done(plan ? "Routing: planner, " + ((plan.attrs && plan.attrs.steps) || "?") + " steps" : m1 ? "Routing: fast path, " + m1[1] + " intent " + m1[2]
+        : m2 ? "Routing: fast path to " + m2[1] : route ? "Routing: " + route.name.replace(/^route:\s*/, "") : "Routed");
+    } else if (k === "agent") {
+      var a = sp.filter(function (s) { return / agent$/.test(s.component); })[0], n = agents.indexOf(a), comp = a.component;
+      var pre = multi ? "Step " + (n + 1) + ", " + comp.toLowerCase() : comp, fail = null, retr = null, best = 0, thr = 0;
+      var tools = f("Tool gateway (MCP)"), plain = tools.filter(function (s) { return !/^(policy-search|crm-drafts)/.test(s.name); });
+      var down = uniq(f("Systems of record").filter(function (s) { return statusClass(s.status) !== "ok"; }).map(function (s) { return s.name.split(":")[0]; }));
+      st.short = multi ? "Step " + (n + 1) : comp; st.comp = comp; st.lane = "B";
+      sp.forEach(function (s) {
+        var c = s.component, nm = String(s.name || ""), sys = nm.replace(/^[^:]*:\s*/, "");
+        if (c === "Tool gateway (MCP)") {
+          if (/^crm-drafts/.test(nm)) ph(pre + ": creating CRM drafts", "Tool gateway (MCP)");
+          else if (!/^policy-search/.test(nm)) ph(pre + ": calling " + plain.length + " tool" + (plain.length === 1 ? "" : "s") + " via MCP gateway", "Tool gateway (MCP)");
+          if (s.status === "denied") {
+            ph("Checking entitlement (OIDC + RBAC + agent + workload)", "Tool gateway (MCP)");
+            fail = fail || { t: /entitle/.test(s.detail || "") ? "Denied: not your customer" : "Denied: " + (s.detail || "tool call"), comp: "Tool gateway" };
+          }
+        } else if (c === "Systems of record" && statusClass(s.status) !== "ok") {
+          var sn = nm.split(":")[0];
+          ph(/circuit/.test(s.detail || "") ? sn + ": circuit open, failing fast" : sn + " not responding", "Systems of record", "B", "warn");
+        } else if (c === "Reliability + scale") {
+          var att = (/attempt (\d+\/\d+)/.exec(s.detail || "") || [])[1];
+          if (/^retry/.test(nm)) ph(sys + ": retry " + (att || "") + " with backoff", "Reliability + scale", "D", "warn");
+          else if (/^gave up/.test(nm)) ph("Gave up on " + sys + " after " + (att ? att.split("/")[1] : "3") + " attempts", "Reliability + scale", "D", "warn");
+          else if (/^circuit opened/.test(nm)) ph("Circuit breaker opened, failing fast for 30 s", "Reliability + scale", "D", "warn");
+          else if (/^circuit open/.test(nm)) ph(sys + " skipped, circuit open", "Reliability + scale", "D", "warn");
+        } else if (c === "Retrieval / RAG" && s.attrs && s.attrs.best_score != null) {
+          retr = s; best = Number(s.attrs.best_score) || 0; thr = Number(s.attrs.threshold) || 0;
+          ph(pre + ": searching policy (BM25 + vector)", "Retrieval / RAG");
+          ph("Checking evidence " + best.toFixed(2) + (best >= thr ? " ≥ " : " < ") + "gate " + thr.toFixed(2), "Retrieval gate");
+          if (best < thr) fail = fail || { t: "Declined: evidence " + best.toFixed(2) + " below gate " + thr.toFixed(2), comp: "Retrieval gate" };
+        } else if (c === "Model gateway" && /^mini/.test(nm)) ph(pre + ": calling mini model", "Model gateway");
+      });
+      if (!st.phases.length) ph(pre + ": working", comp);
+      if (fail) done(fail.t, "bad", fail.comp);
+      else if (retr) done(pre + ": evidence " + best.toFixed(2) + " ≥ gate " + thr.toFixed(2) + ((/;\s*(.+)$/.exec(retr.detail || "") || [])[1] ? ", " + /;\s*(.+)$/.exec(retr.detail)[1] : ""));
+      else done(comp + ": " + String(a.detail || "done").split(/[;,]/)[0] + (tools.length ? " (" + tools.length + " tool call" + (tools.length === 1 ? "" : "s") + ")" : "") +
+        (down.length ? "; " + down.join(", ") + " unavailable" : ""), statusClass(a.status) === "warn" || down.length ? "warn" : "ok");
+    } else if (k === "model") {
+      var code = "", fbOk = false, decl = null, toks = "";
+      st.short = "Model"; st.comp = "Model gateway"; st.lane = "B";
+      sp.forEach(function (s) {
+        var c = s.component, nm = String(s.name || ""), which = /fallback/.test(nm) ? "Fallback" : "Primary";
+        if (c === "Model gateway" && /^(primary|planner):/.test(nm)) { ph("Calling primary model", "Model gateway"); toks = toks || (/(\d+) tokens/.exec(s.detail || "") || [])[1] || ""; }
+        else if (c === "Primary / fallback LLM") {
+          if (bad(s)) code = (/HTTP (\d+)/.exec(s.detail || "") || [])[1] || "";
+          else if (which === "Fallback") { fbOk = true; ph("Fallback model answering", "Primary / fallback LLM", "B", "warn"); }
+        } else if (c === "Reliability + scale" && /^retry/.test(nm)) {
+          ph(which + " model down" + (code ? " (HTTP " + code + ")" : "") + ", retrying " + ((/attempt (\d+\/\d+)/.exec(s.detail || "") || [])[1] || ""), "Reliability + scale", "D", "warn");
+        } else if (c === "Model gateway" && /^fallback model/.test(nm)) ph("Switching to fallback model", "Model gateway", "B", "warn");
+        else if (c === "Model gateway" && /decline/.test(nm)) decl = s;
+      });
+      if (!st.phases.length) ph("Calling model", "Model gateway");
+      if (decl) done("Declined: no model available", "bad", "Model gateway");
+      else if (fbOk) done("Primary model down, fallback model answered", "warn");
+      else done("Primary model answered" + (toks ? " (" + toks + " tokens)" : ""));
+    } else if (k === "approval") {
+      var p = f("Human in the loop", /request/)[0] || {};
+      st.short = "Approval"; st.comp = "Human in the loop"; st.lane = "B";
+      ph("Saving checkpoint", "Session + memory store", "C"); ph("Requesting your approval", "Human in the loop", "B", "hitl");
+      done("Paused for your approval: " + String(p.detail || "signed single-use token").split(";")[0] + ", single-use token", "hitl");
+    } else if (k === "token") {
+      var v = f("Human in the loop", /verify/)[0] || {};
+      st.short = "Token"; st.comp = "Human in the loop"; st.lane = "B";
+      ph("Verifying approval token", "Human in the loop");
+      if (f("Session + memory store", /^checkpoint loaded/).length) ph("Loading paused checkpoint", "Session + memory store", "C");
+      if (bad(v)) done(/replay|already used/.test(v.detail || "") ? "Rejected: token already used (replay)" : "Rejected: " + (v.detail || "approval"), "bad");
+      else done("Approval token valid: " + (v.detail || "verified"));
+    } else if (k === "crm") {
+      var ob = f("Reliability + scale", /outbox/)[0], cm = f("Systems of record", /commit/)[0];
+      st.short = "CRM write"; st.comp = "Systems of record"; st.lane = "B";
+      ph("Writing to CRM via outbox" + (ob && ob.detail ? " (" + ob.detail + ")" : ""), "Reliability + scale", "D");
+      f("Reliability + scale", /^retry/).forEach(function (s) { ph("CRM retry " + ((/attempt (\d+\/\d+)/.exec(s.detail || "") || [])[1] || "") + ", idempotency keys stop duplicates", "Reliability + scale", "D", "warn"); });
+      if (f("Human in the loop", /used up/).length) ph("Approval token used up, replay blocked", "Human in the loop");
+      done(cm ? "CRM: " + String(cm.detail || "committed").replace(/ by idempotency.*$/, "").replace(/(\d+) duplicate\(s\)/, function (m, d) { return d + (d === "1" ? " duplicate" : " duplicates"); })
+        : "Writes queued in the outbox", cm && statusClass(cm.status) === "ok" ? "ok" : "warn");
+    } else if (k === "verify") {
+      var o = f("Output guardrails")[0], e = f("Evaluation")[0];
+      st.short = "Verify"; st.comp = "Output guardrails"; st.lane = "A";
+      if (o) ph("Verifying answer (output guardrails)", "Output guardrails", "A");
+      if (bad(o)) done("Blocked by output guardrails: " + (o.detail || ""), "bad");
+      else done(o ? "Answer verified: " + (o.detail || "checks passed") : "Answer scored");
+    } else if (k === "audit") {
+      var sec = f("Secure storage")[0], num = sec && (/#(\d+)/.exec(sec.name) || [])[1];
+      st.short = "Audit"; st.comp = "Secure storage"; st.lane = "C";
+      ph("Writing audit", "Secure storage", "C");
+      done("Audit " + (num ? "#" + num + " " : "") + "written" + (f("Semantic cache", /stored/).length ? ", answer cached" : "") +
+        (f("Session + memory store", /episodic/).length ? ", memory updated" : "") + (f("Observability").length ? ", trace exported" : ""));
+    } else {
+      st.short = humanize(k); st.comp = sp[0] ? sp[0].component : ""; st.lane = sp[0] ? String(sp[0].lane).toUpperCase() : "B";
+      ph(st.comp || "Working", st.comp, st.lane);
+      done(st.comp + " done", worst(sp) === "bad" ? "bad" : "ok");
+    }
+  }
+  function stagesOf(it) {
+    if (!it.stages) it.stages = it.type === "reply" && it.trace ? buildStages(it.trace) : [];
+    return it.stages;
+  }
+  function verdictOf(G, a) {
+    var fail = G.filter(function (s) { return s.done.cls === "bad"; })[0], st = a && a.status;
+    if (fail) {
+      var where = fail.done.comp === "Human in the loop" ? "the approval check" : String(fail.done.comp || "").toLowerCase();
+      return { cls: (STATUS[st] || [statusClass(st)])[0] === "warn" ? "warn" : "bad", text: (st === "declined" ? "Declined at " : "Stopped at ") + where, title: fail.done.t };
+    }
+    var v = G.filter(function (s) { return s.kind === "verify"; })[0], tk = G.filter(function (s) { return s.kind === "token"; })[0];
+    if (v) return { cls: "ok", text: "Verified", title: v.done.t + ". The answer is released only after this check." };
+    if (tk) return { cls: "ok", text: "Approval verified", title: tk.done.t };
+    return { cls: "ok", text: "Checked", title: "" };
   }
 
   /* ---------- conversations ---------- */
@@ -744,18 +1024,43 @@ svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor;
       (why.length ? '<div class="why">' + why.map(function (n) { return "Reason: " + esc(n); }).join("<br>") + "</div>" : "") + "</div>";
   }
   var DRAFT_LABEL = { note: "Note", task: "Task", email: "Email draft · you send" };
+  function stageIcon(cls) { return ico(cls === "bad" ? "i-x" : cls === "warn" || cls === "hitl" ? "i-warn" : "i-check"); }
+  function runLi(st) {
+    return '<li class="' + st.done.cls + '"><span class="ri">' + stageIcon(st.done.cls) + '</span><span class="rl">' + esc(st.done.t) + '</span><span class="rcmp">' + esc(st.done.comp || "") + "</span></li>";
+  }
+  function tickHtml(st) { return '<span class="tk ' + st.done.cls + '">' + stageIcon(st.done.cls) + esc(st.short) + "</span>"; }
+  // While a reply animates, the head is hidden and the run block shows the live stage line; at the verify moment
+  // the run block collapses into the head's verdict chip, which stays as a toggle for the stage list.
+  function rheadHtml(it, G, anim) {
+    var a = it.answer || {}, v = verdictOf(G, a), open = !!it.stepsOpen;
+    var h = '<div class="rhead"' + (anim ? " hidden" : "") + '><span class="sr">Copilot reply</span>' + stPill(a.status || "answered") + (it.live ? '<span class="st live">live</span>' : "");
+    if (G.length) h += '<button type="button" class="vchip ' + v.cls + '" data-act="steps" aria-expanded="' + open + '" title="' + esc(v.title) + '">' + stageIcon(v.cls) + esc(v.text) +
+      '<span class="vn">· ' + G.length + ' stages</span><span class="car" aria-hidden="true"></span></button>';
+    h += "</div>";
+    if (G.length && !anim) h += '<ol class="run-list" aria-label="Pipeline stages"' + (open ? "" : " hidden") + ">" + G.map(runLi).join("") + "</ol>";
+    return h;
+  }
+  function runHtml(it) {
+    var open = !!it.stepsOpen;
+    return '<div class="run"><button type="button" class="ticks" data-act="steps" aria-expanded="' + open + '" aria-label="Completed stages" hidden><span class="car" aria-hidden="true"></span></button>' +
+      '<ol class="run-list" aria-label="Pipeline stages"' + (open ? "" : " hidden") + "></ol>" +
+      '<div class="now" role="status"><span class="ni"><span class="spin"></span></span><span class="nl">Receiving request</span><span class="nc"></span>' +
+      '<button type="button" class="skip" data-act="skip">Skip</button></div></div>';
+  }
   function replyHtml(it, idx) {
-    var a = it.answer || {}, R = analyze(it.trace, a);
-    var h = '<div class="bot selectable fade" data-i="' + idx + '" data-reply="1"><div class="bav" aria-hidden="true">AI</div><div class="reply">' +
-      '<div class="rhead"><span class="sr">Copilot reply</span>' + stPill(a.status || "answered") + (it.live ? '<span class="st live">live</span>' : "") + "</div>";
+    var a = it.answer || {}, R = analyze(it.trace, a), G = stagesOf(it), anim = !!it.anim;
+    // while animating, every body part starts hidden and is revealed in order after the verify stage
+    var rv = function (html) { return anim ? html.replace(/^<(\w+)/, "<$1 data-rv hidden") : html; };
+    var h = '<div class="bot selectable fade" data-i="' + idx + '" data-reply="1"' + (anim ? ' aria-busy="true"' : "") + '><div class="bav" aria-hidden="true">AI</div><div class="reply">' +
+      rheadHtml(it, G, anim) + (anim ? runHtml(it) : "");
     var card = statusCard(a);
-    h += card || '<div class="md">' + md(a.text) + "</div>";
-    if (!card) (a.notices || []).forEach(function (n) { h += '<div class="banner" role="note">' + ico("i-warn") + "<span>" + inline(n) + "</span></div>"; });
+    h += rv(card || '<div class="md">' + md(a.text) + "</div>");
+    if (!card) (a.notices || []).forEach(function (n) { h += rv('<div class="banner" role="note">' + ico("i-warn") + "<span>" + inline(n) + "</span></div>"); });
     var cites = a.citations || [], srcs = [];
     (a.sources || []).forEach(function (s) { if (!srcs.some(function (x) { return x.system === s.system; })) srcs.push(s); });
     if (cites.length || srcs.length) {
       var lastDoc = null;
-      h += '<div class="cites">' + cites.map(function (c) {
+      h += rv('<div class="cites">') + cites.map(function (c) {
         var doc = (c.doc_title || c.doc_id || "").replace(/^SME\s+/, ""), lbl = (doc === lastDoc ? "" : doc + " ") + "§" + c.clause + " · v" + c.version;
         lastDoc = doc;
         return '<span class="cite lane-tint" title="' + esc((c.doc_title || "") + ": " + (c.heading || "") + (c.score ? " · retrieval score " + Number(c.score).toFixed(2) : "")) + '">' + esc(lbl) + "</span>";
@@ -766,17 +1071,17 @@ svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor;
       }).join("") + "</div>";
     }
     if (a.drafts && a.drafts.length) {
-      h += '<div class="drafts">' + a.drafts.map(function (d) {
+      h += rv('<div class="drafts">') + a.drafts.map(function (d) {
         return '<details class="dr"><summary><small>' + esc(DRAFT_LABEL[d.kind] || d.kind) + (d.due_date ? " · due " + esc(fmtDue(d.due_date)) : "") + "</small>" + esc(d.title) +
           '</summary><div class="db">' + esc(d.body) + "</div></details>";
       }).join("") + "</div>";
       var ds = it.draftState || "open";
-      if (a.approval_token && ds === "open") h += '<div class="dactions"><button type="button" class="btn pri" data-act="approve" data-i="' + idx + '">' + ico("i-check") + "Approve</button>" +
+      if (a.approval_token && ds === "open") h += rv('<div class="dactions">') + '<button type="button" class="btn pri" data-act="approve" data-i="' + idx + '">' + ico("i-check") + "Approve</button>" +
         '<button type="button" class="btn" data-act="reject" data-i="' + idx + '">Reject</button><span class="small">Signed single-use token · expires in 5 min</span></div>';
       else if (ds === "approved") h += '<div class="dactions"><span class="st ok">' + ico("i-check") + 'Approved</span><span class="small">Token sent to POST /approve</span></div>';
       else if (ds === "rejected") h += '<div class="dactions"><span class="st bad">Rejected</span><span class="small">Drafts discarded, nothing written to the CRM</span></div>';
     }
-    h += '<div class="strip" aria-label="Architecture summary">' + R.strip.map(function (s) { return '<span class="sg ' + s.cls + '">' + s.html + "</span>"; }).join("") +
+    h += rv('<div class="strip" aria-label="Architecture summary">') + R.strip.map(function (s) { return '<span class="sg ' + s.cls + '">' + s.html + "</span>"; }).join("") +
       '<button type="button" class="epb" data-act="trace" data-i="' + idx + '">Execution path ' + ico("i-next") + "</button></div>";
     return h + "</div></div>";
   }
@@ -839,8 +1144,10 @@ svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor;
     el.replaceWith(tmp.firstElementChild);
     markSelected();
   }
-  function showTyping() {
-    $("thread").insertAdjacentHTML("beforeend", '<div class="bot" id="typing"><div class="bav" aria-hidden="true">AI</div><div class="reply"><div class="typing" role="status" aria-label="Copilot is thinking"><span></span><span></span><span></span></div></div></div>');
+  function showTyping(text) {
+    // live calls: the trace is not known until the verified answer arrives, so only a generic status shows here
+    $("thread").insertAdjacentHTML("beforeend", '<div class="bot fade" id="typing"><div class="bav" aria-hidden="true">AI</div><div class="reply"><div class="run">' +
+      '<div class="now" role="status"><span class="ni"><span class="spin"></span></span><span class="nl">' + esc(text || "Running the pipeline. Answers are verified before release.") + "</span></div></div></div></div>");
     scrollEnd();
   }
   function hideTyping() { var t = $("typing"); if (t) t.remove(); }
@@ -851,20 +1158,171 @@ svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor;
     if (sc.scrollHeight - el.offsetTop > sc.clientHeight) sc.scrollTop = el.offsetTop - 14; else scrollEnd();
   }
   function finish(conv, el) {
-    S.busy = false;
+    S.busy = false; S.net = false; P.skip = false; syncSkip();
     if (conv !== cur()) return;
     var ch = continueHtml(conv);
     if (ch && !$("cont")) $("thread").insertAdjacentHTML("beforeend", ch);
     scrollToEl(el);
   }
 
+  /* ---------- player: cancellable waits, skip, interrupt ----------
+     Every pause in playback goes through wait(). Skipping resolves all pending waits at once and makes later
+     waits instant, so a playback always runs to its final state and nothing is left half drawn. */
+  var P = { skip: false, timers: [], follow: true };
+  function wait(ms) {
+    if (REDUCED || P.skip || !ms) return Promise.resolve();
+    return new Promise(function (res) {
+      var t = { res: res };
+      t.id = setTimeout(function () { var k = P.timers.indexOf(t); if (k >= 0) P.timers.splice(k, 1); res(); }, ms);
+      P.timers.push(t);
+    });
+  }
+  function series(fns) { return fns.reduce(function (p, f) { return p.then(function () { if (!P.skip) return f(); }); }, Promise.resolve()); }
+  function skipAnim() {
+    P.skip = true;
+    P.timers.splice(0).forEach(function (t) { clearTimeout(t.id); t.res(); });
+  }
+  function syncSkip() { $("skip-btn").hidden = !(S.busy && !S.net) || REDUCED; }
+  // Runs one playback chain; S.busy is true until it has fully finished.
+  function run(conv, make) {
+    S.busy = true; P.skip = REDUCED; P.follow = true; syncSkip();
+    var p = Promise.resolve().then(make).catch(function (err) { console.error(err); return null; }).then(function (el) { finish(conv, el); });
+    S.chain = p;
+    return p;
+  }
+  // User actions never wait for an animation: the running one is completed instantly, then the action runs.
+  function interrupt(fn) {
+    if (!S.busy) return fn();
+    if (S.net) return;
+    skipAnim();
+    (S.chain || Promise.resolve()).then(function () { if (!S.busy) fn(); });
+  }
+  function follow(first) {
+    var sc = $("scroll");
+    if (!P.follow || !first || !first.isConnected) return;
+    var target = Math.min(sc.scrollHeight - sc.clientHeight, first.offsetTop - 14);
+    if (target > sc.scrollTop) sc.scrollTop = target;
+  }
+  ["wheel", "touchmove"].forEach(function (ev) { $("scroll").addEventListener(ev, function () { if (S.busy) P.follow = false; }, { passive: true }); });
+
+  /* ---------- reply animation: stages from the trace, the verify moment, then the verified answer ---------- */
+  function newAnim(it) { var G = stagesOf(it); return { st: G.map(function () { return "pend"; }), end: false }; }
+  function animateReply(conv, idx, first) {
+    var it = conv.items[idx], A = it.anim, G = stagesOf(it);
+    var node = function () { return conv === cur() ? $("thread").querySelector('[data-reply][data-i="' + idx + '"]') : null; };
+    var q = function (sel) { var n = node(); return n ? n.querySelector(sel) : null; };
+    var paint = function () { if (S.sel && S.sel.conv === conv && S.sel.i === idx) paintPanel(it); };
+    var phases = G.reduce(function (n, s) { return n + Math.max(1, s.phases.length); }, 0);
+    var unit = Math.max(210, Math.min(400, 2100 / Math.max(1, phases)));
+    var jobs = [];
+    G.forEach(function (st, i) {
+      jobs.push(function () {
+        A.st[i] = "act"; paint();
+        return series(st.phases.map(function (p) { return function () { setNow(q, p, true); follow(first); return wait(unit); }; }));
+      });
+      jobs.push(function () {
+        var cls = st.done.cls;
+        A.st[i] = cls; paint(); addTick(q, st);
+        if (cls === "ok") return wait(40);
+        setNow(q, { t: st.done.t, comp: st.done.comp, lane: st.done.lane, cls: cls }, false);
+        return wait(cls === "bad" ? 700 : 420);
+      });
+    });
+    jobs.push(function () { A.end = true; paint(); showVerdict(q, G); follow(first); return wait(460); });
+    jobs.push(function () { return revealBody(node(), first); });
+    return series(jobs).then(function () {
+      it.anim = null;
+      if (conv !== cur()) return;
+      refreshItem(conv, idx);
+      if (S.sel && S.sel.conv === conv && S.sel.i === idx) renderPanel();
+    });
+  }
+  function setNow(q, p, active) {
+    var now = q(".now"); if (!now) return;
+    now.className = "now " + (p.cls || "");
+    var ni = now.querySelector(".ni"), nl = now.querySelector(".nl"), nc = now.querySelector(".nc");
+    ni.innerHTML = active ? '<span class="spin"></span>' : stageIcon(p.cls);
+    nl.textContent = p.t;
+    nl.classList.remove("swap"); void nl.offsetWidth; nl.classList.add("swap");
+    nc.innerHTML = p.comp ? '<i style="--lane:' + (LV[p.lane] || LV.B) + '"></i>' + esc(p.comp) : "";
+  }
+  function addTick(q, st) {
+    var ticks = q(".ticks"), list = q(".run-list");
+    if (!ticks) return;
+    ticks.hidden = false;
+    ticks.lastElementChild.insertAdjacentHTML("beforebegin", tickHtml(st));
+    if (list) list.insertAdjacentHTML("beforeend", runLi(st));
+  }
+  function showVerdict(q, G) {
+    var head = q(".rhead"), runEl = q(".run"), list = q(".run-list");
+    if (!head) return;
+    head.hidden = false;
+    var chip = head.querySelector(".vchip"), pill = head.querySelector(".st");
+    if (chip) {
+      chip.classList.add("pop");
+      var note = chip.classList.contains("ok") ? (G.some(function (s) { return s.kind === "verify"; }) ? "Output guardrails passed, answer released" : "Checks passed")
+        : chip.classList.contains("warn") ? "Safe decline, nothing guessed" : "Stopped before anything was released";
+      chip.insertAdjacentHTML("afterend", '<span class="vnote" aria-hidden="true">' + esc(note) + "</span>");
+    }
+    if (pill) pill.classList.add("fadein");
+    if (list) head.after(list);
+    if (runEl) runEl.remove();
+  }
+  function revealBody(n, first) {
+    if (!n) return Promise.resolve();
+    var parts = Array.prototype.slice.call(n.querySelectorAll("[data-rv]"));
+    return series(parts.map(function (p) {
+      return function () {
+        if (p.classList.contains("md")) return streamMd(p, first);
+        if (p.classList.contains("cites")) {
+          var kids = Array.prototype.slice.call(p.children);
+          kids.forEach(function (k) { k.classList.add("pre"); });
+          p.hidden = false; follow(first);
+          return series(kids.map(function (k) { return function () { k.classList.add("on"); return wait(70); }; }));
+        }
+        var strip = p.classList.contains("strip");
+        p.hidden = false; p.classList.add(strip ? "fadein" : "popin"); follow(first);
+        return wait(strip ? 250 : p.classList.contains("scard") ? 400 : 160);
+      };
+    }));
+  }
+  // Word-by-word reveal of an answer that has already passed the output guardrails (about 0.5 to 1.1 s).
+  function streamMd(box, first) {
+    var words = [], texts = [], tw = document.createTreeWalker(box, NodeFilter.SHOW_TEXT), t;
+    while ((t = tw.nextNode())) texts.push(t);
+    texts.forEach(function (tn) {
+      var frag = document.createDocumentFragment();
+      tn.nodeValue.split(/(\s+)/).forEach(function (tok) {
+        if (!tok) return;
+        if (/^\s+$/.test(tok)) { frag.appendChild(document.createTextNode(tok)); return; }
+        var w = document.createElement("span"); w.className = "w"; w.textContent = tok; frag.appendChild(w); words.push(w);
+      });
+      tn.parentNode.replaceChild(frag, tn);
+    });
+    Array.prototype.forEach.call(box.querySelectorAll("p, h3, li"), function (b) { b.hidden = true; });
+    box.hidden = false;
+    var tick = 40, total = Math.max(450, Math.min(950, words.length * 16)), per = Math.max(1, Math.ceil(words.length / (total / tick))), k = 0;
+    function step() {
+      if (P.skip || k >= words.length) return Promise.resolve();
+      for (var j = 0; j < per && k < words.length; j++, k++) {
+        var w = words[k], b = w.closest("p, h3, li");
+        if (b && b.hidden) b.hidden = false;
+        w.classList.add("on");
+      }
+      follow(first);
+      return wait(tick).then(step);
+    }
+    return step();
+  }
+
   /* ---------- playback ---------- */
   function playStep(conv, i, animate) {
-    var steps = conv.run.steps, step = steps[i], wait = animate ? delay : function () { return Promise.resolve(); }, first = null;
+    animate = animate && !REDUCED;
+    var steps = conv.run.steps, step = steps[i], pause = animate ? wait : function () { return Promise.resolve(); }, first = null;
     if (!step) return Promise.resolve(null);
     if (steps.length > 1) first = appendItem(conv, { type: "note", text: "Step " + (i + 1) + " of " + steps.length + " · " + (step.label || "") });
     if (step.event) {
-      return wait(260).then(function () {
+      return pause(260).then(function () {
         conv.played = i + 1;
         var el = appendItem(conv, { type: "event", step: step, trace: step.trace, label: step.label });
         select(conv, conv.items.length - 1);
@@ -872,18 +1330,20 @@ svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor;
       });
     }
     var inp = parseInput(step);
-    return wait(80).then(function () {
+    return pause(80).then(function () {
       var el = appendItem(conv, { type: "me", text: inp.kind === "approve" ? "Approve and save to CRM" : inp.text, kind: inp.kind, rm: inp.rm || S.rm });
       first = first || el;
-      if (conv === cur()) { scrollEnd(); if (animate && !REDUCED) showTyping(); }
-      return wait(650);
+      if (conv === cur()) scrollEnd();
+      return pause(380);
     }).then(function () {
-      hideTyping();
       conv.played = i + 1;
-      appendItem(conv, { type: "reply", answer: step.answer, trace: step.trace || (step.answer && step.answer.trace), label: step.label });
+      var it = { type: "reply", answer: step.answer, trace: step.trace || (step.answer && step.answer.trace), label: step.label };
+      if (animate && !P.skip && stagesOf(it).length) it.anim = newAnim(it);
+      appendItem(conv, it);
       select(conv, conv.items.length - 1);
-      return first;
-    });
+      follow(first);
+      return it.anim ? animateReply(conv, conv.items.length - 1, first) : null;
+    }).then(function () { return first; });
   }
   function playRange(conv, from, to) {
     var p = Promise.resolve(null);
@@ -898,25 +1358,23 @@ svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor;
     if (c.kind === "recorded" && !c.items.length) {
       c.items.push({ type: "intro", title: c.run.title ? c.run.title.replace(/^\d+[a-z]?[.)]\s+/, "") : c.title, text: c.run.summary || "" });
       S.sel = null; renderThread(); renderPanel();
-      S.busy = true;
-      return playRange(c, 0, upto || 0).then(function (el) { finish(c, el); });
+      return run(c, function () { return playRange(c, 0, upto || 0); });
     }
     renderThread();
     var last = -1;
     c.items.forEach(function (it, k) { if (it.type === "reply" || it.type === "event") last = k; });
     S.sel = last >= 0 ? { conv: c, i: last } : null;
     markSelected(); renderPanel(); scrollEnd();
-    if (upto != null && c.kind === "recorded" && c.played <= upto) {
-      S.busy = true;
-      return playRange(c, c.played, upto).then(function (el) { finish(c, el); });
-    }
+    if (upto != null && c.kind === "recorded" && c.played <= upto) return run(c, function () { return playRange(c, c.played, upto); });
     return Promise.resolve();
   }
-  function replay() { var c = cur(); if (c.kind !== "recorded" || S.busy) return; c.items = []; c.played = 0; openConv(S.cur); }
+  function replay() {
+    interrupt(function () { var c = cur(); if (c.kind !== "recorded") return; c.items = []; c.played = 0; openConv(S.cur); });
+  }
   function nextStep() {
     var c = cur(); if (c.kind !== "recorded" || S.busy || c.played >= c.run.steps.length) return;
-    S.busy = true; var ct = $("cont"); if (ct) ct.remove();
-    playStep(c, c.played, true).then(function (el) { finish(c, el); });
+    var ct = $("cont"); if (ct) ct.remove();
+    run(c, function () { return playStep(c, c.played, true); });
   }
 
   /* ---------- selection + execution panel ---------- */
@@ -935,14 +1393,14 @@ svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor;
         '<div class="empty">' + (cur().kind === "new" && !cur().items.length ? "Open a conversation on the left." : "Select a copilot reply to see how it ran.") + "</div>";
       return;
     }
-    var a = it.answer || null, R = analyze(it.trace, a), spans = R.spans;
+    var a = it.answer || null, R = analyze(it.trace, a), spans = R.spans, G = stagesOf(it);
     $("panel-meta").textContent = spans.length + " steps · " + fmtMs(R.wall);
     $("panel-sub").textContent = it.label || "";
     var h = '<p class="explain">Each step below was written by one box on the architecture diagram. Timings come from local mocks: they show order, not production latency.</p>';
     h += '<div class="path" aria-label="Path through the diagram">' + R.pills.map(function (p, k) {
-      return (k ? '<span class="arrow" aria-hidden="true">→</span>' : "") + '<span class="p lane-tint ' + p.cls + '" style="--lane:' + LV[p.lane] + '" title="Lane ' + p.lane + '">' + esc(p.t) + "</span>";
+      return (k ? '<span class="arrow" aria-hidden="true">→</span>' : "") + '<span class="p lane-tint ' + p.cls + '" data-k="' + esc(p.key) + '" style="--lane:' + LV[p.lane] + '" title="Lane ' + p.lane + '">' + esc(p.t) + "</span>";
     }).join("") + "</div>";
-    h += '<dl class="facts-grid">' + R.facts.map(function (f) { return "<dt>" + esc(f.k) + '</dt><dd class="' + f.cls + '">' + esc(f.v) + "</dd>"; }).join("") + "</dl>";
+    h += '<dl class="facts-grid">' + R.facts.map(function (f) { return "<dt>" + esc(f.k) + '</dt><dd class="' + f.cls + '" data-k="' + esc(f.key) + '">' + esc(f.v) + "</dd>"; }).join("") + "</dl>";
     h += '<div class="lanes">';
     LANES.forEach(function (lane) {
       var ls = spans.filter(function (s) { return String(s.lane).toUpperCase() === lane.id; }).sort(function (x, y) { return (x.start_ms - y.start_ms) || (x.span_id - y.span_id); });
@@ -952,13 +1410,41 @@ svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor;
         '<span class="cnt">' + (flagged ? '<span class="flag">' + flagged + " flagged</span> · " : "") + ls.length + "</span></summary>";
       h += ls.map(function (s) {
         var at = s.attrs || {}, attrs = Object.keys(at).map(function (k) { return '<span class="attr"><span>' + esc(k) + ":</span> " + esc(fmtVal(at[k])) + "</span>"; }).join("");
-        return '<button type="button" class="row" aria-expanded="false"><span class="r1"><span class="rc"><b>' + esc(s.component) + "</b> <i>" + esc(s.name) + "</i></span>" +
+        var si = G.stageOf ? G.stageOf.get(s) : undefined;
+        return '<button type="button" class="row" aria-expanded="false"' + (si != null ? ' data-s="' + si + '"' : G.length ? ' data-s="-1"' : "") + '><span class="r1"><span class="rc"><b>' + esc(s.component) + "</b> <i>" + esc(s.name) + "</i></span>" +
           '<span class="st ' + statusClass(s.status) + '">' + esc(s.status || "ok") + '</span><span class="lat">' + fmtMs(s.latency_ms) + "</span></span>" +
           '<span class="rd">' + (s.detail ? esc(s.detail) : "No detail recorded.") + (attrs ? '<span class="attrs">' + attrs + "</span>" : "") + "</span></button>";
       }).join("") || '<div class="row" style="cursor:default"><i class="small">Not touched by this reply.</i></div>';
       h += "</details>";
     });
     body.innerHTML = h + "</div>";
+    if (it.anim) paintPanel(it);
+  }
+  // During playback: pills go pending (grey), active (pulse in lane colour), done; key facts fill in when the
+  // last stage that produces them completes; trace rows brighten as their stage runs.
+  function keyState(G, A, k) {
+    if (!A) return "done";
+    var ix = [];
+    G.forEach(function (s, i) { if (s.keys[k]) ix.push(i); });
+    if (k === "end" || !ix.length) return A.end ? "done" : "pend";
+    if (ix.some(function (i) { return A.st[i] === "act"; })) return "act";
+    if (A.st[ix[ix.length - 1]] !== "pend") return "done";
+    return ix.some(function (i) { return A.st[i] !== "pend"; }) ? "part" : "pend";
+  }
+  function paintPanel(it) {
+    var A = it.anim, G = stagesOf(it), body = $("panel-body");
+    Array.prototype.forEach.call(body.querySelectorAll("[data-k]"), function (el) {
+      var st = keyState(G, A, el.getAttribute("data-k"));
+      if (el.tagName === "DD") {
+        var was = el.classList.contains("pend");
+        el.classList.toggle("pend", st !== "done");
+        if (was && st === "done") el.classList.add("fill");
+      } else { el.classList.toggle("pend", st === "pend"); el.classList.toggle("act", st === "act"); }
+    });
+    Array.prototype.forEach.call(body.querySelectorAll(".row[data-s]"), function (r) {
+      var i = Number(r.getAttribute("data-s")), st = !A ? "done" : i < 0 ? (A.end ? "done" : "pend") : A.st[i];
+      r.classList.toggle("pend", st === "pend"); r.classList.toggle("act", st === "act");
+    });
   }
   $("panel-body").addEventListener("click", function (e) {
     var r = e.target.closest("button.row"); if (r) r.setAttribute("aria-expanded", String(r.getAttribute("aria-expanded") !== "true"));
@@ -1027,15 +1513,18 @@ svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor;
     $("user-name").textContent = RMS[rm].name; $("user-av").textContent = RMS[rm].initials; $("user-sub").textContent = "RM · " + rm + " ▾";
   }
   $("convs").addEventListener("click", function (e) {
-    var b = e.target.closest("[data-conv]"); if (!b || S.busy) return;
-    var k = b.getAttribute("data-conv"); openConv(k === "new" ? "new" : Number(k));
+    var b = e.target.closest("[data-conv]"); if (!b) return;
+    var k = b.getAttribute("data-conv");
+    interrupt(function () { openConv(k === "new" ? "new" : Number(k)); });
   });
   $("new-chat").addEventListener("click", function () {
-    if (S.busy) return;
-    if (S.cur === "new") { S.newConv.items = []; S.newConv.preview = ""; }
-    openConv("new"); $("ask").focus();
+    interrupt(function () {
+      if (S.cur === "new") { S.newConv.items = []; S.newConv.preview = ""; }
+      openConv("new"); $("ask").focus();
+    });
   });
   $("replay-btn").addEventListener("click", replay);
+  $("skip-btn").addEventListener("click", skipAnim);
   $("cust").addEventListener("change", function (e) { if (e.target.id === "cust-sel") S.liveCustomer = e.target.value; });
 
   /* ---------- thread events ---------- */
@@ -1044,6 +1533,8 @@ svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor;
     if (act) {
       var kind = act.getAttribute("data-act"), idx = Number(act.getAttribute("data-i"));
       if (kind === "next") return nextStep();
+      if (kind === "skip") return skipAnim();
+      if (kind === "steps") return toggleSteps(act, c);
       if (kind === "trace") { select(c, idx); return showPath(act); }
       if (kind === "approve") return approve(c, idx);
       if (kind === "reject") return reject(c, idx);
@@ -1052,17 +1543,26 @@ svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor;
     var r = e.target.closest("[data-reply]");
     if (r) select(c, Number(r.getAttribute("data-i")));
   });
+  function toggleSteps(btn, c) {
+    var r = btn.closest("[data-reply]"), list = r && r.querySelector(".run-list"), open = btn.getAttribute("aria-expanded") !== "true";
+    if (!list) return;
+    list.hidden = !open;
+    Array.prototype.forEach.call(r.querySelectorAll('[data-act="steps"]'), function (b) { b.setAttribute("aria-expanded", String(open)); });
+    var it = c.items[Number(r.getAttribute("data-i"))]; if (it) it.stepsOpen = open;
+  }
   function approve(c, idx) {
-    if (S.busy) return;
+    if (S.busy) return interrupt(function () { approve(c, idx); });
     var it = c.items[idx];
+    if (it.draftState && it.draftState !== "open") return;
     if (it.live) return approveLive(c, idx);
     var nxt = c.run && c.run.steps[c.played];
     it.draftState = "approved"; refreshItem(c, idx);
-    if (nxt && parseInput(nxt).kind === "approve") { S.busy = true; playStep(c, c.played, true).then(function (el) { finish(c, el); }); }
+    if (nxt && parseInput(nxt).kind === "approve") run(c, function () { return playStep(c, c.played, true); });
     else { appendItem(c, { type: "sys", html: "No recorded approval step for this conversation." }); finish(c, null); }
   }
   function reject(c, idx) {
-    if (S.busy) return;
+    if (S.busy) return interrupt(function () { reject(c, idx); });
+    if (c.items[idx].draftState && c.items[idx].draftState !== "open") return;
     c.items[idx].draftState = "rejected"; refreshItem(c, idx);
     appendItem(c, { type: "sys", html: "You rejected the drafts, so nothing was written to the CRM." + (c.kind === "recorded" ? " Use <b>Replay</b> to see the approval path." : "") });
     finish(c, null);
@@ -1082,7 +1582,7 @@ svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor;
         }).join("") + "</div></section>";
       }).join("");
   }
-  $("welcome").addEventListener("click", function (e) { var b = e.target.closest("[data-open]"); if (b && !S.busy) openConv(Number(b.getAttribute("data-open"))); });
+  $("welcome").addEventListener("click", function (e) { var b = e.target.closest("[data-open]"); if (b) interrupt(function () { openConv(Number(b.getAttribute("data-open"))); }); });
   var SUGG = [];
   function buildSuggestions() {
     SUGG = [];
@@ -1094,7 +1594,8 @@ svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor;
     $("sugg").innerHTML = SUGG.map(function (s, i) { return '<button type="button" data-sg="' + i + '" title="' + esc(s.inp.text) + '">' + esc(s.label) + "</button>"; }).join("");
   }
   $("sugg").addEventListener("click", function (e) {
-    var b = e.target.closest("[data-sg]"); if (!b || S.busy) return;
+    var b = e.target.closest("[data-sg]"); if (!b) return;
+    if (S.busy) return interrupt(function () { b.click(); });
     var s = SUGG[Number(b.getAttribute("data-sg"))];
     if (S.live) return askLive({ text: s.inp.kind === "action" ? "" : s.inp.text, action: s.inp.action || null, customer_id: s.customer }, s.inp.text, s.inp.kind);
     var c = S.convs[s.conv];
@@ -1111,7 +1612,8 @@ svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor;
   $("composer").addEventListener("submit", function (e) { e.preventDefault(); submit(); });
   function submit() {
     var text = ask.value.trim();
-    if (!text || S.busy) return;
+    if (!text) return;
+    if (S.busy) return interrupt(submit);
     ask.value = ""; autosize();
     var action = /^draft follow-up/i.test(text) ? "draft_follow_up" : /^prepare (a )?brief\b/i.test(text) ? "prepare_brief" : null;
     if (S.live) {
@@ -1169,39 +1671,49 @@ svg.i { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor;
   }
   function askLive(body, shown, kind) {
     if (cur().kind === "recorded") { S.cur = "new"; }
-    var c = S.newConv, rm = S.rm;
+    var c = S.newConv, rm = S.rm, el = null;
     if (!c.items.length) c.preview = shown;
-    S.busy = true;
-    renderThread();
-    var el = appendItem(c, { type: "me", text: kind === "action" ? humanize(body.action) + (body.customer_id ? " for " + (CUSTOMERS[body.customer_id] || body.customer_id) : "") : shown, kind: kind === "action" ? "action" : "text", rm: rm });
-    renderSidebar(); renderHeader(); showTyping();
-    return post("/ask", { text: body.text || "", action: body.action || null, customer_id: body.customer_id || null }, rm).then(function (ans) {
-      hideTyping();
-      appendItem(c, { type: "reply", answer: ans, trace: ans.trace, live: true, label: "Live: POST /ask as " + RMS[rm].name + " (" + rm + ")" });
-      select(c, c.items.length - 1);
-    }).catch(function (err) {
-      hideTyping();
-      appendItem(c, { type: "sys", html: "The live call failed (" + esc(err.message) + "). Nothing was sent to the copilot." });
-    }).then(function () { finish(c, el); });
+    S.net = true;
+    return run(c, function () {
+      renderThread();
+      el = appendItem(c, { type: "me", text: kind === "action" ? humanize(body.action) + (body.customer_id ? " for " + (CUSTOMERS[body.customer_id] || body.customer_id) : "") : shown, kind: kind === "action" ? "action" : "text", rm: rm });
+      renderSidebar(); renderHeader(); showTyping();
+      return post("/ask", { text: body.text || "", action: body.action || null, customer_id: body.customer_id || null }, rm).then(function (ans) {
+        return liveReply(c, { type: "reply", answer: ans, trace: ans.trace, live: true, label: "Live: POST /ask as " + RMS[rm].name + " (" + rm + ")" }, el);
+      }).catch(function (err) {
+        S.net = false; syncSkip(); hideTyping();
+        appendItem(c, { type: "sys", html: "The live call failed (" + esc(err.message) + "). Nothing was sent to the copilot." });
+      }).then(function () { return el; });
+    });
+  }
+  // A live answer has already passed the output guardrails on the server; its own trace drives the same playback.
+  function liveReply(c, it, first) {
+    S.net = false; P.skip = REDUCED; syncSkip(); hideTyping();
+    if (!REDUCED && stagesOf(it).length) it.anim = newAnim(it);
+    appendItem(c, it);
+    var idx = c.items.length - 1;
+    select(c, idx);
+    return it.anim ? animateReply(c, idx, first) : null;
   }
   function approveLive(c, idx) {
-    var it = c.items[idx], rm = S.rm;
-    S.busy = true;
-    it.draftState = "approved"; refreshItem(c, idx);
-    var el = appendItem(c, { type: "me", text: "Approve and save to CRM", kind: "approve", rm: rm });
-    showTyping();
-    post("/approve", { approval_token: it.answer.approval_token }, rm).then(function (ans) {
-      hideTyping();
-      appendItem(c, { type: "reply", answer: ans, trace: ans.trace, live: true, label: "Live: POST /approve as " + RMS[rm].name + " (" + rm + ")" });
-      select(c, c.items.length - 1);
-    }).catch(function (err) {
-      hideTyping();
-      appendItem(c, { type: "sys", html: "POST /approve failed (" + esc(err.message) + ")." });
-    }).then(function () { finish(c, el); });
+    var it = c.items[idx], rm = S.rm, el = null;
+    S.net = true;
+    return run(c, function () {
+      it.draftState = "approved"; refreshItem(c, idx);
+      el = appendItem(c, { type: "me", text: "Approve and save to CRM", kind: "approve", rm: rm });
+      showTyping("Checking the approval token and writing to the CRM.");
+      return post("/approve", { approval_token: it.answer.approval_token }, rm).then(function (ans) {
+        return liveReply(c, { type: "reply", answer: ans, trace: ans.trace, live: true, label: "Live: POST /approve as " + RMS[rm].name + " (" + rm + ")" }, el);
+      }).catch(function (err) {
+        S.net = false; syncSkip(); hideTyping();
+        appendItem(c, { type: "sys", html: "POST /approve failed (" + esc(err.message) + ")." });
+      }).then(function () { return el; });
+    });
   }
   $("live-run-btn").addEventListener("click", function () {
     var c = cur(), btn = $("live-run-btn");
-    if (c.kind !== "recorded" || S.busy) return;
+    if (c.kind !== "recorded") return;
+    if (S.busy) return interrupt(function () { btn.click(); });
     btn.disabled = true;
     post("/demo/scenarios/" + encodeURIComponent(c.id), {}, S.rm).then(function (run) {
       if (!run || !run.steps) throw new Error("unexpected response");
