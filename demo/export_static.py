@@ -1,4 +1,5 @@
-"""Export the demo UI as one self-contained static page: demo/dist/index.html.
+"""Export the demo UI (a chat app with an execution-path panel) as one self-contained static page:
+demo/dist/index.html.
 
 Runs every scenario through demo.scenarios.run_all() and embeds the recorded runs (answers and
 traces) as JSON in the page, so it can be opened from disk or any static host with no server and
@@ -47,11 +48,14 @@ def load_runs() -> list[dict]:
     for p in (ROOT / "src", ROOT):
         if str(p) not in sys.path:
             sys.path.insert(0, str(p))
-    from demo.scenarios import run_all  # noqa: PLC0415
+    from demo.scenarios import SCENARIOS, run_all  # noqa: PLC0415
 
     runs = json.loads(json.dumps(run_all(), default=_jsonable))
     if not runs:
         raise SystemExit("run_all() returned no runs")
+    missing = {s.id for s in SCENARIOS} - {r.get("id") for r in runs}
+    if missing:
+        raise SystemExit(f"scenarios missing from the export: {sorted(missing)}")
     return runs
 
 
